@@ -1,5 +1,7 @@
 # Changelog
 
+## v1.2.0
+
 ## v1.1.1
 
 A small release for the first two reports from a user, issues #1 and #2 on GitHub. The details, by area:
