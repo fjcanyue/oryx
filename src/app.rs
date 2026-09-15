@@ -5660,6 +5660,12 @@ impl App {
         if drifted {
             self.refresh_search_rects();
         }
+        // The page paints at one whole pixel per frame, read once here
+        // by the direct paint, the band, its slice and the caret: a
+        // keystroke's direct frame and the band frame after it would
+        // otherwise land a pixel apart at a fractional scroll, the
+        // seat of a caret row at a fractional display scale.
+        let frame_y = scroll::frame_offset(self.scroll_y);
         let lay = self.layout.as_ref().expect("layout exists");
         let mut highlight: Vec<DecoRect> = match &self.selection {
             Some(sel) => selection::rects(sel, lay, &self.document, &mut self.fonts)
@@ -5682,7 +5688,7 @@ impl App {
         let band_usable = self.band.as_ref().is_some_and(|b| {
             b.width == avail_px
                 && b.height == size.height * 5
-                && !b.needs_repaint(self.scroll_y, size.height as f32)
+                && !b.needs_repaint(frame_y, size.height as f32)
         });
         let size_tag = (size.width, size.height);
         let mut direct: Option<Vec<u32>> = None;
@@ -5696,7 +5702,7 @@ impl App {
                     &mut self.fonts,
                     &mut self.media,
                     &highlight,
-                    self.scroll_y,
+                    frame_y,
                     avail_px,
                     size.height,
                 ));
@@ -5709,7 +5715,7 @@ impl App {
                     &mut self.fonts,
                     &mut self.media,
                     &highlight,
-                    self.scroll_y,
+                    frame_y,
                     avail_px,
                     size.height,
                 ));
@@ -5722,7 +5728,7 @@ impl App {
                 .band
                 .as_ref()
                 .expect("band exists")
-                .view(self.scroll_y, size.height),
+                .view(frame_y, size.height),
         };
 
         let Some(gfx) = self.gfx.as_mut() else {
@@ -5792,7 +5798,7 @@ impl App {
                         size.width,
                         size.height,
                         inset,
-                        self.scroll_y,
+                        frame_y,
                         self.scale,
                         b,
                         self.theme.text.body,
@@ -6454,6 +6460,48 @@ mod tests {
         );
         assert_eq!(super::wheel_notches(&mut carry, -0.5), 0);
         assert_eq!(super::wheel_notches(&mut carry, -0.5), -1);
+    }
+
+    #[test]
+    fn the_caret_paints_on_the_frame_offset() {
+        use oryx::paint::scroll::frame_offset;
+        let (width, height) = (8u32, 80u32);
+        let caret = oryx::edit::caret::CaretBox {
+            x: 1.0,
+            y: 100.0,
+            h: 10.0,
+        };
+        let color = oryx::style::theme::Rgba {
+            r: 255,
+            g: 255,
+            b: 255,
+            a: 255,
+        };
+        let scroll = 50.6;
+        let mut frame = vec![0u32; (width * height) as usize];
+        super::draw_caret(
+            &mut frame,
+            width,
+            height,
+            0,
+            frame_offset(scroll),
+            1.0,
+            caret,
+            color,
+        );
+        let first = frame
+            .iter()
+            .position(|p| *p != 0)
+            .map(|i| i / width as usize)
+            .expect("the caret painted");
+        // The band paints document y 100 at row 100 - floor(50.6); the
+        // caret lands on that same row instead of one above it.
+        assert_eq!(first as f32, caret.y - frame_offset(scroll));
+        assert_ne!(
+            first as f32,
+            (caret.y - scroll).floor(),
+            "the raw position sat a pixel off"
+        );
     }
 
     #[test]

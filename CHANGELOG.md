@@ -11,6 +11,7 @@
 ### Editor
 
 - Empty lines added at the end of a file now get their rows. Before, each Enter at the end of a long file added a line the page did not show: the caret left the screen and the wheel could not reach it. The file's final line break still opens no empty row.
+- The page no longer moves by a pixel on every keystroke at a fractional display scale, such as 125%. Each frame now paints the page at a whole pixel, and the caret sits on the text it belongs to.
 
 ## v1.1.1
 

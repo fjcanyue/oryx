@@ -368,6 +368,76 @@ mod tests {
     }
 
     #[test]
+    fn the_direct_frame_and_the_band_slice_agree_at_a_fractional_scroll() {
+        use crate::paint::scroll::{frame_offset, BandCache};
+        let theme = Theme::default_dark();
+        let mut fonts = FontStore::new();
+        let mut media = MediaCache::new(PathBuf::from("."));
+        let text: String = (0..40).map(|i| format!("let value_{i} = {i};\n")).collect();
+        let doc = load::code_document(Some("rust"), &text);
+        let lay = layout(
+            &doc,
+            &theme,
+            &mut fonts,
+            &mut media,
+            &ViewConfig::default(),
+            300.0,
+        );
+        let (width, viewport) = (300u32, 100u32);
+        let scroll = 50.6;
+        let exact = band(
+            &lay,
+            &doc,
+            &theme,
+            &mut fonts,
+            &mut media,
+            &[],
+            scroll,
+            width,
+            viewport,
+        );
+        let whole = band(
+            &lay,
+            &doc,
+            &theme,
+            &mut fonts,
+            &mut media,
+            &[],
+            50.0,
+            width,
+            viewport,
+        );
+        assert_ne!(exact, whole, "a fraction of a pixel moves the glyphs");
+        let direct = band(
+            &lay,
+            &doc,
+            &theme,
+            &mut fonts,
+            &mut media,
+            &[],
+            frame_offset(scroll),
+            width,
+            viewport,
+        );
+        let cache = BandCache::repaint(
+            &lay,
+            &doc,
+            &theme,
+            &mut fonts,
+            &mut media,
+            &[],
+            scroll,
+            width,
+            viewport,
+        );
+        assert_eq!(
+            direct,
+            cache.view(frame_offset(scroll), viewport),
+            "the frame after a keystroke and the band frame after it paint the same pixels"
+        );
+    }
+
+    #[test]
     fn a_code_file_paints_the_page_in_the_code_background() {
         let theme = Theme::default_dark();
         let doc = load::code_document(Some("rust"), "let x = 1;\n");

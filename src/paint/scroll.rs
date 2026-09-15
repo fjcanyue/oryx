@@ -12,6 +12,16 @@ pub fn clamp(y: f32, doc_height: f32, viewport_h: f32) -> f32 {
     y.clamp(0.0, (doc_height - viewport_h).max(0.0))
 }
 
+/// The offset a frame paints the page at: the scroll position floored
+/// to a whole device pixel. The position itself keeps its fraction,
+/// since a touchpad delivers fractions of a pixel per event and a slow
+/// scroll accumulates them; the frame reads this once and hands it to
+/// every path, the direct paint, the band, its slice and the overlays,
+/// so no two frames of one position land a pixel apart.
+pub fn frame_offset(scroll_y: f32) -> f32 {
+    scroll_y.floor()
+}
+
 /// How long a window size holds still before a deferred relayout runs.
 pub const SETTLE: Duration = Duration::from_millis(150);
 
@@ -151,6 +161,23 @@ mod tests {
         assert_eq!(clamp(-10.0, 1000.0, 300.0), 0.0);
         assert_eq!(clamp(2000.0, 1000.0, 300.0), 700.0);
         assert_eq!(clamp(100.0, 200.0, 300.0), 0.0);
+    }
+
+    #[test]
+    fn the_frame_offset_floors_and_the_state_keeps_its_fraction() {
+        assert_eq!(frame_offset(50.6), 50.0);
+        assert_eq!(frame_offset(50.0), 50.0);
+        assert_eq!(
+            frame_offset(clamp(1000.0, 700.5, 300.0)),
+            400.0,
+            "a clamp to a fractional maximum floors under it"
+        );
+        let mut y = 0.0;
+        for _ in 0..4 {
+            y = clamp(y + 0.3, 1000.0, 300.0);
+        }
+        assert!((y - 1.2).abs() < 1e-6, "four touchpad steps add up: {y}");
+        assert_eq!(frame_offset(y), 1.0);
     }
 
     #[test]
