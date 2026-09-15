@@ -2062,6 +2062,55 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_justified_rtl_wrap_boxes_the_space_left_of_the_line_too() {
+        // The gate's claim of 15/09/2026: a tailed run on a justified
+        // RTL line would miss the stretch. The last group of a line
+        // carries no stretched space, so the tail's anchor is exact.
+        let doc = markdown::parse(format!("{RTL_LINE} {RTL_LINE} {RTL_LINE} {RTL_LINE}"));
+        let mut fonts = FontStore::new();
+        let mut media = MediaCache::new(PathBuf::from("."));
+        let l = layout(
+            &doc,
+            &Theme::default_dark(),
+            &mut fonts,
+            &mut media,
+            &ViewConfig {
+                justify: true,
+                ..ViewConfig::default()
+            },
+            500.0,
+        );
+        let spaces = crate::ui::search::matches(&doc, " ");
+        let mut ys: Vec<i32> = l
+            .runs
+            .iter()
+            .filter(|r| r.block == 0)
+            .map(|r| r.y.round() as i32)
+            .collect();
+        ys.dedup();
+        assert!(
+            ys.len() >= 3,
+            "the text wraps and justifies: {} lines",
+            ys.len()
+        );
+        let mut at_wraps = 0;
+        for m in &spaces {
+            let (x, y, w, _) = one_box(m, &l, &doc, &mut fonts);
+            assert!(w > 0.0 && x.is_finite(), "{x} {w}");
+            let left = l
+                .runs
+                .iter()
+                .filter(|r| r.block == 0 && r.y == y)
+                .map(|r| r.x)
+                .fold(f32::MAX, f32::min);
+            if x + w <= left + 0.5 {
+                at_wraps += 1;
+            }
+        }
+        assert_eq!(at_wraps, ys.len() - 1, "one box left of each wrapped line");
+    }
+
     // ---- Line-break matches: a box at the end of each line broken ----
 
     fn lay_code(text: &str) -> (Document, LayoutDoc, FontStore) {

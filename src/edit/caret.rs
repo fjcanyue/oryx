@@ -199,12 +199,25 @@ pub fn model_pos(doc: &Document, offset: usize) -> Option<ModelPos> {
     for (bi, block) in doc.blocks.iter().enumerate() {
         match &block.kind {
             BlockKind::CodeBlock { lines, .. } => {
-                for li in 0..lines.len() {
-                    let range = lines.line_range(li)?;
+                // The lines stand sorted and contiguous, so the first
+                // whose end reaches the offset is the one holding it: a
+                // binary search, since a code file is one block of every
+                // line it has and this runs per keystroke and per frame.
+                let (mut lo, mut hi) = (0, lines.len());
+                while lo < hi {
+                    let mid = lo + (hi - lo) / 2;
+                    if lines.line_range(mid)?.end < offset {
+                        lo = mid + 1;
+                    } else {
+                        hi = mid;
+                    }
+                }
+                if lo < lines.len() {
+                    let range = lines.line_range(lo)?;
                     if range.start <= offset && offset <= range.end {
                         return Some(ModelPos {
                             block: bi,
-                            span: li,
+                            span: lo,
                             byte: offset - range.start,
                         });
                     }
@@ -606,9 +619,15 @@ impl Caret {
     ) -> Option<CaretBox> {
         // The offset after the file's final newline has no row of its
         // own: it stands where the last row ends, as `model_pos` says.
-        let offset = model_pos(doc, self.offset)
-            .and_then(|pos| model_offset(doc, &pos))
-            .map_or(self.offset, |at| at.min(self.offset));
+        // Only the file's end can be that offset, so every other frame
+        // skips the lookup.
+        let offset = if self.offset >= doc.source.len() {
+            model_pos(doc, self.offset)
+                .and_then(|pos| model_offset(doc, &pos))
+                .map_or(self.offset, |at| at.min(self.offset))
+        } else {
+            self.offset
+        };
         let lines = lines_of(lay, doc);
         if lines.is_empty() {
             return seat_without_rows(fonts, lay, doc, offset);
@@ -1578,6 +1597,80 @@ mod tests {
     /// The load drops a file's trailing empty lines from the model, so
     /// the caret can stand past the last modeled line; a selection
     /// reaching there speaks the last line's end.
+    /// Ledger probe: the caret's geometry at the end of a huge code
+    /// file, the cost a frame pays while the caret blinks there. Run
+    /// with `cargo test --release --lib caret_geometry_measured -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn caret_geometry_measured() {
+        let text: String = (0..300_000).map(|i| format!("let v{i} = {i};\n")).collect();
+        let doc = code_doc(&text);
+        let mut fonts = FontStore::new();
+        let mut media = MediaCache::new(PathBuf::from("."));
+        let (mut l, mut pass) = crate::layout::layout_begin(&doc, &ViewConfig::default(), 2000.0);
+        pass.retain_around(0.0, 600.0);
+        crate::layout::layout_more(
+            &doc,
+            &Theme::default_dark(),
+            &mut fonts,
+            &mut media,
+            &ViewConfig::default(),
+            &mut l,
+            &mut pass,
+            None,
+        );
+        // The window sits at the end, where the app keeps it while the
+        // caret types there.
+        let end_scroll = l.height - 600.0;
+        crate::layout::window_to(
+            &doc,
+            &Theme::default_dark(),
+            &mut fonts,
+            &mut media,
+            &ViewConfig::default(),
+            &mut l,
+            None,
+            end_scroll,
+            600.0,
+            true,
+        );
+        l.index_more();
+        let end = doc.source.len();
+        let started = std::time::Instant::now();
+        for _ in 0..100 {
+            let _ = Caret::at(end).geometry(&l, &doc, &mut fonts);
+        }
+        println!(
+            "caret geometry at the end of 300k lines: {:?} per call",
+            started.elapsed() / 100
+        );
+    }
+
+    #[test]
+    fn model_pos_finds_every_offset_of_a_long_file() {
+        let text: String = (0..1000).map(|i| format!("line {i}\n")).collect();
+        let doc = code_doc(&text);
+        let BlockKind::CodeBlock { lines, .. } = &doc.blocks[0].kind else {
+            panic!("a code file");
+        };
+        // The reference: the first line whose range holds the offset.
+        let reference = |offset: usize| {
+            (0..lines.len()).find_map(|li| {
+                let r = lines.line_range(li).unwrap();
+                (r.start <= offset && offset <= r.end).then_some((li, offset - r.start))
+            })
+        };
+        for offset in 0..text.len() {
+            let got = model_pos(&doc, offset).map(|p| (p.span, p.byte));
+            assert_eq!(got, reference(offset), "offset {offset}");
+        }
+        assert_eq!(
+            model_pos(&doc, text.len()).map(|p| (p.span, p.byte)),
+            Some((999, 8)),
+            "after the final newline, the last line's end"
+        );
+    }
+
     #[test]
     fn the_offset_after_the_final_newline_stands_on_the_last_row() {
         let doc = code_doc("a\nb\n\n");
