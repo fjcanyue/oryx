@@ -437,6 +437,17 @@ impl LayoutDoc {
         }
     }
 
+    /// The whole display text of the span a model reference slices, the
+    /// run's own bytes included: the highlight boxes and the match
+    /// anchors read past a run's visible end into the whitespace layout
+    /// trimmed there. Empty for a side reference.
+    pub fn span_text<'a>(&self, doc: &'a Document, run: &TextRun) -> &'a str {
+        match run.text {
+            TextRef::Side { .. } => "",
+            TextRef::Model { .. } => model_text(doc, run.block, run.span),
+        }
+    }
+
     /// The resolved family a run shaped with.
     pub fn run_family<'a>(&'a self, run: &'a TextRun) -> &'a str {
         &self.families[run.family as usize]

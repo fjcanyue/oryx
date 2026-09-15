@@ -709,12 +709,15 @@ pub fn rects_window(
 /// matches. A match with no placed run answers with its recorded block
 /// top from the layout's table, so a windowed layout still positions
 /// every match; `f32::MAX` only where nothing was ever placed.
-pub fn match_tops(lay: &LayoutDoc, matches: &[Selection]) -> Vec<f32> {
+pub fn match_tops(lay: &LayoutDoc, doc: &Document, matches: &[Selection]) -> Vec<f32> {
     let mut tops = vec![f32::MAX; matches.len()];
-    for run in &lay.runs {
-        let Some((iv_start, iv_end)) = run_interval(run) else {
+    for (index, run) in lay.runs.iter().enumerate() {
+        let Some((iv_start, mut iv_end)) = run_interval(run) else {
             continue;
         };
+        iv_end.byte = iv_end
+            .byte
+            .saturating_add(run_tail(lay, doc, index, run).len());
         let first = matches.partition_point(|m| m.ordered().1 <= iv_start);
         for (i, m) in matches.iter().enumerate().skip(first) {
             let (a, b) = m.ordered();
@@ -740,13 +743,14 @@ pub fn match_tops(lay: &LayoutDoc, matches: &[Selection]) -> Vec<f32> {
 /// Where the current match sits: the topmost overlapping run's y and
 /// text size, for scrolling it into view. None while nothing placed
 /// covers it.
-pub fn match_anchor(lay: &LayoutDoc, m: &Selection) -> Option<(f32, f32)> {
+pub fn match_anchor(lay: &LayoutDoc, doc: &Document, m: &Selection) -> Option<(f32, f32)> {
     let (a, b) = m.ordered();
     let mut best: Option<(f32, f32)> = None;
-    for run in &lay.runs {
-        let Some((s, e)) = run_interval(run) else {
+    for (index, run) in lay.runs.iter().enumerate() {
+        let Some((s, mut e)) = run_interval(run) else {
             continue;
         };
+        e.byte = e.byte.saturating_add(run_tail(lay, doc, index, run).len());
         if e <= a || b <= s {
             continue;
         }
@@ -755,6 +759,50 @@ pub fn match_anchor(lay: &LayoutDoc, m: &Selection) -> Option<(f32, f32)> {
         }
     }
     best
+}
+
+/// The whitespace past a run's visible end that the run owns: the spaces
+/// and tabs following its bytes in its span's text, up to the next run of
+/// the same span or the span's end. Layout trims the whitespace glyphs at
+/// the end of every visual line, a wrap included, so run widths match the
+/// visible text; the bytes stay real, the caret already stands in them
+/// (`caret::x_of`), and a box over them is measured the same way, by
+/// shaping the run's text with this tail appended. Empty for most runs.
+fn run_tail<'a>(lay: &LayoutDoc, doc: &'a Document, index: usize, run: &TextRun) -> &'a str {
+    let TextRef::Model { start, len } = run.text else {
+        return "";
+    };
+    if run.span == MARKER_SPAN {
+        return "";
+    }
+    let end = (start + len) as usize;
+    let after = &lay.span_text(doc, run)[end..];
+    let mut tail = after
+        .bytes()
+        .take_while(|b| *b == b' ' || *b == b'\t')
+        .count();
+    if tail == 0 {
+        return "";
+    }
+    // Whitespace a later visual line of the same span starts with is
+    // that line's own. The runs of one span stand together in layout
+    // order, so the scan ends at the first run of another span.
+    for next in &lay.runs[index + 1..] {
+        if next.block != run.block || next.span != run.span {
+            break;
+        }
+        if let TextRef::Model {
+            start: next_start, ..
+        } = next.text
+        {
+            let next_start = next_start as usize;
+            if next_start >= end {
+                tail = tail.min(next_start - end);
+                break;
+            }
+        }
+    }
+    &after[..tail]
 }
 
 fn rects_for(
@@ -773,10 +821,12 @@ fn rects_for(
     let mut prev: Option<(ModelPos, f32)> = None;
     for index in indices {
         let run = &lay.runs[index];
-        let Some((iv_start, iv_end)) = run_interval(run) else {
+        let Some((iv_start, mut iv_end)) = run_interval(run) else {
             prev = None;
             continue;
         };
+        let tail = run_tail(lay, doc, index, run);
+        iv_end.byte = iv_end.byte.saturating_add(tail.len());
         if iv_end <= a || b <= iv_start {
             prev = None;
             continue;
@@ -790,34 +840,55 @@ fn rects_for(
         let precise = matches!(run.text, TextRef::Model { .. });
         // Boundary x of each selection end. A fully covered end sits at
         // the run's logical edge, which is the right edge on an RTL
-        // run; the box spans whatever order the two land in.
+        // run; the box spans whatever order the two land in. A run with
+        // a tail shapes its text with the tail appended, so a boundary
+        // inside the tail measures like any other and the logical end
+        // moves past the visible text.
         let cut_start = precise && iv_start < a;
         let cut_end = precise && b < iv_end;
-        let (x0, x1) = if !cut_start && !cut_end {
+        let (x0, x1) = if !cut_start && !cut_end && tail.is_empty() {
             (run.x, run.x + run.width)
         } else {
-            let rtl = run_rtl(cache, fonts, index, run, text, family);
-            let edge = |logical_start: bool| {
-                if logical_start != rtl {
-                    run.x
+            let shaped: Cow<str> = if tail.is_empty() {
+                Cow::Borrowed(text)
+            } else {
+                Cow::Owned(format!("{text}{tail}"))
+            };
+            let shaped = &*shaped;
+            let visible = text.len();
+            let rtl = run_rtl(cache, fonts, index, run, shaped, family);
+            let edge = |cache: &mut ShapeCache, fonts: &mut FontStore, logical_start: bool| {
+                if logical_start {
+                    if rtl {
+                        run.x + run.width
+                    } else {
+                        run.x
+                    }
+                } else if tail.is_empty() {
+                    if rtl {
+                        run.x
+                    } else {
+                        run.x + run.width
+                    }
                 } else {
-                    run.x + run.width
+                    let ch = shaped.chars().count();
+                    run.x + prefix_width(cache, fonts, index, run, shaped, visible, family, ch)
                 }
             };
             let boundary = |cache: &mut ShapeCache, fonts: &mut FontStore, pos: &ModelPos| {
-                let byte = pos.byte.saturating_sub(run_base).min(text.len());
-                let ch = text[..floor_boundary(text, byte)].chars().count();
-                run.x + prefix_width(cache, fonts, index, run, text, family, ch)
+                let byte = pos.byte.saturating_sub(run_base).min(shaped.len());
+                let ch = shaped[..floor_boundary(shaped, byte)].chars().count();
+                run.x + prefix_width(cache, fonts, index, run, shaped, visible, family, ch)
             };
             let bx_a = if cut_start {
                 boundary(cache, fonts, &a)
             } else {
-                edge(true)
+                edge(cache, fonts, true)
             };
             let bx_b = if cut_end {
                 boundary(cache, fonts, &b)
             } else {
-                edge(false)
+                edge(cache, fonts, false)
             };
             (bx_a.min(bx_b), bx_a.max(bx_b))
         };
@@ -946,10 +1017,12 @@ pub(crate) fn char_index_at(
     best.1
 }
 
-/// X offset (from the run's x) of the boundary before character `ch`,
-/// shaping through the cache so a run shapes once per pass however
-/// often it is asked. The offset carries the paint anchor, so an RTL
-/// fragment's boundaries land where paint draws its glyphs.
+/// X offset (from the run's x) of the boundary before character `ch` of
+/// `text`, shaping through the cache so a run shapes once per pass
+/// however often it is asked. `text` is the run's own text, `visible`
+/// bytes of it, with its whitespace tail appended when it has one. The
+/// offset carries the paint anchor, so an RTL fragment's boundaries land
+/// where paint draws its glyphs.
 #[allow(clippy::too_many_arguments)]
 fn prefix_width(
     cache: &mut ShapeCache,
@@ -957,6 +1030,7 @@ fn prefix_width(
     index: usize,
     run: &TextRun,
     text: &str,
+    visible: usize,
     family: &str,
     ch: usize,
 ) -> f32 {
@@ -968,7 +1042,32 @@ fn prefix_width(
         return 0.0;
     };
     let rtl = line.rtl;
-    let anchor = if rtl { run.width - line.line_w } else { 0.0 };
+    let tailed = visible < text.len();
+    // Where the fragment's x = 0 lands against the run's x. Shaped alone,
+    // an LTR fragment starts at the run's left edge and an RTL one ends
+    // at its right edge, the difference to its own width being a
+    // justified line's stretch. With the tail along, the run's own
+    // glyphs map onto the run's box and the tail falls past its logical
+    // end: right of an LTR run, left of an RTL one.
+    let anchor = if !tailed {
+        if rtl {
+            run.width - line.line_w
+        } else {
+            0.0
+        }
+    } else {
+        let own_left = line
+            .glyphs
+            .iter()
+            .filter(|g| g.start < visible)
+            .map(|g| g.x)
+            .fold(f32::MAX, f32::min);
+        if own_left == f32::MAX {
+            0.0
+        } else {
+            -own_left
+        }
+    };
     let byte = byte_of_char(text, ch);
     if byte < text.len() {
         if let Some(x) = boundary_x(line.glyphs, text, byte) {
@@ -976,6 +1075,21 @@ fn prefix_width(
         }
     }
     // The boundary after the last character: the line's logical end.
+    if tailed {
+        let far = if rtl {
+            line.glyphs.iter().map(|g| g.x).fold(f32::MAX, f32::min)
+        } else {
+            line.glyphs
+                .iter()
+                .map(|g| g.x + g.w)
+                .fold(f32::MIN, f32::max)
+        };
+        return if far.is_finite() {
+            anchor + far
+        } else {
+            anchor
+        };
+    }
     if rtl {
         anchor
     } else {
@@ -1035,7 +1149,7 @@ mod tests {
     use crate::style::theme::Theme;
     use std::path::PathBuf;
 
-    fn lay_doc(source: &str) -> (Document, LayoutDoc, FontStore) {
+    fn lay_doc_at(source: &str, width: f32) -> (Document, LayoutDoc, FontStore) {
         let doc = markdown::parse(source);
         let mut fonts = FontStore::new();
         let mut media = MediaCache::new(PathBuf::from("."));
@@ -1045,9 +1159,13 @@ mod tests {
             &mut fonts,
             &mut media,
             &ViewConfig::default(),
-            2000.0,
+            width,
         );
         (doc, l, fonts)
+    }
+
+    fn lay_doc(source: &str) -> (Document, LayoutDoc, FontStore) {
+        lay_doc_at(source, 2000.0)
     }
 
     fn select_all(doc: &Document) -> Selection {
@@ -1105,9 +1223,13 @@ mod tests {
 
     #[test]
     fn cached_match_rects_equal_direct_and_share_shapings() {
-        let (doc, lay, mut fonts) =
-            lay_doc("the word the word the word here.\n\n".repeat(8).as_str());
-        let matches = crate::ui::search::matches(&doc, "word");
+        // Trailing spaces on every line: the boxes past a run's visible
+        // end go through the cache like the rest.
+        let (doc, lay, mut fonts) = lay_doc(&format!(
+            "```\n{}```\n",
+            "the word the word the word here.   \n".repeat(8)
+        ));
+        let matches = crate::ui::search::matches(&doc, " ");
         assert!(matches.len() >= 16, "the fixture is match-dense");
         let mut cache = ShapeCache::default();
         for m in &matches {
@@ -1489,6 +1611,243 @@ mod tests {
         assert!((x - run.x).abs() < 0.5);
         assert!((w - run.width).abs() < 0.5);
         assert!(h > run.size, "box covers the line height");
+    }
+
+    // ---- Whitespace past a line's visible end: the tail a run owns ----
+
+    /// The model runs of one code line, in byte order.
+    fn line_runs(l: &LayoutDoc, block: usize, line: usize) -> Vec<&TextRun> {
+        let start_of = |r: &TextRun| match r.text {
+            TextRef::Model { start, .. } => start,
+            TextRef::Side { .. } => u32::MAX,
+        };
+        let mut runs: Vec<&TextRun> = l
+            .runs
+            .iter()
+            .filter(|r| r.block == block && r.span == line && start_of(r) != u32::MAX)
+            .collect();
+        runs.sort_by_key(|r| start_of(r));
+        runs
+    }
+
+    fn one_box(
+        m: &Selection,
+        l: &LayoutDoc,
+        doc: &Document,
+        fonts: &mut FontStore,
+    ) -> (f32, f32, f32, f32) {
+        let boxes = rects(m, l, doc, fonts);
+        assert_eq!(boxes.len(), 1, "one box for {m:?}: {boxes:?}");
+        boxes[0]
+    }
+
+    fn close(a: (f32, f32, f32, f32), b: (f32, f32, f32, f32)) -> bool {
+        (a.0 - b.0).abs() < 0.6
+            && (a.1 - b.1).abs() < 0.6
+            && (a.2 - b.2).abs() < 0.6
+            && (a.3 - b.3).abs() < 0.6
+    }
+
+    #[test]
+    fn trailing_spaces_on_a_code_line_get_their_boxes() {
+        let (doc, l, mut fonts) = lay_doc("```\nalpha beta   \n```\n");
+        let spaces = crate::ui::search::matches(&doc, " ");
+        assert_eq!(spaces.len(), 4, "one between the words, three trailing");
+        let run = line_runs(&l, 0, 0)[0];
+        let (_, _, space_w, _) = one_box(&spaces[0], &l, &doc, &mut fonts);
+        for (i, m) in spaces[1..].iter().enumerate() {
+            let (x, y, w, _) = one_box(m, &l, &doc, &mut fonts);
+            let expected = run.x + run.width + i as f32 * space_w;
+            assert_eq!(y, run.y);
+            assert!(
+                (x - expected).abs() < 0.6,
+                "trailing space {i} starts at {x}, expected {expected}"
+            );
+            assert!(
+                (w - space_w).abs() < 0.6,
+                "trailing space {i} is {w} wide, a space is {space_w}"
+            );
+        }
+    }
+
+    #[test]
+    fn tabs_at_a_wrap_box_the_end_of_the_first_visual_line() {
+        let doc = markdown::parse("```\nword word word\t\tmore words after the tabs\n```\n");
+        let mut fonts = FontStore::new();
+        let mut media = MediaCache::new(PathBuf::from("."));
+        // Narrow the layout until the line wraps at the two tabs: the
+        // first visual line ends before them, the second starts after.
+        let mut found = None;
+        let mut width = 900.0;
+        while width > 100.0 && found.is_none() {
+            let l = layout(
+                &doc,
+                &Theme::default_dark(),
+                &mut fonts,
+                &mut media,
+                &ViewConfig::default(),
+                width,
+            );
+            let runs = line_runs(&l, 0, 0);
+            let ends_before_tabs = runs
+                .first()
+                .is_some_and(|r| matches!(r.text, TextRef::Model { start: 0, len: 14 }));
+            let resumes_after = runs
+                .iter()
+                .any(|r| matches!(r.text, TextRef::Model { start: 16, .. }));
+            if ends_before_tabs && resumes_after {
+                found = Some(l);
+            }
+            width -= 4.0;
+        }
+        let l = found.expect("a width wraps the line at the tabs");
+        let tabs = crate::ui::search::regex_matches(&doc, "\\t").expect("a valid pattern");
+        assert_eq!(tabs.len(), 2);
+        let first = line_runs(&l, 0, 0)[0];
+        let (x0, y0, w0, _) = one_box(&tabs[0], &l, &doc, &mut fonts);
+        let (x1, y1, w1, _) = one_box(&tabs[1], &l, &doc, &mut fonts);
+        assert_eq!(y0, first.y, "the first tab sits on the first visual line");
+        assert_eq!(y1, first.y, "so does the second");
+        assert!(
+            x0 >= first.x + first.width - 0.5,
+            "the first tab starts past the visible text: {x0} against {}",
+            first.x + first.width
+        );
+        assert!(
+            (x1 - (x0 + w0)).abs() < 0.6,
+            "the second tab follows the first: {x1} against {}",
+            x0 + w0
+        );
+        assert!(w0 > 0.0 && w1 > 0.0, "{w0} and {w1}");
+    }
+
+    #[test]
+    fn a_tab_and_a_space_mid_line_keep_their_boxes() {
+        let (doc, l, mut fonts) = lay_doc("```\ngamma\tdelta beta\n```\n");
+        let tab = crate::ui::search::regex_matches(&doc, "\\t").expect("a valid pattern");
+        let space = crate::ui::search::matches(&doc, " ");
+        assert_eq!((tab.len(), space.len()), (1, 1));
+        let got = [
+            one_box(&tab[0], &l, &doc, &mut fonts),
+            one_box(&space[0], &l, &doc, &mut fonts),
+        ];
+        // The boxes as they were before a run learned its whitespace
+        // tail, in the embedded code face.
+        let recorded = [(231.96, 56.0, 35.98, 30.0), (327.9, 56.0, 11.99, 30.0)];
+        assert!(
+            got.iter().zip(recorded).all(|(g, w)| close(*g, w)),
+            "{got:?} against the recorded {recorded:?}"
+        );
+    }
+
+    #[test]
+    fn a_space_at_a_paragraph_wrap_gets_a_box() {
+        let (doc, l, mut fonts) = lay_doc_at(&"word ".repeat(40), 400.0);
+        let spaces = crate::ui::search::matches(&doc, " ");
+        assert_eq!(spaces.len(), 39, "the paragraph's last space is stripped");
+        let mut ys: Vec<i32> = l
+            .runs
+            .iter()
+            .filter(|r| r.block == 0)
+            .map(|r| r.y.round() as i32)
+            .collect();
+        ys.dedup();
+        assert!(ys.len() >= 3, "the paragraph wraps: {} lines", ys.len());
+        // Every space has one box; the one at a wrap sits past the
+        // visible end of its line.
+        let mut at_wraps = 0;
+        for m in &spaces {
+            let (x, y, w, _) = one_box(m, &l, &doc, &mut fonts);
+            assert!(w > 0.0);
+            let right = l
+                .runs
+                .iter()
+                .filter(|r| r.block == 0 && r.y == y)
+                .map(|r| r.x + r.width)
+                .fold(f32::MIN, f32::max);
+            if x >= right - 0.5 {
+                at_wraps += 1;
+            }
+        }
+        assert_eq!(
+            at_wraps,
+            ys.len() - 1,
+            "one boxed space at the end of every wrapped line"
+        );
+    }
+
+    #[test]
+    fn a_selection_to_the_line_end_covers_the_trailing_spaces() {
+        let (doc, l, mut fonts) = lay_doc("```\nalpha beta   \n```\n");
+        let run = line_runs(&l, 0, 0)[0];
+        let spaces = crate::ui::search::matches(&doc, " ");
+        let (_, _, space_w, _) = one_box(&spaces[0], &l, &doc, &mut fonts);
+        let sel = Selection {
+            start: ModelPos {
+                block: 0,
+                span: 0,
+                byte: 0,
+            },
+            end: ModelPos {
+                block: 0,
+                span: 0,
+                byte: 13,
+            },
+        };
+        let (x, _, w, _) = one_box(&sel, &l, &doc, &mut fonts);
+        assert!((x - run.x).abs() < 0.5);
+        assert!(
+            (w - (run.width + 3.0 * space_w)).abs() < 1.0,
+            "the box runs over the three trailing spaces: {w} against {}",
+            run.width + 3.0 * space_w
+        );
+    }
+
+    #[test]
+    fn the_current_match_anchors_on_a_trailing_space() {
+        let (doc, l, _fonts) = lay_doc("```\nalpha beta   \ngamma\n```\n");
+        let spaces = crate::ui::search::matches(&doc, " ");
+        let last = spaces.last().expect("four spaces");
+        let first_line = line_runs(&l, 0, 0)[0];
+        let (top, size) =
+            match_anchor(&l, &doc, last).expect("the trailing space anchors on its line");
+        assert_eq!(top, first_line.y);
+        assert_eq!(size, first_line.size);
+        let tops = match_tops(&l, &doc, &spaces);
+        assert!(tops.iter().all(|t| *t == first_line.y), "{tops:?}");
+    }
+
+    #[test]
+    fn an_rtl_wrap_boxes_the_space_left_of_the_line() {
+        let (doc, l, mut fonts) = lay_doc_at(&format!("{RTL_LINE} {RTL_LINE} {RTL_LINE}"), 500.0);
+        let spaces = crate::ui::search::matches(&doc, " ");
+        let mut ys: Vec<i32> = l
+            .runs
+            .iter()
+            .filter(|r| r.block == 0)
+            .map(|r| r.y.round() as i32)
+            .collect();
+        ys.dedup();
+        assert!(ys.len() >= 2, "the text wraps: {} lines", ys.len());
+        let mut at_wraps = 0;
+        for m in &spaces {
+            let (x, y, w, _) = one_box(m, &l, &doc, &mut fonts);
+            assert!(w > 0.0 && x.is_finite(), "{x} {w}");
+            let left = l
+                .runs
+                .iter()
+                .filter(|r| r.block == 0 && r.y == y)
+                .map(|r| r.x)
+                .fold(f32::MAX, f32::min);
+            if x + w <= left + 0.5 {
+                at_wraps += 1;
+            }
+        }
+        assert_eq!(
+            at_wraps,
+            ys.len() - 1,
+            "the space trimmed at each wrap boxes left of its line, the logical end"
+        );
     }
 
     // ---- RTL lines: hit testing, boxes, the justified merge ----

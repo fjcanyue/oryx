@@ -3194,7 +3194,7 @@ impl App {
             state.current = index;
         } else {
             let document = &self.document;
-            let tops = selection::match_tops(lay, &state.matches);
+            let tops = selection::match_tops(lay, &self.document, &state.matches);
             state.current = match seek {
                 Some(offset) => state
                     .matches
@@ -3232,7 +3232,7 @@ impl App {
         // One shaped buffer per run for the whole pass, however many
         // matches the run holds; geometry only inside the band window.
         let mut shaped = selection::ShapeCache::default();
-        let tops = selection::match_tops(lay, &state.matches);
+        let tops = selection::match_tops(lay, &self.document, &state.matches);
         for (index, m) in state.matches.iter().enumerate() {
             if tops[index] < lo || tops[index] > hi {
                 continue;
@@ -3263,7 +3263,7 @@ impl App {
         let Some(m) = state.matches.get(state.current) else {
             return;
         };
-        let anchor = selection::match_anchor(lay, m);
+        let anchor = selection::match_anchor(lay, &self.document, m);
         let (top, size) = match anchor {
             Some(exact) => exact,
             None => {
@@ -3300,7 +3300,7 @@ impl App {
             self.search.as_mut().expect("search open").settle = false;
             return;
         };
-        let Some((top, size)) = selection::match_anchor(lay, m) else {
+        let Some((top, size)) = selection::match_anchor(lay, &self.document, m) else {
             return;
         };
         self.search.as_mut().expect("search open").settle = false;

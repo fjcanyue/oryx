@@ -2,6 +2,10 @@
 
 ## v1.2.0
 
+### Search
+
+- Searching for a space or a tab now highlights the ones at the end of a line, and the ones where a long line wraps. Before, the count was right but those matches had no box, and Enter could land on one you could not see. A selection that reaches the end of a line covers its trailing spaces too.
+
 ## v1.1.1
 
 A small release for the first two reports from a user, issues #1 and #2 on GitHub. The details, by area:
