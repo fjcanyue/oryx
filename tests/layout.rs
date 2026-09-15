@@ -3581,6 +3581,62 @@ fn the_layout_splice_matches_a_fresh_pass_on_a_code_file() {
 }
 
 #[test]
+fn enters_at_the_end_of_a_code_file_add_placed_rows() {
+    let mut source = String::new();
+    for i in 0..40 {
+        source.push_str(&format!("let value_{i} = compute({i});\n"));
+    }
+    let path = std::env::temp_dir().join("oryx_fastpath_tail_rows.rs");
+    std::fs::write(&path, &source).unwrap();
+    let mut doc = load::open(&path, None).unwrap().document;
+    let mut reference = load::open(&path, None).unwrap().document;
+    std::fs::remove_file(&path).ok();
+    let kind = load::FileKind::Code("rust");
+    let (width, viewport) = (700.0, 2000.0);
+    let mut lay = windowed(&doc, width, 0.0, viewport);
+    let before = lay.height;
+    let row = lay
+        .code_line_seat(0, 0)
+        .expect("a placed code block")
+        .height;
+    for _ in 0..3 {
+        let end = doc.source.len();
+        fast_keystroke(
+            &mut doc,
+            &mut reference,
+            kind,
+            &mut lay,
+            end..end,
+            "\n",
+            0.0,
+            viewport,
+        );
+    }
+    assert!(
+        ((lay.height - before) - 3.0 * row).abs() < 0.5,
+        "three rows taller: {} against {}",
+        lay.height - before,
+        3.0 * row
+    );
+    let last = lay
+        .code_line_seat(0, 42)
+        .expect("the third new row is placed");
+    let mut fonts = fonts();
+    let seat = oryx::edit::caret::Caret::at(doc.source.len())
+        .geometry(&lay, &doc, &mut fonts)
+        .expect("the caret has a row");
+    assert!(
+        (seat.y - last.y).abs() < 0.5 && seat.y + seat.h <= lay.height + 0.5,
+        "the caret stands on the last row, inside the page: {} vs {} in {}",
+        seat.y,
+        last.y,
+        lay.height
+    );
+    let fresh = windowed(&reference, width, 0.0, viewport);
+    assert_same_layout(&lay, &doc, &fresh, &reference);
+}
+
+#[test]
 fn the_layout_splice_holds_in_a_mid_document_band() {
     let mut source = String::new();
     for i in 0..400 {

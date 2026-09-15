@@ -209,12 +209,12 @@ pub fn model_pos(doc: &Document, offset: usize) -> Option<ModelPos> {
                         });
                     }
                 }
-                // The load drops the file's trailing empty lines, so an
-                // offset past the last line has no line of its own; it
-                // stands at that line's end, and a selection reaching
-                // the end of the file still covers every line. The last
-                // block alone stands in: a later block's offsets are
-                // its own.
+                // The final newline ends the last line and opens none,
+                // so the offset after it has no line of its own; it
+                // stands at the last line's end, and a selection
+                // reaching the end of the file still covers every line.
+                // The last block alone stands in: a later block's
+                // offsets are its own.
                 let last_block = bi + 1 == doc.blocks.len();
                 if let Some(last) = lines.len().checked_sub(1).filter(|_| last_block) {
                     let range = lines.line_range(last)?;
@@ -604,14 +604,19 @@ impl Caret {
         doc: &Document,
         fonts: &mut FontStore,
     ) -> Option<CaretBox> {
+        // The offset after the file's final newline has no row of its
+        // own: it stands where the last row ends, as `model_pos` says.
+        let offset = model_pos(doc, self.offset)
+            .and_then(|pos| model_offset(doc, &pos))
+            .map_or(self.offset, |at| at.min(self.offset));
         let lines = lines_of(lay, doc);
         if lines.is_empty() {
-            return seat_without_rows(fonts, lay, doc, self.offset);
+            return seat_without_rows(fonts, lay, doc, offset);
         }
-        if let Some(li) = locate(&lines, self.offset) {
+        if let Some(li) = locate(&lines, offset) {
             let line = &lines[li];
-            let run = run_at(line, self.offset)?;
-            let x = run.x + x_of(fonts, lay, doc, run, self.offset);
+            let run = run_at(line, offset)?;
+            let x = run.x + x_of(fonts, lay, doc, run, offset);
             return Some(CaretBox {
                 x,
                 y: line.y,
@@ -622,14 +627,14 @@ impl Caret {
         // paragraphs: the caret stands at the line start, advanced
         // over any whitespace the split carried, anchored to the
         // nearest text line, one advance per blank row between.
-        if let Some(li) = lines.iter().rposition(|l| l.end < self.offset) {
+        if let Some(li) = lines.iter().rposition(|l| l.end < offset) {
             let line = &lines[li];
-            let gap = doc.source.get(line.end..self.offset)?.matches('\n').count();
+            let gap = doc.source.get(line.end..offset)?.matches('\n').count();
             if gap == 0 {
                 return None;
             }
             let x = line.runs.first().map_or(0.0, |r| r.x)
-                + line_prefix_advance(fonts, lay, doc, line, self.offset);
+                + line_prefix_advance(fonts, lay, doc, line, offset);
             return Some(CaretBox {
                 x,
                 y: line.y + line.h * gap as f32,
@@ -638,17 +643,13 @@ impl Caret {
         }
         // Nothing above: blank rows at the top of the file anchor to
         // the first text line below instead.
-        let below = lines.iter().find(|l| l.start > self.offset)?;
-        let gap = doc
-            .source
-            .get(self.offset..below.start)?
-            .matches('\n')
-            .count();
+        let below = lines.iter().find(|l| l.start > offset)?;
+        let gap = doc.source.get(offset..below.start)?.matches('\n').count();
         if gap == 0 {
             return None;
         }
         let x = below.runs.first().map_or(0.0, |r| r.x)
-            + line_prefix_advance(fonts, lay, doc, below, self.offset);
+            + line_prefix_advance(fonts, lay, doc, below, offset);
         Some(CaretBox {
             x,
             y: below.y - below.h * gap as f32,
@@ -660,8 +661,8 @@ impl Caret {
 /// The caret's seat on a page the layout holds no glyphs for, an empty
 /// file or one of blank lines: where the first glyph of its line would
 /// stand, from the block table, advanced over the whitespace before it.
-/// The line counts newlines from the block's start, so the trailing
-/// empty lines the load drops from the model still stand a row each.
+/// The line counts newlines from the block's start; the caller has
+/// folded the offset after the final newline onto the last row.
 fn seat_without_rows(
     fonts: &mut FontStore,
     lay: &LayoutDoc,
@@ -1154,14 +1155,23 @@ mod tests {
 
         let blank = code_doc("\n\n");
         let (lb, mut fb) = lay_of(&blank);
-        let third = Caret::at(2)
+        let second = Caret::at(1)
             .geometry(&lb, &blank, &mut fb)
-            .expect("the third blank line");
+            .expect("the second blank line");
         assert!(
-            (third.y - (a.y + 2.0 * h)).abs() < 0.5,
+            (second.y - (a.y + h)).abs() < 0.5,
             "one row per line: {} vs {}",
-            third.y,
-            a.y + 2.0 * h
+            second.y,
+            a.y + h
+        );
+        let after = Caret::at(2)
+            .geometry(&lb, &blank, &mut fb)
+            .expect("after the final newline");
+        assert!(
+            (after.y - second.y).abs() < 0.5,
+            "the final newline opens no row, the caret stays on the last: {} vs {}",
+            after.y,
+            second.y
         );
 
         let spaced = code_doc("   ");
@@ -1569,25 +1579,50 @@ mod tests {
     /// the caret can stand past the last modeled line; a selection
     /// reaching there speaks the last line's end.
     #[test]
-    fn an_offset_past_the_last_modeled_line_stands_at_its_end() {
+    fn the_offset_after_the_final_newline_stands_on_the_last_row() {
         let doc = code_doc("a\nb\n\n");
-        let end = ModelPos {
+        let b_end = ModelPos {
             block: 0,
             span: 1,
             byte: 1,
         };
-        assert_eq!(model_pos(&doc, 3), Some(end), "the end of b itself");
-        assert_eq!(model_pos(&doc, 4), Some(end), "the empty line");
-        assert_eq!(model_pos(&doc, 5), Some(end), "after the final newline");
-        assert!(
-            span_selection(&doc, 0, 4).is_some(),
-            "a selection to the empty line holds"
+        let empty = ModelPos {
+            block: 0,
+            span: 2,
+            byte: 0,
+        };
+        assert_eq!(model_pos(&doc, 3), Some(b_end), "the end of b itself");
+        assert_eq!(
+            model_pos(&doc, 4),
+            Some(empty),
+            "the empty line has its own row"
+        );
+        assert_eq!(
+            model_pos(&doc, 5),
+            Some(empty),
+            "after the final newline, the last row's end"
         );
         assert_eq!(
             selection_range(&doc, &span_selection(&doc, 0, 4).unwrap()),
-            Some(0..3),
-            "and covers every line"
+            Some(0..4),
+            "a selection to the empty line covers the break before it"
         );
+        let (l, mut f) = lay_of(&doc);
+        let b = run(&l, &doc, "b");
+        let h = metrics::LINE_HEIGHT * b.size;
+        for offset in [4, 5] {
+            let seat = Caret::at(offset)
+                .geometry(&l, &doc, &mut f)
+                .expect("a seat on the empty row");
+            assert!(
+                (seat.y - (b.y + h)).abs() < 0.5 && (seat.x - b.x).abs() < 0.5,
+                "offset {offset} on the row below b: {} {} vs {} {}",
+                seat.x,
+                seat.y,
+                b.x,
+                b.y + h
+            );
+        }
     }
 
     /// The stand-in for an offset past the last line belongs to the

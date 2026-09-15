@@ -439,15 +439,13 @@ fn source_lines(text: &str) -> Vec<Range<u32>> {
 /// The whole file as a single code block; the budget pass highlights it.
 /// No token means no grammar, so the block renders in the code font
 /// unstyled. The lines are ranges into the source, so the file's text
-/// is held once.
+/// is held once. Every line is a row, trailing empty lines included, so
+/// an Enter at the end of the file opens a row the page can scroll to;
+/// the final newline ends the last row and opens none.
 pub(crate) fn code_document(token: Option<&str>, text: &str) -> Document {
-    let mut lines = source_lines(text);
-    while lines.last().is_some_and(|l| l.is_empty()) {
-        lines.pop();
-    }
     let mut block = Block::plain(BlockKind::CodeBlock {
         language: token.map(str::to_string),
-        lines: CodeBody::verbatim(lines),
+        lines: CodeBody::verbatim(source_lines(text)),
         highlights: Vec::new(),
         exact: 0,
     });
@@ -739,6 +737,48 @@ mod tests {
             4,
             "every line is a row, the trailing blank included"
         );
+    }
+
+    #[test]
+    fn a_code_document_keeps_its_trailing_empty_lines() {
+        let rows = |token: &str, text: &str| match &code_document(Some(token), text).blocks[0].kind
+        {
+            BlockKind::CodeBlock { lines, .. } => lines.len(),
+            _ => unreachable!(),
+        };
+        assert_eq!(rows("rs", "a\nb\n\n\n"), 4, "two empty lines, two rows");
+        assert_eq!(
+            rows("rs", "a\nb\n"),
+            2,
+            "the final newline ends the last row and opens none"
+        );
+        assert_eq!(rows("rs", "a\nb"), 2);
+        assert_eq!(rows("rs", ""), 0);
+        assert_eq!(
+            rows("md", "# t\n\n\n"),
+            3,
+            "the source view of a markdown file too"
+        );
+    }
+
+    #[test]
+    fn a_file_ending_in_blank_lines_round_trips() {
+        let dir = std::env::temp_dir().join("oryx_trailing_blank_lines");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("tail.rs");
+        std::fs::write(&path, "a\n\n\n").unwrap();
+        let opened = open(&path, None).unwrap();
+        std::fs::remove_dir_all(&dir).ok();
+        let BlockKind::CodeBlock { lines, .. } = &opened.document.blocks[0].kind else {
+            panic!("a code file");
+        };
+        assert_eq!(
+            lines.len(),
+            3,
+            "a row per line, the two empty ones included"
+        );
+        let led = crate::edit::splice::Ledger::new(opened.document.source.clone(), opened.crlf);
+        assert_eq!(led.emit(), b"a\n\n\n", "the bytes come back untouched");
     }
 
     #[test]

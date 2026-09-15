@@ -302,13 +302,7 @@ pub fn splice_document(
             }
         }
     }
-    if !lines.splice(
-        current,
-        old_touched.clone(),
-        new_touched.clone(),
-        delta,
-        plain,
-    ) {
+    if !lines.splice(current, old_touched.clone(), new_touched.clone(), delta) {
         return None;
     }
     let new_len = lines.len();
