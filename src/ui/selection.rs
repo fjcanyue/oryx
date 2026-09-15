@@ -195,10 +195,15 @@ pub fn plain_text(sel: &Selection, doc: &Document) -> String {
     for index in a.block..=b.block.min(doc.blocks.len() - 1) {
         let mut block_text = String::new();
         let mut pending_sep: Option<String> = None;
+        // Set once the walk reaches the selection's first piece, so the
+        // separators after it count even while no text was copied yet:
+        // a selection made of line breaks alone starts at a piece's end
+        // and copies the breaks after it.
+        let mut started = index != a.block;
         for piece in block_pieces(doc, index) {
             match piece {
                 Piece::Sep(sep) => {
-                    if !block_text.is_empty() {
+                    if started {
                         pending_sep = Some(match pending_sep {
                             Some(prev) => prev + sep,
                             None => sep.to_string(),
@@ -206,7 +211,7 @@ pub fn plain_text(sel: &Selection, doc: &Document) -> String {
                     }
                 }
                 Piece::Label(label) => {
-                    if block_text.is_empty() {
+                    if block_text.is_empty() && !started {
                         block_text.push_str(&label);
                     } else {
                         pending_sep = Some(pending_sep.unwrap_or_default() + &label);
@@ -222,6 +227,7 @@ pub fn plain_text(sel: &Selection, doc: &Document) -> String {
                             Ordering::Greater => {}
                         }
                     }
+                    started = true;
                     if index == b.block {
                         match span.cmp(&b.span) {
                             Ordering::Greater => continue,
@@ -236,18 +242,14 @@ pub fn plain_text(sel: &Selection, doc: &Document) -> String {
                         // line selected whole.
                         if index == b.block && span == b.span && to == 0 {
                             if let Some(sep) = pending_sep.take() {
-                                if !block_text.is_empty() {
-                                    block_text.push_str(&sep);
-                                }
+                                block_text.push_str(&sep);
                             }
                         }
                         continue;
                     }
                     let slice = &text[floor_boundary(&text, from)..floor_boundary(&text, to)];
                     if let Some(sep) = pending_sep.take() {
-                        if !block_text.is_empty() {
-                            block_text.push_str(&sep);
-                        }
+                        block_text.push_str(&sep);
                     }
                     block_text.push_str(slice);
                 }
@@ -745,6 +747,11 @@ pub fn match_tops(lay: &LayoutDoc, doc: &Document, matches: &[Selection]) -> Vec
 /// covers it.
 pub fn match_anchor(lay: &LayoutDoc, doc: &Document, m: &Selection) -> Option<(f32, f32)> {
     let (a, b) = m.ordered();
+    if breaks_only(doc, m).is_some() {
+        // No run overlaps a match made of line breaks; the run ending
+        // the piece before the first break stands for it.
+        return piece_end_run(lay, a, 0..lay.runs.len()).map(|i| (lay.runs[i].y, lay.runs[i].size));
+    }
     let mut best: Option<(f32, f32)> = None;
     for (index, run) in lay.runs.iter().enumerate() {
         let Some((s, mut e)) = run_interval(run) else {
@@ -805,6 +812,214 @@ fn run_tail<'a>(lay: &LayoutDoc, doc: &'a Document, index: usize, run: &TextRun)
     &after[..tail]
 }
 
+/// A selection made of line breaks and nothing else: it starts at the
+/// end of a piece, ends at the start of a later piece of the same block,
+/// and the pieces between are empty lines or hard breaks. Answers the
+/// number of breaks it covers; None for a selection holding addressable
+/// text, which the runs box as usual.
+fn breaks_only(doc: &Document, sel: &Selection) -> Option<usize> {
+    let (a, b) = sel.ordered();
+    if a.block != b.block || a.span >= b.span || b.byte != 0 {
+        return None;
+    }
+    let source = &*doc.source;
+    match &doc.blocks.get(a.block)?.kind {
+        BlockKind::CodeBlock { lines, .. } => {
+            if b.span >= lines.len() || a.byte != lines.line(source, a.span).len() {
+                return None;
+            }
+            (a.span + 1..b.span)
+                .all(|i| lines.line(source, i).is_empty())
+                .then_some(b.span - a.span)
+        }
+        BlockKind::Frontmatter { entries } => {
+            let (key, value) = entries.get(a.span)?;
+            let whole = a.byte == format!("{key}: {value}").len();
+            (whole && b.span == a.span + 1 && b.span < entries.len()).then_some(1)
+        }
+        BlockKind::Table { header, rows } => {
+            // The spans of every cell chain header first; a break stands
+            // only between a row's last span and the next row's first.
+            let mut chain = 0;
+            for row in std::iter::once(header).chain(rows.iter()) {
+                let count: usize = row.iter().map(Vec::len).sum();
+                if a.span < chain + count {
+                    let last = a.span + 1 == chain + count;
+                    let span = row.iter().flatten().nth(a.span - chain)?;
+                    let whole = a.byte == span.text(source).len();
+                    return (last && whole && b.span == a.span + 1).then_some(1);
+                }
+                chain += count;
+            }
+            None
+        }
+        kind => {
+            let spans = kind_spans(kind)?;
+            if b.span >= spans.len() || a.byte != spans.get(a.span)?.text(source).len() {
+                return None;
+            }
+            let between = &spans[a.span + 1..b.span];
+            (!between.is_empty() && between.iter().all(|s| s.text(source) == "\n"))
+                .then_some(between.len())
+        }
+    }
+}
+
+/// The run that ends the piece `pos` stands at the end of: the last of
+/// its span in layout order among `indices`, and only when its bytes,
+/// tail included, reach the piece's end, so a window holding the piece's
+/// earlier visual lines alone answers nothing. A side run stands for its
+/// whole piece.
+fn piece_end_run(
+    lay: &LayoutDoc,
+    pos: ModelPos,
+    indices: impl Iterator<Item = usize>,
+) -> Option<usize> {
+    let mut best: Option<(u32, usize)> = None;
+    for index in indices {
+        let run = &lay.runs[index];
+        if run.block != pos.block || run.span != pos.span {
+            continue;
+        }
+        let start = match run.text {
+            TextRef::Model { start, .. } => start,
+            TextRef::Side { .. } => u32::MAX,
+        };
+        if best.map_or(true, |(s, _)| start >= s) {
+            best = Some((start, index));
+        }
+    }
+    let (_, index) = best?;
+    let run = &lay.runs[index];
+    match run.text {
+        TextRef::Model { start, len } => {
+            let reach = (start + len) as usize + run_tail_len(lay, index, run, pos.byte);
+            (reach == pos.byte).then_some(index)
+        }
+        TextRef::Side { .. } => Some(index),
+    }
+}
+
+/// The tail length of a run at the end of a piece of `len` bytes: the
+/// run's whitespace tail, read without the document since the piece's
+/// length bounds it.
+fn run_tail_len(lay: &LayoutDoc, index: usize, run: &TextRun, len: usize) -> usize {
+    let TextRef::Model {
+        start,
+        len: run_len,
+    } = run.text
+    else {
+        return 0;
+    };
+    let end = (start + run_len) as usize;
+    // A later run of the same span means the run ends a visual line
+    // short of the piece; the tail then stops there, and the piece's
+    // end is not this run's to reach.
+    let next = lay.runs[index + 1..]
+        .iter()
+        .take_while(|r| r.block == run.block && r.span == run.span)
+        .find_map(|r| match r.text {
+            TextRef::Model { start: s, .. } if s as usize >= end => Some(s as usize),
+            _ => None,
+        });
+    match next {
+        Some(_) => 0,
+        None => len.saturating_sub(end),
+    }
+}
+
+/// The height of the line a run stands on: its tallest run's.
+fn line_height_at(lay: &LayoutDoc, run: &TextRun) -> f32 {
+    let (head, tail) = lay.runs_in(run.y, run.y);
+    lay.runs[head]
+        .iter()
+        .chain(&lay.runs[tail])
+        .filter(|r| r.block == run.block && r.y == run.y)
+        .map(|r| metrics::LINE_HEIGHT * r.size)
+        .fold(metrics::LINE_HEIGHT * run.size, f32::max)
+}
+
+/// The advance of one space in a face.
+fn space_width(fonts: &mut FontStore, size: f32, weight: u16, italic: bool, family: &str) -> f32 {
+    let buffer = shape_text(fonts, size, weight, italic, " ", family);
+    buffer
+        .layout_runs()
+        .next()
+        .and_then(|line| line.glyphs.last().map(|g| g.x + g.w))
+        .unwrap_or(size * 0.3)
+}
+
+/// The boxes of a line-break selection, which no run overlaps: one of a
+/// space's width at the end of the line its start piece ends on, after
+/// the whitespace layout trimmed there, then one at the left edge of
+/// each empty line it covers. An empty start line boxes at its own seat.
+#[allow(clippy::too_many_arguments)]
+fn break_boxes(
+    sel: &Selection,
+    lay: &LayoutDoc,
+    doc: &Document,
+    fonts: &mut FontStore,
+    cache: &mut ShapeCache,
+    indices: impl Iterator<Item = usize>,
+    breaks: usize,
+) -> Vec<(f32, f32, f32, f32)> {
+    let (a, _) = sel.ordered();
+    let mut out = Vec::new();
+    let (first_end, y, height, space, left) = match piece_end_run(lay, a, indices) {
+        Some(index) => {
+            let run = &lay.runs[index];
+            let text = lay.run_text(doc, run);
+            let tail = run_tail(lay, doc, index, run);
+            let family = lay.run_family(run);
+            let shaped: Cow<str> = if tail.is_empty() {
+                Cow::Borrowed(text)
+            } else {
+                Cow::Owned(format!("{text}{tail}"))
+            };
+            let rtl = run_rtl(cache, fonts, index, run, &shaped, family);
+            let end = if tail.is_empty() {
+                if rtl {
+                    run.x
+                } else {
+                    run.x + run.width
+                }
+            } else {
+                let ch = shaped.chars().count();
+                run.x + prefix_width(cache, fonts, index, run, &shaped, text.len(), family, ch)
+            };
+            let space = space_width(fonts, run.size, run.weight, run.italic, family);
+            let height = line_height_at(lay, run);
+            let (head, tail) = lay.runs_in(run.y, run.y);
+            let left = lay.runs[head]
+                .iter()
+                .chain(&lay.runs[tail])
+                .filter(|r| r.block == run.block && r.y == run.y)
+                .map(|r| r.x)
+                .fold(run.x, f32::min);
+            let x = if rtl { end - space } else { end };
+            (x, run.y, height, space, left)
+        }
+        // No run reaches the piece's end: an empty code line has its
+        // seat; anything else lies outside the window.
+        None => match lay.code_line_seat(a.block, a.span).filter(|_| a.byte == 0) {
+            Some(seat) => {
+                let space = space_width(fonts, lay.code_size, 400, false, &lay.code_family);
+                (seat.x, seat.y, seat.height, space, seat.x)
+            }
+            None => return out,
+        },
+    };
+    out.push((first_end, y, space, height));
+    for k in 1..breaks {
+        let (x, y) = match lay.code_line_seat(a.block, a.span + k) {
+            Some(seat) => (seat.x, seat.y),
+            None => (left, y + k as f32 * height),
+        };
+        out.push((x, y, space, height));
+    }
+    out
+}
+
 fn rects_for(
     sel: &Selection,
     lay: &LayoutDoc,
@@ -814,6 +1029,9 @@ fn rects_for(
     indices: impl Iterator<Item = usize>,
 ) -> Vec<(f32, f32, f32, f32)> {
     let (a, b) = sel.ordered();
+    if let Some(breaks) = breaks_only(doc, sel) {
+        return break_boxes(sel, lay, doc, fonts, cache, indices, breaks);
+    }
     let mut out: Vec<(f32, f32, f32, f32)> = Vec::new();
     // The previous box's interval end and line top, kept while that box
     // reached its run's right edge, so a byte-contiguous neighbor on the
@@ -896,13 +1114,7 @@ fn rects_for(
             prev = None;
             continue;
         }
-        let (head, tail) = lay.runs_in(run.y, run.y);
-        let height = lay.runs[head]
-            .iter()
-            .chain(&lay.runs[tail])
-            .filter(|r| r.block == run.block && r.y == run.y)
-            .map(|r| metrics::LINE_HEIGHT * r.size)
-            .fold(metrics::LINE_HEIGHT * run.size, f32::max);
+        let height = line_height_at(lay, run);
         // Justified lines split words into separate runs with stretched
         // gaps between them; when the selection covers the seam on both
         // sides, this box merges into the previous one, so a selected
@@ -1848,6 +2060,108 @@ mod tests {
             ys.len() - 1,
             "the space trimmed at each wrap boxes left of its line, the logical end"
         );
+    }
+
+    // ---- Line-break matches: a box at the end of each line broken ----
+
+    fn lay_code(text: &str) -> (Document, LayoutDoc, FontStore) {
+        let doc = crate::doc::load::code_document(None, text);
+        let mut fonts = FontStore::new();
+        let mut media = MediaCache::new(PathBuf::from("."));
+        let l = layout(
+            &doc,
+            &Theme::default_dark(),
+            &mut fonts,
+            &mut media,
+            &ViewConfig::default(),
+            2000.0,
+        );
+        (doc, l, fonts)
+    }
+
+    #[test]
+    fn a_line_break_match_boxes_the_end_of_its_line() {
+        let (doc, l, mut fonts) = lay_code("alpha beta   \ngamma\n");
+        let breaks = crate::ui::search::regex_matches(&doc, "\\n").expect("valid");
+        assert_eq!(breaks.len(), 1);
+        let spaces = crate::ui::search::matches(&doc, " ");
+        let (sx, _, sw, _) = one_box(&spaces[3], &l, &doc, &mut fonts);
+        let run = line_runs(&l, 0, 0)[0];
+        let (x, y, w, _) = one_box(&breaks[0], &l, &doc, &mut fonts);
+        assert_eq!(y, run.y);
+        assert!(
+            (x - (sx + sw)).abs() < 0.6,
+            "after the trailing whitespace: {x} against {}",
+            sx + sw
+        );
+        assert!((w - sw).abs() < 0.6, "a space wide: {w} against {sw}");
+    }
+
+    #[test]
+    fn a_double_line_break_boxes_the_empty_line_too() {
+        let (doc, l, mut fonts) = lay_code("one\n\ntwo\n");
+        let breaks = crate::ui::search::regex_matches(&doc, "\\n\\n").expect("valid");
+        assert_eq!(breaks.len(), 1);
+        let run = line_runs(&l, 0, 0)[0];
+        let boxes = rects(&breaks[0], &l, &doc, &mut fonts);
+        assert_eq!(boxes.len(), 2, "{boxes:?}");
+        let (x0, y0, w0, h0) = boxes[0];
+        let (x1, y1, w1, _) = boxes[1];
+        assert_eq!(y0, run.y);
+        assert!(
+            (x0 - (run.x + run.width)).abs() < 0.6,
+            "{x0} against {}",
+            run.x + run.width
+        );
+        let seat = l.code_line_seat(0, 1).expect("the empty line has a seat");
+        assert!(
+            (x1 - seat.x).abs() < 0.6,
+            "the empty line's box at its left edge"
+        );
+        assert!(
+            (y1 - (y0 + h0)).abs() < 0.6,
+            "on the row below: {y1} against {}",
+            y0 + h0
+        );
+        assert!((w1 - w0).abs() < 0.6);
+    }
+
+    #[test]
+    fn text_selections_over_three_lines_keep_their_boxes() {
+        let (doc, l, mut fonts) = lay_code("one\ntwo\nthree\n");
+        let sel = Selection {
+            start: ModelPos {
+                block: 0,
+                span: 0,
+                byte: 1,
+            },
+            end: ModelPos {
+                block: 0,
+                span: 2,
+                byte: 2,
+            },
+        };
+        let boxes = rects(&sel, &l, &doc, &mut fonts);
+        // The boxes as they were before line-break matches drew any.
+        let recorded = [
+            (171.99, 44.0, 23.98, 30.0),
+            (160.0, 74.0, 35.98, 30.0),
+            (160.0, 104.0, 23.98, 30.0),
+        ];
+        assert!(
+            boxes.len() == 3 && boxes.iter().zip(recorded).all(|(g, w)| close(*g, w)),
+            "{boxes:?} against the recorded {recorded:?}"
+        );
+    }
+
+    #[test]
+    fn copying_a_line_break_selection_gives_one_line_break() {
+        let doc = crate::doc::load::code_document(None, "one\ntwo\n");
+        let breaks = crate::ui::search::regex_matches(&doc, "\\n").expect("valid");
+        assert_eq!(plain_text(&breaks[0], &doc), "\n");
+        let doc = crate::doc::load::code_document(None, "one\n\ntwo\n");
+        let breaks = crate::ui::search::regex_matches(&doc, "\\n\\n").expect("valid");
+        assert_eq!(plain_text(&breaks[0], &doc), "\n\n");
     }
 
     // ---- RTL lines: hit testing, boxes, the justified merge ----
