@@ -6,6 +6,7 @@
 
 - Searching for a space or a tab now highlights the ones at the end of a line, and the ones where a long line wraps. Before, the count was right but those matches had no box, and Enter could land on one you could not see. A selection that reaches the end of a line covers its trailing spaces too.
 - `\n` in regex mode now finds the line breaks. Before, a pattern made only of line breaks found nothing. Replace can join lines, collapse blank lines or add a line after every line, and copy gives the line breaks. A match never crosses from one block to the next, and the file's final line break stays.
+- In regex mode, the replace field understands `\n` for a line break, `\t` for a tab and `\\` for a backslash, as VS Code does. Any other escape is written as typed.
 
 ## v1.1.1
 

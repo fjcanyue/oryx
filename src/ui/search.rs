@@ -2,6 +2,7 @@
 //! display text. Each match is a `Selection`, so highlight geometry and
 //! scroll targets reuse the selection machinery.
 
+use std::borrow::Cow;
 use std::ops::Range;
 
 use crate::doc::model::Document;
@@ -622,6 +623,7 @@ pub fn regex_replacements(
     }
     let regex = compile(pattern)?;
     let hay = Haystack::build(doc);
+    let template = unescape_template(template);
     let expander = fancy_regex::Expander::default();
     let mut out = Vec::new();
     // The walk mirrors `regex_matches` exactly, discard recovery
@@ -634,13 +636,43 @@ pub fn regex_replacements(
         let found = captures.get(0).expect("a match always captures group 0");
         match hay.selection(found.start()..found.end()) {
             Some(selection) => {
-                out.push((selection, expander.expansion(template, &captures)));
+                out.push((selection, expander.expansion(&template, &captures)));
                 pos = found.end();
             }
             None => pos = next_boundary(&hay.text, found.start()),
         }
     }
     Some(out)
+}
+
+/// The replacement with its escapes read, the way VS Code's replace box
+/// reads them in regex mode: `\n` a line break, `\t` a tab, `\\` one
+/// backslash. Any other backslash sequence stays as typed, and a
+/// backslash ending the template keeps itself. The group syntax is
+/// dollar-based, so this pass and the expander never meet.
+fn unescape_template(template: &str) -> Cow<'_, str> {
+    if !template.contains('\\') {
+        return Cow::Borrowed(template);
+    }
+    let mut out = String::with_capacity(template.len());
+    let mut chars = template.chars();
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            out.push(c);
+            continue;
+        }
+        match chars.next() {
+            Some('n') => out.push('\n'),
+            Some('t') => out.push('\t'),
+            Some('\\') => out.push('\\'),
+            Some(other) => {
+                out.push('\\');
+                out.push(other);
+            }
+            None => out.push('\\'),
+        }
+    }
+    Cow::Owned(out)
 }
 
 /// The pattern with the standing flags: anchors match per line, and
@@ -1109,5 +1141,59 @@ mod tests {
         let mut led = crate::edit::splice::Ledger::new(doc.source.clone(), vec![3, 7, 13]);
         led.edit(range, " ");
         assert_eq!(led.emit(), b"one two\r\nthree\r\n");
+    }
+
+    // ---- Escapes in the replacement ----
+
+    fn replacement_texts(doc: &Document, pattern: &str, template: &str) -> Vec<String> {
+        regex_replacements(doc, pattern, template)
+            .expect("valid")
+            .into_iter()
+            .map(|(_, text)| text)
+            .collect()
+    }
+
+    #[test]
+    fn a_tab_and_a_newline_escape_in_the_replacement() {
+        let doc = markdown::parse("a b");
+        assert_eq!(replacement_texts(&doc, " ", "\\t"), ["\t"]);
+        assert_eq!(replacement_texts(&doc, " ", "\\n"), ["\n"]);
+        assert_eq!(replacement_texts(&doc, " ", "x\\ty\\nz"), ["x\ty\nz"]);
+    }
+
+    #[test]
+    fn a_doubled_backslash_is_one_backslash() {
+        let doc = markdown::parse("a b");
+        assert_eq!(replacement_texts(&doc, " ", "\\\\"), ["\\"]);
+        assert_eq!(
+            replacement_texts(&doc, " ", "\\\\t"),
+            ["\\t"],
+            "the escaped backslash does not join the t"
+        );
+    }
+
+    #[test]
+    fn other_escapes_stay_as_typed() {
+        let doc = markdown::parse("a b");
+        assert_eq!(replacement_texts(&doc, " ", "\\s"), ["\\s"]);
+        assert_eq!(replacement_texts(&doc, " ", "\\d"), ["\\d"]);
+        assert_eq!(
+            replacement_texts(&doc, " ", "end\\"),
+            ["end\\"],
+            "a lone backslash at the end keeps itself"
+        );
+    }
+
+    #[test]
+    fn a_group_and_an_escape_combine() {
+        let doc = markdown::parse("ab cd");
+        assert_eq!(
+            replacement_texts(&doc, r"(\w)(\w)", "$2\\t$1"),
+            ["b\ta", "d\tc"]
+        );
+        assert_eq!(
+            replacement_texts(&doc, r"(\w)(\w)", "$$\\n"),
+            ["$\n", "$\n"]
+        );
     }
 }
