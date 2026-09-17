@@ -23,6 +23,10 @@
 
 - The checkboxes are a little bigger, and the check mark fills the box. The click target and the PDF follow.
 
+### Source view
+
+- Heading lines are bold, as they are on the page and in VS Code. A code font without a bold face shows no difference.
+
 ## v1.1.1
 
 A small release for the first two reports from a user, issues #1 and #2 on GitHub. The details, by area:

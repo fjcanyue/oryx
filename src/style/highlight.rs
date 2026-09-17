@@ -50,7 +50,9 @@ pub enum SyntaxRole {
 /// role keeps the regular face, since a source view's rows are a grid.
 pub fn role_face(role: SyntaxRole) -> (bool, bool) {
     match role {
-        SyntaxRole::Bold => (true, false),
+        // A heading line is bold in the source as on the page; bold
+        // inside it keeps the heading's role, so the weight is the same.
+        SyntaxRole::Bold | SyntaxRole::Heading(_) => (true, false),
         SyntaxRole::Italic => (false, true),
         _ => (false, false),
     }
@@ -921,12 +923,20 @@ mod tests {
         }
     }
 
+    /// Headings draw bold in the source as they do on the page, every
+    /// level alike; a monospace bold keeps the advance, so the grid holds.
     #[test]
-    fn only_bold_and_italic_change_the_face() {
+    fn bold_italic_and_headings_change_the_face() {
         assert_eq!(role_face(SyntaxRole::Bold), (true, false));
         assert_eq!(role_face(SyntaxRole::Italic), (false, true));
+        for level in 1..=6 {
+            assert_eq!(
+                role_face(SyntaxRole::Heading(level)),
+                (true, false),
+                "heading {level} is bold"
+            );
+        }
         for role in [
-            SyntaxRole::Heading(1),
             SyntaxRole::InlineCode,
             SyntaxRole::Link,
             SyntaxRole::Quote,
