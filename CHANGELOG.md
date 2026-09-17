@@ -18,6 +18,7 @@
 - A fresh install now opens with the folder sidebar showing, rooted at your home folder. Before, the sidebar was closed, and once opened it stood in the folder Oryx was started from, which on Windows can be a system folder. Close it once and it stays closed, as before. The open and export dialogs fall back to your home folder the same way.
 - A folder Oryx cannot read now shows one row saying so, under the `..` row, so you can climb back out. Before, the panel went blank.
 - The welcome page says that the sidebar key shows and hides the panel.
+- The sidebar now follows changes on disk: a file added, removed or renamed in a folder it shows appears or goes the next time you come back to the window or touch it, the same way the open file reloads. Before, you had to leave the folder and come back.
 
 ### Quick reference
 

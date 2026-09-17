@@ -2053,6 +2053,15 @@ impl App {
             return;
         }
         self.disk_check_at = now + Duration::from_secs(1);
+        // The sidebar's folders first: with no file open, the welcome
+        // page beside an open sidebar is where a new file should show.
+        if self
+            .sidebar
+            .as_mut()
+            .is_some_and(|side| side.refresh_if_changed())
+        {
+            self.request_redraw();
+        }
         let Some(seen) = self.disk_seen else {
             return;
         };

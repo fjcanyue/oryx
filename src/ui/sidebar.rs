@@ -8,6 +8,7 @@
 //! notice row in place of its entries, so the tree never goes blank.
 
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
 use serde::{Deserialize, Serialize};
 
@@ -246,6 +247,16 @@ pub struct Sidebar {
     hover: Option<Hover>,
     /// The cursor's offset from the thumb's top while the thumb is held.
     thumb_grab: Option<f32>,
+    /// The modified time of every folder the tree shows, the root and
+    /// the expanded ones, as last read. A folder's time moves when an
+    /// entry inside it is added, removed or renamed, on every platform,
+    /// so a moved stamp is the signal to read the tree again.
+    stamps: Vec<(PathBuf, Option<SystemTime>)>,
+}
+
+/// A folder's modified time, None when it cannot be read.
+fn stamp(dir: &Path) -> Option<SystemTime> {
+    std::fs::metadata(dir).and_then(|meta| meta.modified()).ok()
 }
 
 /// Whether a directory entry belongs in the tree. Directories always do,
@@ -318,7 +329,7 @@ fn tree(root: &Path) -> Vec<Entry> {
 
 impl Sidebar {
     pub fn new(root: &Path) -> Sidebar {
-        Sidebar {
+        let mut side = Sidebar {
             width: DEFAULT_WIDTH,
             tab: Tab::Files,
             root: root.to_path_buf(),
@@ -329,7 +340,71 @@ impl Sidebar {
             list_h: 0.0,
             hover: None,
             thumb_grab: None,
+            stamps: Vec::new(),
+        };
+        side.restamp();
+        side
+    }
+
+    /// Reads the stamps of the shown folders, after any change to the
+    /// set: the root, then every expanded folder.
+    fn restamp(&mut self) {
+        let mut folders = vec![self.root.clone()];
+        folders.extend(
+            self.entries
+                .iter()
+                .filter(|e| e.expanded)
+                .map(|e| e.path.clone()),
+        );
+        self.stamps = folders
+            .into_iter()
+            .map(|dir| {
+                let seen = stamp(&dir);
+                (dir, seen)
+            })
+            .collect();
+    }
+
+    /// Reads the tree again when a shown folder changed on disk since
+    /// the last read, and answers whether it did. The expanded folders
+    /// that still exist stay expanded, the selection follows its path,
+    /// the scroll and the current file's mark stay. One stat per shown
+    /// folder when nothing changed. Called from the app's disk check,
+    /// so it runs on interaction and on focus, never while idle. The
+    /// kernel stamps a folder with its coarse clock, so two changes a
+    /// few milliseconds apart can share a stamp; the next change is
+    /// caught, and a person's actions are never that close.
+    pub fn refresh_if_changed(&mut self) -> bool {
+        let moved = self.stamps.iter().any(|(dir, seen)| stamp(dir) != *seen);
+        if !moved {
+            return false;
         }
+        let expanded: Vec<PathBuf> = self
+            .entries
+            .iter()
+            .filter(|e| e.expanded)
+            .map(|e| e.path.clone())
+            .collect();
+        let selected = self.entries.get(self.selected).map(|e| e.path.clone());
+        let fallback = self.selected;
+        self.entries = tree(&self.root);
+        // Parents come before their children in the list, so each
+        // folder is found once its parent has been expanded again.
+        for dir in expanded {
+            if let Some(index) = self
+                .entries
+                .iter()
+                .position(|e| e.is_dir && !e.expanded && e.path == dir)
+            {
+                self.toggle_dir(index);
+            }
+        }
+        let last = self.entries.len().saturating_sub(1);
+        self.selected = selected
+            .and_then(|path| self.entries.iter().position(|e| e.path == path))
+            .unwrap_or(fallback.min(last));
+        self.restamp();
+        true
     }
 
     pub fn tab(&self) -> Tab {
@@ -358,6 +433,7 @@ impl Sidebar {
             .position(|e| e.path == left)
             .unwrap_or(0);
         self.scroll_to_selection();
+        self.restamp();
     }
 
     /// Rebuilds the tree at the real folder a link points to, the first
@@ -369,6 +445,7 @@ impl Sidebar {
         self.scroll = 0.0;
         let first = usize::from(self.entries.first().is_some_and(|e| e.name == ".."));
         self.selected = first.min(self.entries.len().saturating_sub(1));
+        self.restamp();
     }
 
     pub fn root(&self) -> &Path {
@@ -409,6 +486,7 @@ impl Sidebar {
             self.entries.splice(index + 1..index + 1, children);
         }
         self.entries[index].expanded = !expanded;
+        self.restamp();
     }
 
     /// A row was chosen: a file returns its path to open, a directory
@@ -1623,6 +1701,88 @@ mod tests {
             "collapsing removes it"
         );
         std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// The kernel stamps a folder with its coarse clock, a few
+    /// milliseconds wide: two changes inside one tick share a stamp,
+    /// so a test lets a tick pass between a read and the next change.
+    fn settle() {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+
+    /// The tree follows the disk on the disk check: a file added to a
+    /// shown folder appears, one removed goes, and an unchanged folder
+    /// costs nothing but a stat.
+    #[test]
+    fn a_refresh_shows_a_file_added_and_drops_one_removed() {
+        let dir = temp_tree("refresh-add");
+        let mut side = Sidebar::new(&dir);
+        assert!(!side.refresh_if_changed(), "nothing changed yet");
+        settle();
+        std::fs::write(dir.join("brand-new.md"), "x").unwrap();
+        assert!(side.refresh_if_changed(), "the root's stamp moved");
+        assert!(names(&side).contains(&"brand-new.md".to_string()));
+        assert!(!side.refresh_if_changed(), "seen once");
+        settle();
+        std::fs::remove_file(dir.join("brand-new.md")).unwrap();
+        assert!(side.refresh_if_changed());
+        assert!(!names(&side).contains(&"brand-new.md".to_string()));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_refresh_keeps_the_selection_by_path_and_the_expanded_folders() {
+        let dir = temp_tree("refresh-keep");
+        let mut side = Sidebar::new(&dir);
+        let sub = side.entries.iter().position(|e| e.name == "sub").unwrap();
+        assert!(side.activate(sub).is_none());
+        assert!(side.entries[sub].expanded);
+        side.selected = side
+            .entries
+            .iter()
+            .position(|e| e.name == "zeta.md")
+            .unwrap();
+        settle();
+        std::fs::remove_file(dir.join("Alpha.rs")).unwrap();
+        assert!(side.refresh_if_changed());
+        assert_eq!(
+            side.entries[side.selected].name, "zeta.md",
+            "the selection follows its file"
+        );
+        let sub = side.entries.iter().position(|e| e.name == "sub").unwrap();
+        assert!(side.entries[sub].expanded, "still expanded");
+        assert_eq!(side.entries[sub + 1].name, "subsub", "with its children");
+        settle();
+        std::fs::write(dir.join("sub/late.md"), "x").unwrap();
+        assert!(
+            side.refresh_if_changed(),
+            "an expanded folder's stamp counts too"
+        );
+        assert!(names(&side).contains(&"late.md".to_string()));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_refresh_drops_an_expanded_folder_that_vanished() {
+        let dir = temp_tree("refresh-gone");
+        let mut side = Sidebar::new(&dir);
+        let sub = side.entries.iter().position(|e| e.name == "sub").unwrap();
+        assert!(side.activate(sub).is_none());
+        side.selected = side
+            .entries
+            .iter()
+            .position(|e| e.name == "inner.md")
+            .unwrap();
+        settle();
+        std::fs::remove_dir_all(dir.join("sub")).unwrap();
+        assert!(side.refresh_if_changed());
+        assert!(!names(&side).contains(&"sub".to_string()));
+        assert!(!names(&side).contains(&"inner.md".to_string()));
+        assert!(
+            side.selected < side.entries.len(),
+            "the selection stays in range"
+        );
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }
