@@ -184,6 +184,11 @@ pub const TIPS: &[Tip] = &[
     Tip {
         kind: TipKind::Note,
         area: Area::Files,
+        text: r#"If a file you have open is deleted or moved away outside Oryx, a notice tells you and the title shows the unsaved dot. `Ctrl+S` writes the text back, and Oryx asks before closing."#,
+    },
+    Tip {
+        kind: TipKind::Note,
+        area: Area::Files,
         text: r#"If you close, quit or reload with unsaved changes, Oryx asks first. Press `S` to save, `D` to discard, or `Escape` to keep editing."#,
     },
     Tip {
@@ -235,6 +240,11 @@ pub const TIPS: &[Tip] = &[
         kind: TipKind::Note,
         area: Area::Moving,
         text: r#"The outline follows you as you read, folds its branches, and jumps when you click an entry. For a book, it is the table of contents."#,
+    },
+    Tip {
+        kind: TipKind::Note,
+        area: Area::Moving,
+        text: r#"The sidebar follows the disk: a file added, removed or renamed in a folder it shows appears or goes the next time you come back to the window or touch it."#,
     },
     Tip {
         kind: TipKind::Tip,
@@ -600,6 +610,11 @@ pub const TIPS: &[Tip] = &[
         kind: TipKind::Tip,
         area: Area::Markdown,
         text: r#"A `Dockerfile` or a `Makefile` is recognized by its name. Any other text file simply opens in the code font."#,
+    },
+    Tip {
+        kind: TipKind::Tip,
+        area: Area::Markdown,
+        text: r#"A file without an extension gets syntax colors when Oryx can tell what it is: a shebang, an editor modeline, a name like `.bashrc` or `Gemfile`, or the shape of a diff, a JSON, an XML or an INI file."#,
     },
     Tip {
         kind: TipKind::Tip,
