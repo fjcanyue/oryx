@@ -331,6 +331,8 @@ pub fn run(launch: Launch, theme_name: Option<String>) -> anyhow::Result<()> {
         pending_row: None,
         disk_seen: None,
         disk_check_at: Instant::now(),
+        disk_misses: 0,
+        file_deleted: false,
         crlf: opened_crlf,
         bom: opened_bom,
         caret_snap: false,
@@ -339,6 +341,10 @@ pub fn run(launch: Launch, theme_name: Option<String>) -> anyhow::Result<()> {
         notice: None,
         notice_canvas: None,
     };
+    // The launch file's identity, the reference the disk check compares
+    // to; `open_file` records it for every later file. Without it the
+    // check returned early and the first file never reloaded.
+    app.note_disk_state();
     if let Some(job) = book {
         app.start_book(job);
     }
@@ -557,6 +563,51 @@ fn page_step_target(tops: &[f32], current: f32, dir: i32) -> Option<f32> {
 /// Window title: the open file's name, path stripped. A book's
 /// `dc:title` wins over the file name; files have no title. A dirty
 /// buffer carries the leading dot, the editor its mode word.
+/// The open file's on-disk identity: its modified time and its length.
+type DiskState = (std::time::SystemTime, u64);
+
+/// What one disk check found about the open file.
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+enum DiskVerdict {
+    /// As seen, or still missing after the reader was told.
+    Same,
+    /// Another identity: reload, or tell the reader when edits are unsaved.
+    Changed,
+    /// Missing for the first time: an editor's save may be mid-flight,
+    /// the original gone for the instant before the temporary file is
+    /// renamed over it. Nothing yet.
+    MissingOnce,
+    /// Missing again, a second later: deleted or moved away.
+    Deleted,
+    /// Back after being declared deleted: the mark clears, the file reloads.
+    Back,
+}
+
+/// The verdict for one check: `seen` is the identity recorded at the
+/// last read or write, `now` what the stat answers, `misses` the
+/// consecutive checks the file was missing at, `deleted` whether the
+/// reader was already told.
+fn disk_verdict(seen: DiskState, now: Option<DiskState>, misses: u8, deleted: bool) -> DiskVerdict {
+    match now {
+        None if deleted => DiskVerdict::Same,
+        None if misses == 0 => DiskVerdict::MissingOnce,
+        None => DiskVerdict::Deleted,
+        Some(_) if deleted => DiskVerdict::Back,
+        Some(state) if state == seen => DiskVerdict::Same,
+        Some(_) => DiskVerdict::Changed,
+    }
+}
+
+/// The notice for a deleted file, naming the way back: a save recreates
+/// the file where its folder still is; elsewhere when the folder went too.
+fn deleted_notice(folder_exists: bool) -> &'static str {
+    if folder_exists {
+        "The file was deleted on disk; Ctrl+S writes it back"
+    } else {
+        "The file and its folder were deleted; Save As writes it elsewhere"
+    }
+}
+
 fn window_title(book: Option<&str>, path: Option<&Path>, dirty: bool, editing: bool) -> String {
     let dot = if dirty { "\u{25CF} " } else { "" };
     let mode = if editing { "editing \u{00B7} " } else { "" };
@@ -873,6 +924,14 @@ struct App {
     /// The earliest next disk check; the check runs on focus and on
     /// interaction frames, never on a timer, so idle stays idle.
     disk_check_at: Instant,
+    /// Consecutive checks the open file was missing at. One may be an
+    /// editor's save in flight (a temporary file renamed over the
+    /// original); the second declares the file deleted.
+    disk_misses: u8,
+    /// The open file was deleted on disk and the reader was told. For a
+    /// file Oryx can write back it is the unsaved mark too: the title's
+    /// dot, the question before closing, `Ctrl+S` writing the text back.
+    file_deleted: bool,
     /// Normalized-text offsets of the open file's CRLF endings, for the
     /// ledger's byte-exact emission.
     crlf: Vec<u32>,
@@ -1818,6 +1877,7 @@ impl App {
     fn edits_unsaved(&self) -> bool {
         self.undo.as_ref().is_some_and(Undo::is_dirty)
             || self.ledger.as_ref().is_some_and(Ledger::is_dirty)
+            || (self.file_deleted && self.writable())
     }
 
     /// Ctrl+S: the ledger's emission written atomically, the baseline
@@ -1832,6 +1892,11 @@ impl App {
         let Some(path) = self.path.clone() else {
             return false;
         };
+        // A file deleted on disk while read: its own bytes go back whole,
+        // through the ledger the checkbox click arms the same way.
+        if self.ledger.is_none() && self.file_deleted && self.writable() {
+            self.ensure_ledger();
+        }
         let Some(ledger) = self.ledger.as_ref() else {
             return false;
         };
@@ -1839,6 +1904,7 @@ impl App {
             self.show_notice("No unsaved changes");
             return true;
         }
+        let back = self.file_deleted;
         let lines = ledger.touched_lines();
         let bytes = ledger.emit();
         match save::write_atomic(&path, &bytes) {
@@ -1852,12 +1918,14 @@ impl App {
                 self.refresh_parked_page();
                 self.note_disk_state();
                 self.refresh_title();
-                let figure = if lines == 1 {
-                    "1 line changed".to_string()
+                let receipt = if back {
+                    "Saved, the file is back".to_string()
+                } else if lines == 1 {
+                    "Saved, 1 line changed".to_string()
                 } else {
-                    format!("{lines} lines changed")
+                    format!("Saved, {lines} lines changed")
                 };
-                self.show_notice(&format!("Saved, {figure}"));
+                self.show_notice(&receipt);
                 true
             }
             Err(err) => {
@@ -2038,6 +2106,8 @@ impl App {
     /// Records the open file's on-disk identity after a read or a
     /// write of our own, the reference the change check compares to.
     fn note_disk_state(&mut self) {
+        self.disk_misses = 0;
+        self.file_deleted = false;
         self.disk_seen = self.path.as_deref().and_then(|path| {
             let meta = std::fs::metadata(path).ok()?;
             Some((meta.modified().ok()?, meta.len()))
@@ -2071,18 +2141,61 @@ impl App {
         let state = std::fs::metadata(&path)
             .ok()
             .and_then(|meta| Some((meta.modified().ok()?, meta.len())));
-        let Some(state) = state else {
+        match disk_verdict(seen, state, self.disk_misses, self.file_deleted) {
+            DiskVerdict::Same => self.disk_misses = 0,
+            DiskVerdict::MissingOnce => self.disk_misses += 1,
+            DiskVerdict::Deleted => self.declare_deleted(&path),
+            DiskVerdict::Back | DiskVerdict::Changed => {
+                self.disk_misses = 0;
+                self.file_deleted = false;
+                self.disk_seen = state;
+                if self.edits_unsaved() {
+                    self.show_notice("The file changed on disk");
+                } else {
+                    self.reload_now();
+                }
+            }
+        }
+    }
+
+    /// The open file is gone: the reader told, and for a file Oryx can
+    /// write back, the unsaved mark raised, the title with it.
+    fn declare_deleted(&mut self, path: &Path) {
+        self.disk_misses = 0;
+        self.file_deleted = true;
+        if self.writable() {
+            let folder = path.parent().is_some_and(Path::is_dir);
+            self.refresh_title();
+            self.show_notice(deleted_notice(folder));
+        } else {
+            self.show_notice("The file was deleted on disk");
+        }
+    }
+
+    /// A file gone right now, at a moment that would discard its text:
+    /// declared deleted at once, without the second check. Coming back
+    /// to the window and quitting inside a second reached only the
+    /// first check (the user's test, 17/09/2026). The cost of asking
+    /// is a question; the cost of not asking is the text.
+    fn settle_deleted(&mut self) {
+        if self.file_deleted || self.disk_seen.is_none() {
+            return;
+        }
+        let Some(path) = self.path.clone() else {
             return;
         };
-        if state == seen {
+        if std::fs::metadata(&path).is_ok() {
             return;
         }
-        self.disk_seen = Some(state);
-        if self.edits_unsaved() {
-            self.show_notice("The file changed on disk");
-        } else {
-            self.reload_now();
-        }
+        self.declare_deleted(&path);
+    }
+
+    /// Whether the open file is one Oryx could write back: not a book,
+    /// not a text that did not read cleanly; the editor's own door.
+    fn writable(&self) -> bool {
+        self.path.as_deref().is_some_and(|path| {
+            edit::toggle(edit::Mode::Read, load::detect(path), self.lossy).is_ok()
+        })
     }
 
     /// Guards an action that would discard unsaved edits behind the
@@ -2093,6 +2206,7 @@ impl App {
         if self.help_stash.is_some() {
             self.help_return();
         }
+        self.settle_deleted();
         if !self.edits_unsaved() {
             return true;
         }
@@ -2214,7 +2328,8 @@ impl App {
     /// against the save point, correct through undo past a save, and
     /// the mode word follows the editor.
     fn refresh_title(&mut self) {
-        let dirty = self.undo.as_ref().is_some_and(Undo::is_dirty);
+        let dirty = self.undo.as_ref().is_some_and(Undo::is_dirty)
+            || (self.file_deleted && self.writable());
         if let (Some(gfx), Some(path)) = (self.gfx.as_ref(), self.path.as_deref()) {
             gfx.window.set_title(&window_title(
                 self.document.title.as_deref(),
@@ -6904,5 +7019,64 @@ mod tests {
         assert_eq!(super::ICON_64.len(), 64 * 64 * 4);
         let ico: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/oryx.ico"));
         assert_eq!(&ico[..4], &[0, 0, 1, 0], "ICO header magic");
+    }
+
+    /// The disk check's verdict on the open file: a file missing once
+    /// may be an editor's save in flight, missing twice it is deleted,
+    /// and a file back after either is a change to reload.
+    #[test]
+    fn a_missing_file_is_deleted_only_on_the_second_check() {
+        use std::time::{Duration, UNIX_EPOCH};
+        let seen = (UNIX_EPOCH + Duration::from_secs(10), 42);
+        let later = (UNIX_EPOCH + Duration::from_secs(11), 43);
+        assert_eq!(
+            super::disk_verdict(seen, Some(seen), 0, false),
+            super::DiskVerdict::Same
+        );
+        assert_eq!(
+            super::disk_verdict(seen, Some(later), 0, false),
+            super::DiskVerdict::Changed
+        );
+        assert_eq!(
+            super::disk_verdict(seen, None, 0, false),
+            super::DiskVerdict::MissingOnce,
+            "an atomic save may be mid-flight"
+        );
+        assert_eq!(
+            super::disk_verdict(seen, None, 1, false),
+            super::DiskVerdict::Deleted
+        );
+        assert_eq!(
+            super::disk_verdict(seen, None, 1, true),
+            super::DiskVerdict::Same,
+            "told once, not again"
+        );
+        assert_eq!(
+            super::disk_verdict(seen, Some(later), 1, false),
+            super::DiskVerdict::Changed,
+            "back after one miss: the save landed"
+        );
+        assert_eq!(
+            super::disk_verdict(seen, Some(seen), 1, false),
+            super::DiskVerdict::Same,
+            "back unchanged after one miss"
+        );
+        assert_eq!(
+            super::disk_verdict(seen, Some(later), 0, true),
+            super::DiskVerdict::Back,
+            "back after the mark: the mark clears and the file reloads"
+        );
+    }
+
+    #[test]
+    fn the_deletion_notice_names_the_way_back() {
+        assert_eq!(
+            super::deleted_notice(true),
+            "The file was deleted on disk; Ctrl+S writes it back"
+        );
+        assert_eq!(
+            super::deleted_notice(false),
+            "The file and its folder were deleted; Save As writes it elsewhere"
+        );
     }
 }

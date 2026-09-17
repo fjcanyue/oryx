@@ -13,6 +13,11 @@
 - Empty lines added at the end of a file now get their rows. Before, each Enter at the end of a long file added a line the page did not show: the caret left the screen and the wheel could not reach it. The file's final line break still opens no empty row.
 - The page no longer moves by a pixel on every keystroke at a fractional display scale, such as 125%. Each frame now paints the page at a whole pixel, and the caret sits on the text it belongs to.
 
+### Files
+
+- When the open file is deleted or moved away outside Oryx, a notice says so, the title shows the unsaved dot, and Oryx asks before closing, as it does for unsaved edits. `Ctrl+S` writes the text back where the file was; if its folder went too, Save As writes it elsewhere. Before, nothing said anything and the text was gone at the next quit. A file missing for an instant while another editor saves it is not mistaken for a deleted one.
+- The file Oryx was started with now reloads when it changes on disk, like any file opened later. Before, only a file opened from the sidebar or the dialog did.
+
 ### Sidebar
 
 - A fresh install now opens with the folder sidebar showing, rooted at your home folder. Before, the sidebar was closed, and once opened it stood in the folder Oryx was started from, which on Windows can be a system folder. Close it once and it stays closed, as before. The open and export dialogs fall back to your home folder the same way.
