@@ -11,6 +11,7 @@ pub enum Command {
     Reload,
     Refetch,
     Sidebar,
+    HiddenFiles,
     Export,
     ExportSettings,
     Help,
@@ -288,6 +289,12 @@ pub const SHORTCUTS: &[Shortcut] = &[
             (Binding::Named(NamedKey::ArrowLeft), Command::PaneLeft),
             (Binding::Named(NamedKey::ArrowRight), Command::PaneRight),
         ],
+    },
+    Shortcut {
+        keys: "Ctrl+Shift+H",
+        action: "Show or hide hidden files in the sidebar",
+        section: "Navigation",
+        bindings: &[(Binding::CtrlShift("h"), Command::HiddenFiles)],
     },
     Shortcut {
         keys: "Ctrl+Tab",
@@ -816,6 +823,14 @@ mod tests {
             "plain Ctrl+D stays"
         );
         assert_eq!(command(&chr("k"), true, false), Some(Command::Link));
+    }
+
+    /// The file managers' chord for hidden files is Ctrl+H, which is
+    /// find and replace here; the toggle takes Shift with it.
+    #[test]
+    fn ctrl_shift_h_toggles_hidden_files_and_plain_ctrl_h_replaces() {
+        assert_eq!(command(&chr("H"), true, true), Some(Command::HiddenFiles));
+        assert_eq!(command(&chr("h"), true, false), Some(Command::Replace));
     }
 
     #[test]

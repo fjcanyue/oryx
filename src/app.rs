@@ -383,6 +383,15 @@ fn wayland_drops(window: &Window, wake: Waker) -> Option<wayland_drop::Drops> {
 }
 
 /// The corner notice naming each direction state.
+/// The corner notice after the hidden-files toggle, naming the new state.
+fn hidden_notice(shown: bool) -> &'static str {
+    if shown {
+        "Showing hidden files"
+    } else {
+        "Hidden files out of the way"
+    }
+}
+
 fn direction_notice(mode: DirectionMode) -> &'static str {
     match mode {
         DirectionMode::Auto => "reading direction: automatic",
@@ -1108,6 +1117,7 @@ impl App {
             Command::Reload => self.reload(),
             Command::Refetch => self.refetch(),
             Command::Sidebar => self.toggle_sidebar(),
+            Command::HiddenFiles => self.toggle_hidden_files(),
             Command::Help => self.toggle_help(),
             Command::Settings => self.toggle_settings(),
             Command::ThemeBrowser => self.toggle_theme_browser(),
@@ -4487,6 +4497,19 @@ impl App {
         }
     }
 
+    /// Ctrl+Shift+H: the dot entries in or out of the sidebar, the
+    /// choice saved, an open panel read again, the corner notice
+    /// naming the new state.
+    fn toggle_hidden_files(&mut self) {
+        self.config.show_hidden = !self.config.show_hidden;
+        config::save(&self.config);
+        if let Some(side) = self.sidebar.as_mut() {
+            side.set_show_hidden(self.config.show_hidden);
+        }
+        self.show_notice(hidden_notice(self.config.show_hidden));
+        self.request_redraw();
+    }
+
     /// Opens or closes the panel, restoring the persisted width when it
     /// comes back. A first run, with no document and nothing remembered,
     /// roots at home rather than where the process started.
@@ -4511,6 +4534,7 @@ impl App {
     /// open file marked current.
     fn sidebar_at(&mut self, dir: &Path) {
         let mut side = Sidebar::new(dir);
+        side.set_show_hidden(self.config.show_hidden);
         side.set_tab(self.config.sidebar_tab);
         if let Some(path) = &self.path {
             side.set_current(path);
@@ -4546,6 +4570,7 @@ impl App {
             Some(side) => {
                 let tab = side.tab();
                 *side = Sidebar::new(&dir);
+                side.set_show_hidden(self.config.show_hidden);
                 side.set_tab(tab);
                 if let Some(path) = &self.path {
                     side.set_current(path);
@@ -4696,6 +4721,7 @@ impl App {
             if reroot && side.root() != dir {
                 let tab = side.tab();
                 *side = Sidebar::new(&dir);
+                side.set_show_hidden(self.config.show_hidden);
                 side.set_tab(tab);
             }
             side.set_current(&path);
@@ -7200,5 +7226,11 @@ mod tests {
             "on Wayland the compositor places it"
         );
         assert_eq!(super::beside_step((100, 200)), (140, 240));
+    }
+
+    #[test]
+    fn the_hidden_files_notice_names_the_new_state() {
+        assert_eq!(super::hidden_notice(true), "Showing hidden files");
+        assert_eq!(super::hidden_notice(false), "Hidden files out of the way");
     }
 }

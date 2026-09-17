@@ -37,6 +37,9 @@ pub struct Config {
     pub sidebar_width: f32,
     /// The panel tab last active, so the sidebar reopens where it was.
     pub sidebar_tab: crate::ui::sidebar::Tab,
+    /// Whether the sidebar lists dot files and folders; off by default,
+    /// the file managers' convention, flipped by Ctrl+Shift+H.
+    pub show_hidden: bool,
     /// Whether book text justifies; Ctrl+J flips it on a book.
     pub justify: bool,
     /// Whether markdown prose justifies; Ctrl+J flips it on a markdown
@@ -107,6 +110,7 @@ impl Default for Config {
             sidebar_open: true,
             sidebar_width: crate::ui::sidebar::DEFAULT_WIDTH,
             sidebar_tab: crate::ui::sidebar::Tab::Files,
+            show_hidden: false,
             justify: true,
             justify_markdown: false,
             ui_scale: 1.0,
@@ -425,6 +429,7 @@ mod tests {
             sidebar_open: true,
             sidebar_width: 320.0,
             sidebar_tab: crate::ui::sidebar::Tab::Outline,
+            show_hidden: true,
             justify: false,
             justify_markdown: true,
             ui_scale: 1.15,
@@ -728,5 +733,15 @@ mod tests {
             loaded.tip, 0,
             "a config from before the tips starts at the first"
         );
+    }
+
+    #[test]
+    fn hidden_files_start_hidden_and_an_older_config_keeps_it_so() {
+        assert!(!Config::default().show_hidden);
+        let path = temp_path("no-hidden-key.toml");
+        std::fs::write(&path, "theme = \"nord\"\n").unwrap();
+        let loaded = load_from(&path);
+        std::fs::remove_file(&path).unwrap();
+        assert!(!loaded.show_hidden);
     }
 }

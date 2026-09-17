@@ -244,6 +244,11 @@ pub const TIPS: &[Tip] = &[
     Tip {
         kind: TipKind::Tip,
         area: Area::Moving,
+        text: r#"Files and folders whose name starts with a dot stay out of the sidebar. Press `Ctrl+Shift+H` to show them, dimmed, and Oryx remembers your choice."#,
+    },
+    Tip {
+        kind: TipKind::Tip,
+        area: Area::Moving,
         text: r#"`Ctrl+Plus` and `Ctrl+Minus` zoom in and out, and `Ctrl+0` brings the size back. You can also hold `Ctrl` and turn the mouse wheel."#,
     },
     Tip {

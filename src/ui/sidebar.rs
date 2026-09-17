@@ -1,7 +1,9 @@
 //! Folder sidebar: a persistent panel listing the open file's folder as a
 //! tree. Directories sort before files, both alphabetical; the listing
-//! keeps every file Oryx can display, including dot entries, which are
-//! drawn dimmed. Expansion is in place and children are read on demand.
+//! keeps every file Oryx can display. Dot entries stay out of the tree
+//! until the hidden-files toggle is on, when they are drawn dimmed; the
+//! file shown in the document keeps its row whatever the toggle.
+//! Expansion is in place and children are read on demand.
 //! A folder reached through a symbolic link is entered rather than
 //! expanded: the tree moves to the real folder, as if it had been
 //! opened directly. A folder the system refuses to list shows one
@@ -252,6 +254,9 @@ pub struct Sidebar {
     /// entry inside it is added, removed or renamed, on every platform,
     /// so a moved stamp is the signal to read the tree again.
     stamps: Vec<(PathBuf, Option<SystemTime>)>,
+    /// Whether dot entries list; off by default, the file managers'
+    /// convention, and remembered in the config.
+    show_hidden: bool,
 }
 
 /// A folder's modified time, None when it cannot be read.
@@ -273,11 +278,26 @@ fn recognized(path: &Path, is_dir: bool) -> bool {
     }
 }
 
+/// What a scan lists of the dot entries: none, or all of them, and in
+/// either case the file shown in the document, which keeps its row.
+#[derive(Clone, Copy)]
+struct Filter<'a> {
+    show_hidden: bool,
+    current: Option<&'a Path>,
+}
+
+impl Filter<'_> {
+    fn keeps(&self, name: &str, path: &Path) -> bool {
+        self.show_hidden || !name.starts_with('.') || self.current == Some(path)
+    }
+}
+
 /// The recognized entries of one directory, directories first, both
 /// groups alphabetical and case-insensitive. A symbolic link counts as
 /// what it points at, so a linked folder lists among the folders. A
-/// directory that cannot be read yields its notice row instead.
-fn scan(dir: &Path, depth: usize) -> Vec<Entry> {
+/// directory that cannot be read yields its notice row instead. Dot
+/// entries pass through the filter.
+fn scan(dir: &Path, depth: usize, filter: Filter<'_>) -> Vec<Entry> {
     let Ok(read) = std::fs::read_dir(dir) else {
         return vec![Entry::notice(dir, depth)];
     };
@@ -285,6 +305,9 @@ fn scan(dir: &Path, depth: usize) -> Vec<Entry> {
         .flatten()
         .filter_map(|e| {
             let name = e.file_name().to_str()?.to_string();
+            if !filter.keeps(&name, &e.path()) {
+                return None;
+            }
             let kind = e.file_type().ok()?;
             let is_dir = kind.is_dir() || (kind.is_symlink() && e.path().is_dir());
             recognized(&e.path(), is_dir).then(|| Entry {
@@ -309,7 +332,7 @@ fn scan(dir: &Path, depth: usize) -> Vec<Entry> {
 
 /// The visible rows for a root: a `..` row up front when a parent exists,
 /// then the root's own entries.
-fn tree(root: &Path) -> Vec<Entry> {
+fn tree(root: &Path, filter: Filter<'_>) -> Vec<Entry> {
     let mut entries = Vec::new();
     if let Some(parent) = root.parent() {
         entries.push(Entry {
@@ -323,17 +346,21 @@ fn tree(root: &Path) -> Vec<Entry> {
             notice: false,
         });
     }
-    entries.extend(scan(root, 0));
+    entries.extend(scan(root, 0, filter));
     entries
 }
 
 impl Sidebar {
     pub fn new(root: &Path) -> Sidebar {
+        let filter = Filter {
+            show_hidden: false,
+            current: None,
+        };
         let mut side = Sidebar {
             width: DEFAULT_WIDTH,
             tab: Tab::Files,
             root: root.to_path_buf(),
-            entries: tree(root),
+            entries: tree(root, filter),
             selected: 0,
             current: None,
             scroll: 0.0,
@@ -341,9 +368,66 @@ impl Sidebar {
             hover: None,
             thumb_grab: None,
             stamps: Vec::new(),
+            show_hidden: false,
         };
         side.restamp();
         side
+    }
+
+    /// The scan's filter as the panel stands: the toggle, and the file
+    /// shown in the document, which keeps its row whatever the toggle.
+    fn filter(&self) -> Filter<'_> {
+        Filter {
+            show_hidden: self.show_hidden,
+            current: self.current.as_deref(),
+        }
+    }
+
+    pub fn show_hidden(&self) -> bool {
+        self.show_hidden
+    }
+
+    /// Flips the dot entries in or out of the tree, the tree read again
+    /// on the same root: the expanded folders that still exist stay
+    /// expanded, the selection follows its path where it is still
+    /// listed, the scroll and the current mark stay.
+    pub fn set_show_hidden(&mut self, show: bool) {
+        if self.show_hidden == show {
+            return;
+        }
+        self.show_hidden = show;
+        self.rebuild();
+    }
+
+    /// Reads the tree again on the same root with the panel's filter,
+    /// keeping what a reader would expect kept: the expanded folders
+    /// still there, the selection by path or in range, the scroll.
+    fn rebuild(&mut self) {
+        let expanded: Vec<PathBuf> = self
+            .entries
+            .iter()
+            .filter(|e| e.expanded)
+            .map(|e| e.path.clone())
+            .collect();
+        let selected = self.entries.get(self.selected).map(|e| e.path.clone());
+        let fallback = self.selected;
+        self.entries = tree(&self.root, self.filter());
+        // Parents come before their children in the list, so each
+        // folder is found once its parent has been expanded again.
+        for dir in expanded {
+            if let Some(index) = self
+                .entries
+                .iter()
+                .position(|e| e.is_dir && !e.expanded && e.path == dir)
+            {
+                self.toggle_dir(index);
+            }
+        }
+        let last = self.entries.len().saturating_sub(1);
+        self.selected = selected
+            .and_then(|path| self.entries.iter().position(|e| e.path == path))
+            .unwrap_or(fallback.min(last));
+        self.restamp();
     }
 
     /// Reads the stamps of the shown folders, after any change to the
@@ -379,31 +463,7 @@ impl Sidebar {
         if !moved {
             return false;
         }
-        let expanded: Vec<PathBuf> = self
-            .entries
-            .iter()
-            .filter(|e| e.expanded)
-            .map(|e| e.path.clone())
-            .collect();
-        let selected = self.entries.get(self.selected).map(|e| e.path.clone());
-        let fallback = self.selected;
-        self.entries = tree(&self.root);
-        // Parents come before their children in the list, so each
-        // folder is found once its parent has been expanded again.
-        for dir in expanded {
-            if let Some(index) = self
-                .entries
-                .iter()
-                .position(|e| e.is_dir && !e.expanded && e.path == dir)
-            {
-                self.toggle_dir(index);
-            }
-        }
-        let last = self.entries.len().saturating_sub(1);
-        self.selected = selected
-            .and_then(|path| self.entries.iter().position(|e| e.path == path))
-            .unwrap_or(fallback.min(last));
-        self.restamp();
+        self.rebuild();
         true
     }
 
@@ -425,7 +485,7 @@ impl Sidebar {
     fn go_up(&mut self, parent: &Path) {
         let left = self.root.clone();
         self.root = parent.to_path_buf();
-        self.entries = tree(parent);
+        self.entries = tree(parent, self.filter());
         self.scroll = 0.0;
         self.selected = self
             .entries
@@ -441,7 +501,7 @@ impl Sidebar {
     fn enter_link(&mut self, link: &Path) {
         let target = std::fs::canonicalize(link).unwrap_or_else(|_| link.to_path_buf());
         self.root = target.clone();
-        self.entries = tree(&target);
+        self.entries = tree(&target, self.filter());
         self.scroll = 0.0;
         let first = usize::from(self.entries.first().is_some_and(|e| e.name == ".."));
         self.selected = first.min(self.entries.len().saturating_sub(1));
@@ -479,7 +539,7 @@ impl Sidebar {
                 self.selected -= end - index - 1;
             }
         } else {
-            let children = scan(&path, depth + 1);
+            let children = scan(&path, depth + 1, self.filter());
             if self.selected > index {
                 self.selected += children.len();
             }
@@ -557,9 +617,19 @@ impl Sidebar {
         self.file_of(self.selected)
     }
 
-    /// Marks the file shown in the document area.
+    /// Marks the file shown in the document area. A dot file kept out
+    /// by the toggle gets its row back, alone among the hidden entries,
+    /// so the open file always has one.
     pub fn set_current(&mut self, path: &Path) {
         self.current = Some(path.to_path_buf());
+        let listed = self.entries.iter().position(|e| e.path == path);
+        let hidden_name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| n.starts_with('.'));
+        if listed.is_none() && hidden_name && !self.show_hidden {
+            self.rebuild();
+        }
         if let Some(index) = self.entries.iter().position(|e| e.path == path) {
             self.selected = index;
         }
@@ -1311,10 +1381,18 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
+    /// A sidebar showing its dot entries, for the tests written before
+    /// the toggle, when every entry was listed.
+    fn showing_all(root: &Path) -> Sidebar {
+        let mut side = Sidebar::new(root);
+        side.set_show_hidden(true);
+        side
+    }
+
     #[test]
     fn scan_orders_directories_first_both_alphabetical() {
         let dir = temp_tree("order");
-        let side = Sidebar::new(&dir);
+        let side = showing_all(&dir);
         assert_eq!(
             names(&side),
             [
@@ -1364,7 +1442,7 @@ mod tests {
         let dir = temp_tree("symlink");
         std::os::unix::fs::symlink(dir.join("sub"), dir.join("linked")).unwrap();
         std::os::unix::fs::symlink(dir.join("zeta.md"), dir.join("linked.md")).unwrap();
-        let mut side = Sidebar::new(&dir);
+        let mut side = showing_all(&dir);
         let linked = side
             .entries
             .iter()
@@ -1399,7 +1477,7 @@ mod tests {
     #[test]
     fn expand_inserts_children_in_place_and_collapse_removes_them() {
         let dir = temp_tree("expand");
-        let mut side = Sidebar::new(&dir);
+        let mut side = showing_all(&dir);
         let sub = side.entries.iter().position(|e| e.name == "sub").unwrap();
         assert!(side.activate(sub).is_none());
         assert_eq!(
@@ -1844,6 +1922,88 @@ mod tests {
         assert_eq!(side.selected_file(), Some(dir.join("zeta.md")));
         side.selected = sub;
         assert_eq!(side.selected_file(), None);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Dot entries stay out of the tree until the toggle is on, the
+    /// parent row untouched; on, they list flagged hidden, dimmed.
+    #[test]
+    fn hidden_entries_stay_out_until_the_toggle() {
+        let dir = temp_tree("hidden-off");
+        let mut side = Sidebar::new(&dir);
+        assert!(!side.show_hidden(), "off by default");
+        assert_eq!(
+            names(&side),
+            [
+                "..",
+                "sub",
+                "Alpha.rs",
+                "Cargo.lock",
+                "notes.txt",
+                "README",
+                "zeta.md"
+            ]
+        );
+        side.set_show_hidden(true);
+        assert!(names(&side).contains(&".git".to_string()));
+        assert!(names(&side).contains(&".gitignore".to_string()));
+        assert!(side.entries.iter().filter(|e| e.hidden).count() == 2);
+        side.set_show_hidden(false);
+        assert!(!names(&side).contains(&".git".to_string()));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// The file shown in the document keeps its row whatever the
+    /// toggle, alone among the dot entries, and the selection sits on it.
+    #[test]
+    fn the_open_file_stays_listed_while_hidden_entries_are_off() {
+        let dir = temp_tree("hidden-current");
+        let mut side = Sidebar::new(&dir);
+        side.set_current(&dir.join(".gitignore"));
+        let row = side
+            .entries
+            .iter()
+            .position(|e| e.name == ".gitignore")
+            .expect("the open file is listed");
+        assert!(side.entries[row].hidden, "still drawn dimmed");
+        assert_eq!(side.selected, row);
+        assert!(
+            !names(&side).contains(&".git".to_string()),
+            "the others stay out"
+        );
+        side.set_show_hidden(true);
+        side.set_show_hidden(false);
+        assert!(
+            names(&side).contains(&".gitignore".to_string()),
+            "through a toggle too"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_toggle_keeps_the_selection_on_its_path_and_the_expanded_folders() {
+        let dir = temp_tree("hidden-toggle");
+        std::fs::write(dir.join("sub/.secret.md"), "x").unwrap();
+        let mut side = Sidebar::new(&dir);
+        let sub = side.entries.iter().position(|e| e.name == "sub").unwrap();
+        assert!(side.activate(sub).is_none());
+        assert!(
+            !names(&side).contains(&".secret.md".to_string()),
+            "filtered inside too"
+        );
+        side.selected = side
+            .entries
+            .iter()
+            .position(|e| e.name == "zeta.md")
+            .unwrap();
+        side.set_show_hidden(true);
+        assert_eq!(side.entries[side.selected].name, "zeta.md");
+        let sub = side.entries.iter().position(|e| e.name == "sub").unwrap();
+        assert!(side.entries[sub].expanded, "still expanded");
+        assert!(names(&side).contains(&".secret.md".to_string()));
+        side.set_show_hidden(false);
+        assert_eq!(side.entries[side.selected].name, "zeta.md");
+        assert!(!names(&side).contains(&".secret.md".to_string()));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }
