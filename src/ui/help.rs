@@ -457,6 +457,11 @@ pub const TIPS: &[Tip] = &[
         text: r#"In the editor, `Ctrl+Home` and `Ctrl+End` jump to the start and the end of the file."#,
     },
     Tip {
+        kind: TipKind::Tip,
+        area: Area::Editing,
+        text: r#"Do you write to a length? Turn on the word count in the settings (`Ctrl+,`), and Oryx shows the words, characters, lines and reading time of your file in the bottom right corner. Select some text and it counts only that part."#,
+    },
+    Tip {
         kind: TipKind::Note,
         area: Area::Editing,
         text: r#"Books cannot be edited, and neither can a file whose text Oryx could not read cleanly, since it could not write it back as it was. A small notice in the corner tells you when that is the case."#,
@@ -489,7 +494,7 @@ pub const TIPS: &[Tip] = &[
     Tip {
         kind: TipKind::Tip,
         area: Area::Looks,
-        text: r#"`Ctrl+,` opens the settings: the body font and the code font, their sizes, and the interface scale."#,
+        text: r#"`Ctrl+,` opens the settings: the body font and the code font, their sizes, the interface scale, and the word count."#,
     },
     Tip {
         kind: TipKind::Tip,

@@ -28,18 +28,8 @@ pub fn parse(source: impl Into<Arc<str>>) -> Document {
 /// every span text the source already carries.
 pub fn parse_unless(source: impl Into<Arc<str>>, bail: impl Fn() -> bool) -> Option<Document> {
     let source: Arc<str> = source.into();
-    let options = Options::ENABLE_TABLES
-        | Options::ENABLE_FOOTNOTES
-        | Options::ENABLE_STRIKETHROUGH
-        | Options::ENABLE_TASKLISTS
-        | Options::ENABLE_SMART_PUNCTUATION
-        | Options::ENABLE_MATH
-        | Options::ENABLE_YAML_STYLE_METADATA_BLOCKS
-        | Options::ENABLE_GFM
-        | Options::ENABLE_HEADING_ATTRIBUTES
-        | Options::ENABLE_DEFINITION_LIST;
     let mut builder = Builder::new(Arc::clone(&source));
-    for (count, (event, range)) in Parser::new_ext(&source, options)
+    for (count, (event, range)) in Parser::new_ext(&source, options())
         .into_offset_iter()
         .enumerate()
     {
@@ -62,6 +52,21 @@ pub fn parse_unless(source: impl Into<Arc<str>>, bail: impl Fn() -> bool) -> Opt
             .collect(),
         ..Document::default()
     })
+}
+
+/// The markdown extensions Oryx reads. The word count parses with the
+/// same set, so it sees the constructs the page shows.
+pub(crate) fn options() -> Options {
+    Options::ENABLE_TABLES
+        | Options::ENABLE_FOOTNOTES
+        | Options::ENABLE_STRIKETHROUGH
+        | Options::ENABLE_TASKLISTS
+        | Options::ENABLE_SMART_PUNCTUATION
+        | Options::ENABLE_MATH
+        | Options::ENABLE_YAML_STYLE_METADATA_BLOCKS
+        | Options::ENABLE_GFM
+        | Options::ENABLE_HEADING_ATTRIBUTES
+        | Options::ENABLE_DEFINITION_LIST
 }
 
 /// The currency gate over dollar-delimited math. pulldown already requires

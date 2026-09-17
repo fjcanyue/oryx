@@ -2,4 +2,4 @@ mod band;
 pub mod painter;
 pub mod scroll;
 
-pub use band::band;
+pub use band::{band, paper};

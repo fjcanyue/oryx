@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use oryx::doc::count;
 use oryx::doc::epub;
 use oryx::doc::images::{self, MediaCache, Waker};
 use oryx::doc::load;
@@ -50,6 +51,7 @@ use oryx::ui::textfield::{Edit, TextField};
 use oryx::ui::theme_browser::ThemeBrowser;
 use oryx::ui::theme_editor::ThemeEditor;
 use oryx::ui::tooltip;
+use oryx::ui::wordcount;
 use winit::application::ApplicationHandler;
 use winit::dpi::{PhysicalPosition, PhysicalSize};
 use winit::event::{
@@ -343,6 +345,12 @@ pub fn run(
         caret_snap: false,
         blink_visible: true,
         blink_flip: Instant::now(),
+        count_line: None,
+        count_key: None,
+        count_at: None,
+        count_inbox: std::sync::mpsc::channel(),
+        count_asked: 0,
+        open_failed: false,
         notice: None,
         notice_canvas: None,
     };
@@ -994,6 +1002,41 @@ struct App {
     notice: Option<Notice>,
     /// Reused notice canvas, mirroring the overlay canvas mechanics.
     notice_canvas: Option<OverlayCanvas>,
+    /// The corner word count's text, while the setting is on and the
+    /// open file is one that gets a count.
+    count_line: Option<String>,
+    /// What the shown count was taken from; a frame that finds it
+    /// changed schedules the next count.
+    count_key: Option<CountKey>,
+    /// When the next count runs. A change rests first, so a burst of
+    /// typing or a selection drag costs one count at its end.
+    count_at: Option<Instant>,
+    /// The counts run on a thread of their own and come back here with
+    /// the number of the count that asked; only the latest one lands.
+    count_inbox: (
+        std::sync::mpsc::Sender<CountResult>,
+        std::sync::mpsc::Receiver<CountResult>,
+    ),
+    count_asked: u64,
+    /// The page shows an open error's message, not the file's text.
+    open_failed: bool,
+}
+
+/// A finished count: the number of the count that asked, and the
+/// corner's line, None for a page that shows no count.
+type CountResult = (u64, Option<String>);
+
+/// What a corner count was taken from. The source's address and length
+/// stand for its text: an open or an edit allocates the new text while
+/// the old still lives, so the address moves with it.
+#[derive(Debug, Clone, PartialEq)]
+struct CountKey {
+    path: Option<PathBuf>,
+    source: (usize, usize),
+    selection: Option<Selection>,
+    mode: edit::Mode,
+    /// The help page or an open error's message stands in the page.
+    other_page: bool,
 }
 
 /// The pane owning Up, Down, and Enter. There is no focus system: the
@@ -1915,6 +1958,12 @@ impl App {
             (!self.document.plain_file).then(|| Instant::now() + REHIGHLIGHT_REST);
         self.selection = None;
         self.sel_anchor = None;
+        // Two edits inside one frame can hand the second text the first
+        // one's address, which the frame's own check would read as no
+        // change; the edit schedules its count itself.
+        if self.config.word_count {
+            self.count_at = Some(Instant::now() + wordcount::REST);
+        }
         // The match set holds positions of the text that just changed;
         // the next frame recomputes it against the edit.
         if let Some(state) = self.search.as_mut() {
@@ -1923,6 +1972,104 @@ impl App {
             state.stale = true;
         }
         true
+    }
+
+    /// Schedules the corner count when what it was taken from changed:
+    /// the file, its text, the selection or the surface. The same file
+    /// rests first and keeps its figures meanwhile. Another file's
+    /// figures never stand over this one: they clear, and the count
+    /// runs right after the frame, so the frame itself stays cheap.
+    fn watch_count(&mut self) {
+        if !self.config.word_count {
+            return;
+        }
+        let source = (
+            self.document.source.as_ptr() as usize,
+            self.document.source.len(),
+        );
+        let other_page = self.help_stash.is_some() || self.open_failed;
+        let same_page = self
+            .count_key
+            .as_ref()
+            .is_some_and(|key| key.path == self.path && key.other_page == other_page);
+        let unchanged = same_page
+            && self.count_key.as_ref().is_some_and(|key| {
+                key.source == source && key.selection == self.selection && key.mode == self.mode
+            });
+        if unchanged {
+            return;
+        }
+        let now = Instant::now();
+        self.count_at = Some(if same_page {
+            now + wordcount::REST
+        } else {
+            // A count still out belongs to the page being left.
+            self.count_asked += 1;
+            self.count_line = None;
+            now
+        });
+        self.count_key = Some(CountKey {
+            path: self.path.clone(),
+            source,
+            selection: self.selection,
+            mode: self.mode,
+            other_page,
+        });
+    }
+
+    /// Counts the open file, or the selection when text is selected,
+    /// on a thread of its own, so a large file never holds the window;
+    /// `fold_count` lands the line. A page with no count clears at once.
+    fn recount(&mut self) {
+        self.count_asked += 1;
+        let Some(job) = self.count_job() else {
+            self.count_line = None;
+            self.request_redraw();
+            return;
+        };
+        let asked = self.count_asked;
+        let inbox = self.count_inbox.0.clone();
+        let waker = self.waker.clone();
+        // A thread the system refuses leaves the line as it stands;
+        // the next change asks again.
+        let _ = std::thread::Builder::new()
+            .name("oryx-count".to_string())
+            .spawn(move || {
+                if inbox.send((asked, job.line())).is_ok() {
+                    waker();
+                }
+            });
+    }
+
+    /// What the corner counts. Books, comics, the welcome page, the
+    /// help page and an open error's message get no count.
+    fn count_job(&self) -> Option<count::Job> {
+        if !self.config.word_count || self.help_stash.is_some() || self.open_failed {
+            return None;
+        }
+        let kind = load::detect(self.path.as_ref()?);
+        count::scope(kind)?;
+        let selected = self
+            .selection
+            .filter(|sel| !sel.is_empty())
+            .map(|sel| selection::plain_text(&sel, &self.document));
+        Some(count::Job {
+            kind,
+            editing: self.mode == edit::Mode::Edit,
+            source: Arc::clone(&self.document.source),
+            selected,
+        })
+    }
+
+    /// Lands the counts that came back. A count an edit, a selection or
+    /// another file has overtaken is dropped.
+    fn fold_count(&mut self) {
+        while let Ok((asked, line)) = self.count_inbox.1.try_recv() {
+            if asked == self.count_asked && self.config.word_count {
+                self.count_line = line;
+                self.request_redraw();
+            }
+        }
     }
 
     /// Unsaved edits stand: the undo head is away from the save point,
@@ -4176,6 +4323,7 @@ impl App {
                 self.cfg.body_size,
                 self.cfg.code_size,
                 self.config.ui_scale,
+                self.config.word_count,
             )));
             self.request_redraw();
         }
@@ -4628,6 +4776,7 @@ impl App {
         }
         let loaded = load::open(&path, Some(Instant::now() + load::OPEN_BUDGET));
         let opened = loaded.is_ok();
+        self.open_failed = !opened;
         let mut book_job = None;
         self.book_toc = Vec::new();
         match loaded {
@@ -5382,6 +5531,16 @@ impl App {
                 self.layout = None;
                 self.band = None;
             }
+            OverlayResult::Apply(Action::SetWordCount(on)) => {
+                self.config.word_count = on;
+                self.view_dirty = true;
+                // The next frame finds no count taken and runs one; a
+                // count still out is overtaken.
+                self.count_key = None;
+                self.count_line = None;
+                self.count_at = None;
+                self.count_asked += 1;
+            }
         }
         self.request_redraw();
     }
@@ -5817,6 +5976,7 @@ impl App {
         // Frames mean interaction; idle draws nothing, so the disk
         // check rides them without ever waking the loop itself.
         self.check_disk();
+        self.watch_count();
         let inset = self.inset() as u32;
         let Some(size) = self.gfx.as_ref().map(|g| g.window.inner_size()) else {
             return;
@@ -6114,6 +6274,34 @@ impl App {
                 *stale = painter.dirty();
             }
         }
+        // A notice takes the same corner for its two seconds.
+        let noticed = self
+            .notice
+            .as_ref()
+            .is_some_and(|notice| notice.alpha(Instant::now()).is_some());
+        if let Some(text) = self.count_line.as_deref().filter(|_| !noticed) {
+            let fits = self
+                .notice_canvas
+                .as_ref()
+                .is_some_and(|(p, _)| p.width() == size.width && p.height() == size.height);
+            if !fits {
+                self.notice_canvas =
+                    tiny_skia::Pixmap::new(size.width, size.height).map(|pixmap| (pixmap, None));
+            }
+            if let Some((canvas, stale)) = self.notice_canvas.as_mut() {
+                let mut painter = Painter::new(canvas, &mut self.fonts, stale.take(), self.scale);
+                wordcount::draw(
+                    &mut painter,
+                    &self.theme,
+                    text,
+                    paint::paper(&self.document, &self.theme),
+                    size.width as f32 / self.scale,
+                    size.height as f32 / self.scale,
+                );
+                painter.composite(&mut buffer, size.width);
+                *stale = painter.dirty();
+            }
+        }
         if let Some(alpha) = self
             .notice
             .as_ref()
@@ -6279,6 +6467,25 @@ impl ApplicationHandler for App {
                 }
             }
         }
+        // The count's rest keeps whichever wake above comes sooner, and
+        // a count that ran leaves no lapsed deadline standing, which
+        // would spin the loop.
+        if let Some(at) = self.count_at {
+            let now = Instant::now();
+            if now >= at {
+                self.count_at = None;
+                self.recount();
+                if matches!(event_loop.control_flow(), ControlFlow::WaitUntil(t) if t <= now) {
+                    event_loop.set_control_flow(ControlFlow::Wait);
+                }
+            } else {
+                let sooner = match event_loop.control_flow() {
+                    ControlFlow::WaitUntil(other) if other > now && other < at => other,
+                    _ => at,
+                };
+                event_loop.set_control_flow(ControlFlow::WaitUntil(sooner));
+            }
+        }
         self.maybe_speculate();
         // Last, so its near tick wins the wake; an early wake costs the
         // timers above nothing.
@@ -6310,6 +6517,7 @@ impl ApplicationHandler for App {
         }
         self.fold_parse();
         self.fold_highlights();
+        self.fold_count();
     }
 
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {

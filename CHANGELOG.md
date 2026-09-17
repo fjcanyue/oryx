@@ -47,6 +47,12 @@
 
 - Heading lines are bold, as they are on the page and in VS Code. A code font without a bold face shows no difference.
 
+### Word count
+
+- A new `word count` row in the settings (`Ctrl+,`) shows the size of the file in the bottom right corner of the page: words, characters, lines and reading time. It is off by default, and the choice is remembered. Select some text and the line shows the figures of the selection.
+- The count reads the text as the page shows it: markdown marks, link addresses, HTML tags and frontmatter are not counted. A line ending with two spaces counts as a line, a plain line break inside a paragraph does not. Reading time is 240 words a minute.
+- A code file shows its lines and characters only. Books and comics show nothing.
+
 ### Welcome page
 
 - The welcome page ends with a tip, a different one at each launch, from a list that covers every feature of Oryx. The tips take turns between the areas, files, moving around, search, editing, themes, export, markdown, books, so ten launches show ten different kinds of things. A "more tips" link under it shows another. Nothing to close and nothing to switch off: the tips only live on the page you see when no file is open.

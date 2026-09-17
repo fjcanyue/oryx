@@ -8,7 +8,18 @@ use crate::doc::images::MediaCache;
 use crate::doc::model::Document;
 use crate::layout::{metrics, DecoRect, LayoutDoc, MathGlyph, TextRun};
 use crate::style::fonts::FontStore;
-use crate::style::theme::Theme;
+use crate::style::theme::{Rgba, Theme};
+
+/// The color of the page itself. A code file's page is code: the theme's
+/// code background becomes the paper, edge to edge, where the dropped
+/// panel used to carry it.
+pub fn paper(doc: &Document, theme: &Theme) -> Rgba {
+    if doc.code_file {
+        theme.blocks.code_bg
+    } else {
+        theme.surface.background
+    }
+}
 
 /// Paints the document slice `[y_top, y_top + height)` at full width.
 /// `extra` rects (the selection highlight) paint above the document's own
@@ -26,13 +37,7 @@ pub fn band(
     height: u32,
 ) -> Vec<u32> {
     let mut pixmap = Pixmap::new(width.max(1), height.max(1)).expect("pixmap allocation");
-    // A code file's page is code: the theme's code background becomes
-    // the paper, edge to edge, where the dropped panel used to carry it.
-    let bg = if doc.code_file {
-        theme.blocks.code_bg
-    } else {
-        theme.surface.background
-    };
+    let bg = paper(doc, theme);
     pixmap.fill(tiny_skia::Color::from_rgba8(bg.r, bg.g, bg.b, 255));
     let band_bottom = y_top + height as f32;
 

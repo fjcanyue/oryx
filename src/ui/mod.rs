@@ -13,3 +13,4 @@ pub mod textfield;
 pub mod theme_browser;
 pub mod theme_editor;
 pub mod tooltip;
+pub mod wordcount;

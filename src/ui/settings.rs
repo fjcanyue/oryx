@@ -1,5 +1,5 @@
-//! Settings overlay: body and code font families and sizes, applied live
-//! and persisted by the app. Zoom stepping helpers live here too; zoom is
+//! Settings overlay: body and code font families and sizes and the on/off
+//! rows, applied live and persisted by the app. Zoom stepping helpers live here too; zoom is
 //! session state and never saved.
 
 use winit::keyboard::{Key, NamedKey};
@@ -22,13 +22,17 @@ const _: () = assert!(HEADER_H + PAD / 2.0 >= LIST_ROW_H && FOOTER_H + PAD / 2.0
 const PANEL_W: f32 = 420.0;
 const RADIUS: f32 = 8.0;
 
-const ROWS: [&str; 5] = [
+const ROWS: [&str; 6] = [
     "body font",
     "code font",
     "body size",
     "code size",
     "interface scale",
+    "word count",
 ];
+
+/// The word count's row in `ROWS`.
+const WORD_COUNT_ROW: usize = 5;
 
 /// Font size bounds for both families.
 pub const SIZE_MIN: f32 = 8.0;
@@ -92,6 +96,7 @@ pub struct Settings {
     body_size: f32,
     code_size: f32,
     ui_scale: f32,
+    word_count: bool,
     row: usize,
     pick: Option<Pick>,
     drag: PanelDrag,
@@ -106,6 +111,7 @@ impl Settings {
         body_size: f32,
         code_size: f32,
         ui_scale: f32,
+        word_count: bool,
     ) -> Settings {
         Settings {
             families,
@@ -114,6 +120,7 @@ impl Settings {
             body_size,
             code_size,
             ui_scale,
+            word_count,
             row: 0,
             pick: None,
             drag: PanelDrag::default(),
@@ -161,8 +168,15 @@ impl Settings {
         self.view_change()
     }
 
+    /// An on/off row answers either arrow, Space and Enter the same way.
+    fn flip_word_count(&mut self) -> OverlayResult {
+        self.word_count = !self.word_count;
+        OverlayResult::Apply(Action::SetWordCount(self.word_count))
+    }
+
     fn step_row(&mut self, delta: f32) -> OverlayResult {
         match self.row {
+            WORD_COUNT_ROW => return self.flip_word_count(),
             2 => self.body_size = step_size(self.body_size, delta),
             3 => self.code_size = step_size(self.code_size, delta),
             4 => self.ui_scale = step_ui_scale(self.ui_scale, delta * UI_SCALE_STEP),
@@ -359,6 +373,8 @@ impl Overlay for Settings {
                             let value = match index {
                                 2 => format!("{}", self.body_size as i32),
                                 3 => format!("{}", self.code_size as i32),
+                                WORD_COUNT_ROW if self.word_count => "on".to_string(),
+                                WORD_COUNT_ROW => "off".to_string(),
                                 _ => format!("{}%", ui_scale_label(self.ui_scale)),
                             };
                             let text = format!("\u{2039}  {value}  \u{203A}");
@@ -408,6 +424,9 @@ impl Overlay for Settings {
             Key::Named(NamedKey::ArrowDown) => self.row = (self.row + 1).min(ROWS.len() - 1),
             Key::Named(NamedKey::ArrowUp) => self.row = self.row.saturating_sub(1),
             Key::Named(NamedKey::Enter) if self.row < 2 => self.open_pick(),
+            Key::Named(NamedKey::Enter | NamedKey::Space) if self.row == WORD_COUNT_ROW => {
+                return self.flip_word_count()
+            }
             Key::Named(NamedKey::ArrowRight) => return self.step_row(1.0),
             Key::Named(NamedKey::ArrowLeft) => return self.step_row(-1.0),
             _ => {}
@@ -513,6 +532,7 @@ mod tests {
             22.0,
             20.0,
             1.0,
+            false,
         )
     }
 
@@ -560,6 +580,28 @@ mod tests {
             step_ui_scale(UI_SCALE_MIN, -UI_SCALE_STEP),
             UI_SCALE_MIN
         ));
+    }
+
+    #[test]
+    fn the_word_count_row_flips_with_the_arrows_space_and_enter() {
+        let mut s = settings();
+        for _ in 0..9 {
+            press(&mut s, NamedKey::ArrowDown);
+        }
+        assert_eq!(s.row, WORD_COUNT_ROW, "the last row, and Down stops there");
+        let mut seen = Vec::new();
+        for key in [
+            NamedKey::ArrowRight,
+            NamedKey::ArrowLeft,
+            NamedKey::Space,
+            NamedKey::Enter,
+        ] {
+            let OverlayResult::Apply(Action::SetWordCount(on)) = press(&mut s, key) else {
+                panic!("{key:?} flips the row");
+            };
+            seen.push(on);
+        }
+        assert_eq!(seen, [true, false, true, false]);
     }
 
     #[test]

@@ -903,3 +903,34 @@ fn long_lines_meet_the_budget() {
         assert!(laid.ms < 1000, "budget exceeded: layout {}ms", laid.ms);
     }
 }
+
+/// The corner count's cost over the markdown and code tiers: the whole
+/// file counted once, the way a load or a pause in typing does.
+#[test]
+#[ignore = "timing probe, release mode"]
+fn count_measured() {
+    use oryx::doc::count;
+    for bytes in [64 * 1024, 1024 * 1024, 8 * 1024 * 1024] {
+        let md = large_gen::generate(bytes);
+        let code = large_gen::generate_code(bytes);
+        let best = |f: &dyn Fn() -> count::Counts| {
+            (0..5)
+                .map(|_| {
+                    let t = Instant::now();
+                    let c = f();
+                    (t.elapsed().as_secs_f64() * 1000.0, c)
+                })
+                .min_by(|a, b| a.0.total_cmp(&b.0))
+                .unwrap()
+        };
+        let (md_ms, md_c) = best(&|| count::markdown(&md));
+        let (tx_ms, _) = best(&|| count::text(&md));
+        let (cd_ms, cd_c) = best(&|| count::code(&code));
+        println!(
+            "count {:>5} KB: markdown {md_ms:.2}ms ({} words), text {tx_ms:.2}ms, code {cd_ms:.2}ms ({} lines)",
+            bytes / 1024,
+            md_c.words,
+            cd_c.lines
+        );
+    }
+}
