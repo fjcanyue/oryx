@@ -40,6 +40,24 @@ pub enum FileKind {
     Unknown,
 }
 
+/// The kind of a file with its text at hand: `detect` by name, and for
+/// a name that says nothing, what the text says about itself (a
+/// shebang, a modeline, a diff header, a JSON or INI shape) as a code
+/// file of that grammar. Plain when nothing answers. The open path and
+/// the editor's round trip use it; the sidebar keeps the cheap `detect`.
+pub fn detect_with_text(path: &Path, text: &str) -> FileKind {
+    match detect(path) {
+        FileKind::Unknown => {
+            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            match crate::style::highlight::sniff_language(name, text) {
+                Some(grammar) => FileKind::Code(grammar),
+                None => FileKind::Unknown,
+            }
+        }
+        kind => kind,
+    }
+}
+
 pub fn detect(path: &Path) -> FileKind {
     if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
         if let Ok(i) = WELL_KNOWN_NAMES.binary_search_by_key(&name, |(k, _)| k) {
@@ -299,7 +317,10 @@ pub fn open(path: &Path, deadline: Option<Instant>) -> anyhow::Result<Opened> {
             unreachable!("books returned before the sniff")
         }
         FileKind::Undisplayable => unreachable!("refused before the sniff"),
-        FileKind::Unknown => code_document(None, &text),
+        FileKind::Unknown => match detect_with_text(path, &text) {
+            FileKind::Code(grammar) => code_document(Some(grammar), &text),
+            _ => code_document(None, &text),
+        },
     };
     let pending = apply_budget(&mut document, deadline);
     Ok(Opened {
@@ -552,10 +573,24 @@ fn flush_plain(blocks: &mut Vec<Block>, spans: &mut Vec<Span>) {
 /// through to the content sniff. A suffixed variant (`Dockerfile.dev`)
 /// stays unknown and still opens as plain code through the sniff.
 static WELL_KNOWN_NAMES: &[(&str, &str)] = &[
+    (".bash_login", "sh"),
+    (".bash_logout", "sh"),
+    (".bash_profile", "sh"),
+    (".bashrc", "sh"),
+    (".gitconfig", "ini"),
+    (".gitmodules", "ini"),
+    (".npmrc", "ini"),
+    (".profile", "sh"),
+    (".zlogin", "sh"),
+    (".zprofile", "sh"),
+    (".zshenv", "sh"),
+    (".zshrc", "sh"),
     ("Containerfile", "dockerfile"),
     ("Dockerfile", "dockerfile"),
     ("GNUmakefile", "makefile"),
+    ("Jenkinsfile", "groovy"),
     ("Makefile", "makefile"),
+    ("PKGBUILD", "sh"),
     ("makefile", "makefile"),
 ];
 
@@ -1349,5 +1384,52 @@ mod tests {
         for e in ["md", "markdown", "txt", "rs", "py", "toml", "yaml"] {
             assert!(exts.contains(&e), "{e} missing");
         }
+    }
+
+    /// The common shell and git files without an extension are named in
+    /// the table, since the grammars know only some of them.
+    #[test]
+    fn well_known_dotfiles_have_their_token() {
+        for (name, token) in [
+            (".zshrc", "sh"),
+            (".zshenv", "sh"),
+            (".bash_profile", "sh"),
+            (".profile", "sh"),
+            ("PKGBUILD", "sh"),
+            (".gitconfig", "ini"),
+            (".gitmodules", "ini"),
+            ("Jenkinsfile", "groovy"),
+        ] {
+            assert_eq!(detect(Path::new(name)), FileKind::Code(token), "{name}");
+        }
+    }
+
+    /// Opened, a file without an extension carries the grammar its text
+    /// or its name gives away, and prose stays a plain code document.
+    #[test]
+    fn files_without_an_extension_open_with_their_colors() {
+        let dir = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/noext"));
+        let language = |name: &str| -> Option<String> {
+            let opened = open(&dir.join(name), None).expect(name);
+            match &opened.document.blocks[0].kind {
+                BlockKind::CodeBlock { language, .. } => language.clone(),
+                other => panic!("{name}: not a code document: {other:?}"),
+            }
+        };
+        assert_eq!(language("script").as_deref(), Some("Python"));
+        assert_eq!(language("modeline").as_deref(), Some("Ruby"));
+        assert_eq!(language("emacs").as_deref(), Some("Lisp"));
+        assert_eq!(language(".bashrc").as_deref(), Some("sh"));
+        assert_eq!(language(".zshrc").as_deref(), Some("sh"));
+        assert_eq!(language(".gitconfig").as_deref(), Some("ini"));
+        assert_eq!(language("patch").as_deref(), Some("Diff"));
+        assert_eq!(language("settings").as_deref(), Some("JSON"));
+        assert_eq!(language("config").as_deref(), Some("INI"));
+        assert_eq!(language("README"), None, "prose stays plain");
+        assert_eq!(
+            detect_with_text(&dir.join("script"), "#!/usr/bin/env python3\n"),
+            FileKind::Code("Python"),
+            "the kind with the text at hand, for the editor's round trip"
+        );
     }
 }

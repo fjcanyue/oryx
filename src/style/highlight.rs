@@ -666,6 +666,127 @@ fn resolve_syntax(token: &str) -> Option<&'static syntect::parsing::SyntaxRefere
     })
 }
 
+/// The grammar for a file whose name carries no extension, from what
+/// the file says about itself, in four layers tried in order: its first
+/// line against the grammars' own first-line patterns (shebangs, an XML
+/// header), an editor modeline in its first or last lines, its name
+/// against the grammars' own name lists (`.bashrc`, `Gemfile`), and the
+/// shape of its first lines for four plain tells only, a diff, JSON,
+/// XML or INI, so a settings file is never colored as the wrong
+/// language. None keeps the file plain; a wrong guess costs colors,
+/// never the text. Answers the grammar's name, which resolves as a
+/// token.
+pub fn sniff_language(name: &str, text: &str) -> Option<&'static str> {
+    let set = syntax_set();
+    let first = text.lines().next().unwrap_or("");
+    if let Some(syntax) = set.find_syntax_by_first_line(first) {
+        return Some(syntax.name.as_str());
+    }
+    if let Some(syntax) = modeline_token(text).and_then(|token| resolve_syntax(&token)) {
+        return Some(syntax.name.as_str());
+    }
+    if let Some(syntax) = set.find_syntax_by_extension(name) {
+        return Some(syntax.name.as_str());
+    }
+    shape_token(text)
+        .and_then(resolve_syntax)
+        .map(|syntax| syntax.name.as_str())
+}
+
+/// The language a modeline names, in the vim form (`vim: set ft=sh:`,
+/// `vi:ft=sh`, `syntax=sh`) or the Emacs form (`-*- mode: python -*-`,
+/// `-*- python -*-`), looked for in the first and the last five lines.
+fn modeline_token(text: &str) -> Option<String> {
+    let lines: Vec<&str> = text.lines().collect();
+    let edge = lines.len().min(5);
+    let candidates = lines[..edge]
+        .iter()
+        .chain(lines[lines.len() - edge..].iter());
+    for line in candidates {
+        if let Some(token) = vim_modeline(line).or_else(|| emacs_modeline(line)) {
+            return Some(token);
+        }
+    }
+    None
+}
+
+fn vim_modeline(line: &str) -> Option<String> {
+    let start = ["vim:", "vi:", "ex:"]
+        .iter()
+        .filter_map(|marker| {
+            line.find(marker)
+                .filter(|&i| i == 0 || !line.as_bytes()[i - 1].is_ascii_alphanumeric())
+                .map(|i| i + marker.len())
+        })
+        .min()?;
+    line[start..]
+        .split(|c: char| c.is_whitespace() || c == ':')
+        .find_map(|word| {
+            let value = word
+                .strip_prefix("filetype=")
+                .or_else(|| word.strip_prefix("ft="))
+                .or_else(|| word.strip_prefix("syntax="))?;
+            (!value.is_empty()).then(|| value.to_ascii_lowercase())
+        })
+}
+
+fn emacs_modeline(line: &str) -> Option<String> {
+    let open = line.find("-*-")? + 3;
+    let close = line[open..].find("-*-")? + open;
+    let inner = line[open..close].trim();
+    let token = match inner.find("mode:") {
+        Some(i) => inner[i + 5..]
+            .trim_start()
+            .split(|c: char| c == ';' || c.is_whitespace())
+            .next()?,
+        None if !inner.contains(':') => inner,
+        None => return None,
+    };
+    (!token.is_empty()).then(|| token.to_ascii_lowercase())
+}
+
+/// The four plain shapes told from the first lines: a diff, a JSON
+/// object or array with a quoted key, XML or HTML by its tags, INI by
+/// a section line over a key line. Anything else says nothing.
+fn shape_token(text: &str) -> Option<&'static str> {
+    let head: Vec<&str> = text
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .take(20)
+        .collect();
+    let first = head.first()?.trim_start();
+    let is_diff = first.starts_with("diff --git")
+        || first.starts_with("Index: ")
+        || (first.starts_with("--- ") && head.iter().any(|line| line.starts_with("+++ ")))
+        || head
+            .iter()
+            .any(|line| line.starts_with("@@ ") && line.contains(" @@"));
+    if is_diff {
+        return Some("diff");
+    }
+    if (first.starts_with('{') || first.starts_with('['))
+        && head
+            .iter()
+            .any(|line| line.contains("\":") || line.contains("\" :"))
+    {
+        return Some("json");
+    }
+    let tag_open = first.starts_with('<')
+        && first[1..]
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_alphabetic() || c == '?' || c == '!');
+    if tag_open && (text.contains("</") || text.contains("/>")) {
+        return Some("xml");
+    }
+    let section =
+        first.starts_with('[') && first.trim_end().ends_with(']') && !first.contains("](");
+    if section && head.get(1).is_some_and(|line| line.contains('=')) {
+        return Some("ini");
+    }
+    None
+}
+
 /// Whether a language token resolves to the markdown grammar, which is
 /// the only one whose scopes carry the document's own colors.
 fn is_markdown(language: Option<&str>) -> bool {
@@ -1490,5 +1611,96 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// A file with no extension says what it is in four ways, tried in
+    /// order: its first line, a modeline, its name, or its shape; prose
+    /// says nothing and stays plain.
+    #[test]
+    fn a_file_without_an_extension_is_sniffed_from_what_it_says() {
+        let sniff = |name: &str, text: &str| sniff_language(name, text);
+        assert_eq!(
+            sniff("script", "#!/usr/bin/env python3\nprint(1)\n"),
+            Some("Python")
+        );
+        assert_eq!(
+            sniff("run", "#!/bin/sh\necho hi\n"),
+            Some("Bourne Again Shell (bash)")
+        );
+        assert_eq!(
+            sniff("feed", "<?xml version=\"1.0\"?>\n<rss/>\n"),
+            Some("XML")
+        );
+        assert_eq!(
+            sniff("modeline", "# a comment\n# vim: set ft=ruby:\nputs 1\n"),
+            Some("Ruby")
+        );
+        assert_eq!(
+            sniff("tail", "puts 1\nputs 2\n# vim:ft=ruby\n"),
+            Some("Ruby"),
+            "a modeline in the last lines counts too"
+        );
+        assert_eq!(
+            sniff("emacs", ";; -*- mode: lisp -*-\n(defun f () 1)\n"),
+            Some("Lisp")
+        );
+        assert_eq!(
+            sniff("emacs-bare", "# -*- python -*-\nprint(1)\n"),
+            Some("Python"),
+            "the bare Emacs form names the mode alone"
+        );
+        assert_eq!(
+            sniff(".bashrc", "# no shebang\nexport A=1\n"),
+            Some("Bourne Again Shell (bash)"),
+            "the grammars know the name"
+        );
+        assert_eq!(
+            sniff("Gemfile", "source 'https://rubygems.org'\n"),
+            Some("Ruby")
+        );
+        assert_eq!(
+            sniff(
+                "patch",
+                "diff --git a/x b/x\n--- a/x\n+++ b/x\n@@ -1 +1 @@\n-a\n+b\n"
+            ),
+            Some("Diff")
+        );
+        assert_eq!(
+            sniff("changes", "--- a/x\n+++ b/x\n@@ -1 +1 @@\n-a\n+b\n"),
+            Some("Diff"),
+            "a unified diff without the git header"
+        );
+        assert_eq!(
+            sniff("settings", "{\n  \"theme\": \"nord\"\n}\n"),
+            Some("JSON")
+        );
+        assert_eq!(sniff("config", "[window]\nwidth = 1000\n"), Some("INI"));
+        assert_eq!(sniff("gitconfig", "[user]\n\tname = x\n"), Some("INI"));
+        assert_eq!(
+            sniff("page", "<html>\n<body>hi</body>\n</html>\n"),
+            Some("HTML"),
+            "the grammars' first-line patterns know an html tag"
+        );
+        assert_eq!(
+            sniff("feed", "<rss>\n<item/>\n</rss>\n"),
+            Some("XML"),
+            "a tag the patterns do not know is XML by its shape"
+        );
+        assert_eq!(
+            sniff("README", "Oryx\n\nA fast viewer.\n"),
+            None,
+            "prose stays plain"
+        );
+        assert_eq!(
+            sniff("notes", "[a link](x)\n\nmore\n"),
+            None,
+            "a bracket alone is not INI"
+        );
+        assert_eq!(
+            sniff("list", "[\"a\", \"b\"]\n"),
+            None,
+            "an array of strings is not JSON enough"
+        );
+        assert_eq!(sniff("empty", ""), None);
     }
 }

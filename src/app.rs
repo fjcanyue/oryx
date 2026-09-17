@@ -1355,7 +1355,11 @@ impl App {
     /// next return costs no parse, since the parked page is the
     /// buffer's own render again.
     fn refresh_parked_page(&mut self) {
-        let Some(kind) = self.path.as_deref().map(load::detect) else {
+        let Some(kind) = self
+            .path
+            .as_deref()
+            .map(|path| load::detect_with_text(path, &self.document.source))
+        else {
             return;
         };
         let head = self.undo.as_ref().map_or(0, Undo::head);
@@ -1406,8 +1410,11 @@ impl App {
                     parked.pass.filter(|_| same_look),
                 );
             } else {
-                let kind = self.path.as_deref().map(load::detect);
                 let text = Arc::clone(&self.document.source);
+                let kind = self
+                    .path
+                    .as_deref()
+                    .map(|path| load::detect_with_text(path, &text));
                 if let Some(kind) = kind {
                     self.document = edit::rendered_document(kind, &text);
                 }
@@ -1732,7 +1739,7 @@ impl App {
             .as_ref()
             .and_then(|l| caret::row_top(l, &self.document, caret))
             .is_some_and(|y| y >= self.scroll_y && y < self.scroll_y + self.viewport_h());
-        self.document = edit::rendered_document(load::detect(&path), &current);
+        self.document = edit::rendered_document(load::detect_with_text(&path, &current), &current);
         self.restart_layout();
         self.outline = OutlineTree::build(&self.document);
         self.cancel_highlight();

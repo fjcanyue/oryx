@@ -37,6 +37,10 @@
 
 - The checkboxes are a little bigger, and the check mark fills the box. The click target and the PDF follow.
 
+### Files without an extension
+
+- A file without an extension now gets syntax colors when it says what it is: a script by its shebang, a file with an editor modeline, a dotfile by its name (`.bashrc`, `.zshrc`, `.profile`, `.gitconfig`, `Gemfile`, `PKGBUILD` and the like), or a diff, a JSON, an XML or an INI file by the shape of its first lines. Anything else opens plain, as before.
+
 ### Source view
 
 - Heading lines are bold, as they are on the page and in VS Code. A code font without a bold face shows no difference.
