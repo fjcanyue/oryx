@@ -19,6 +19,10 @@
 - A folder Oryx cannot read now shows one row saying so, under the `..` row, so you can climb back out. Before, the panel went blank.
 - The welcome page says that the sidebar key shows and hides the panel.
 
+### Task lists
+
+- The checkboxes are a little bigger, and the check mark fills the box. The click target and the PDF follow.
+
 ## v1.1.1
 
 A small release for the first two reports from a user, issues #1 and #2 on GitHub. The details, by area:

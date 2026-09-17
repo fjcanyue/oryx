@@ -367,32 +367,76 @@ fn quote_indents_with_bar_and_panel() {
     );
 }
 
+// The box is 0.9 of the font size and the check mark 0.8, so the mark
+// fills the box; the web's native box is 0.81 and read small at 1x.
 #[test]
 fn task_items_draw_checkboxes() {
-    let l = lay("- [x] done\n- [ ] todo", 800.0);
+    let (doc, l) = lay2("- [x] done\n- [ ] todo", 800.0);
     let t = Theme::default_dark();
+    let size = cfg().body_size;
+    let fill = l
+        .rects
+        .iter()
+        .find(|r| r.color == t.text.link)
+        .expect("checked box fill");
     assert!(
-        l.rects.iter().any(|r| r.color == t.text.link),
-        "checked box fill"
+        (fill.width - 0.9 * size).abs() < 0.01,
+        "box side {}",
+        fill.width
     );
+    assert_eq!(fill.width, fill.height, "the box is square");
+    let outline = l
+        .rects
+        .iter()
+        .find(|r| r.color == t.blocks.rule && r.stroke > 0.0)
+        .expect("unchecked box outline");
     assert!(
-        l.rects
-            .iter()
-            .any(|r| r.color == t.blocks.rule && r.stroke > 0.0),
-        "unchecked box outline"
+        (outline.width - 0.9 * size).abs() < 0.01,
+        "outline side {}",
+        outline.width
+    );
+    let mark = find_text(&l, &doc, "\u{2713}");
+    assert!(
+        (mark.size - 0.8 * size).abs() < 0.01,
+        "mark size {}",
+        mark.size
+    );
+    let done = find_text(&l, &doc, "done");
+    assert!(
+        (mark.y - (done.y + 1.0)).abs() < 0.01,
+        "the mark sits one pixel below its line's text: mark {} text {}",
+        mark.y,
+        done.y
     );
 }
 
-// The squares are the click's hit targets: a point inside each box
-// answers its own block, the gutter beside the text answers nothing.
+// The squares are the click's hit targets, the same square that is
+// drawn: a point inside each box answers its own block, a point just
+// outside the drawn edge and the gutter beside the text answer nothing.
 #[test]
 fn checkboxes_answer_the_click() {
     let (doc, l) = lay2("- [x] done\n- [ ] todo", 800.0);
+    let t = Theme::default_dark();
     let done = find_text(&l, &doc, "done");
     let todo = find_text(&l, &doc, "todo");
+    let fill = l
+        .rects
+        .iter()
+        .find(|r| r.color == t.text.link)
+        .expect("checked box fill");
     let first = l
-        .checkbox_at(done.x - 14.0, done.y + 6.0)
-        .expect("the first box answers");
+        .checkbox_at(fill.x + fill.width / 2.0, fill.y + fill.height / 2.0)
+        .expect("the first box answers at its drawn center");
+    assert_eq!(
+        l.checkbox_at(fill.x - 3.0, fill.y + fill.height / 2.0),
+        None,
+        "just left of the drawn box is nothing"
+    );
+    assert_eq!(
+        l.checkbox_at(done.x - 14.0, done.y + 6.0),
+        Some(first),
+        "inside the box beside the text"
+    );
     let second = l
         .checkbox_at(todo.x - 14.0, todo.y + 6.0)
         .expect("the second box answers");

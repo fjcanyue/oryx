@@ -4085,7 +4085,9 @@ fn layout_list_item(
         }
         Marker::None => {}
         Marker::Task { checked, .. } => {
-            let side = 0.8 * size;
+            // Above the web's native 0.81, which reads small at 1x; the
+            // mark at 0.8 fills the box instead of floating in it.
+            let side = 0.9 * size;
             let bx = if rtl {
                 text_x + text_w + gutter
             } else {
@@ -4109,11 +4111,14 @@ fn layout_list_item(
                     fonts,
                     cfg,
                     "\u{2713}",
-                    0.7 * size,
+                    0.8 * size,
                     theme.surface.background,
                     out,
                 );
-                place_marker(runs, bx + (side - width) / 2.0, y0, block_index, out);
+                // A logical pixel down from the text's own line: the glyph
+                // sits high in its em box and reads off-center otherwise.
+                let lift = cfg.zoom;
+                place_marker(runs, bx + (side - width) / 2.0, y0 + lift, block_index, out);
             } else {
                 let t = (1.0 * cfg.zoom).max(1.0);
                 let radius = 3.0 * cfg.zoom;
