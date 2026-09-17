@@ -323,10 +323,11 @@ pub const SHORTCUTS: &[Shortcut] = &[
         section: "Find",
         bindings: &[(Binding::Ctrl("h"), Command::Replace)],
     },
-    // Handled by the open search bar itself, so no command binding.
+    // Handled by the open search bar and by the sidebar themselves, so
+    // no command binding.
     Shortcut {
         keys: "Ctrl+Enter",
-        action: "Replace all (replace open)",
+        action: "Replace all (replace open); in the sidebar, open the highlighted file in a new window, as a middle click on its row does",
         section: "Find",
         bindings: &[],
     },

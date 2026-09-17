@@ -527,6 +527,36 @@ impl Sidebar {
         self.activate(self.selected)
     }
 
+    /// The file a row shows, or None for a folder, the parent row and
+    /// the notice: what a second window can open.
+    fn file_of(&self, index: usize) -> Option<PathBuf> {
+        let entry = self.entries.get(index)?;
+        let parent = index == 0 && entry.name == "..";
+        (!entry.is_dir && !entry.notice && !parent).then(|| entry.path.clone())
+    }
+
+    /// The file under a point of the files tab, without touching the
+    /// selection or the tree; None off the rows or on the outline tab.
+    pub fn file_at(&self, x: f32, y: f32) -> Option<PathBuf> {
+        if self.tab != Tab::Files || x < 0.0 || x >= self.width - STRIP_W {
+            return None;
+        }
+        let top = PAD + CAPTION_H;
+        if y < top || y >= top + self.list_h {
+            return None;
+        }
+        let index = ((y - top + self.scroll) / ROW_H).floor();
+        if index < 0.0 {
+            return None;
+        }
+        self.file_of(index as usize)
+    }
+
+    /// The file of the selected row, if the selection is on one.
+    pub fn selected_file(&self) -> Option<PathBuf> {
+        self.file_of(self.selected)
+    }
+
     /// Marks the file shown in the document area.
     pub fn set_current(&mut self, path: &Path) {
         self.current = Some(path.to_path_buf());
@@ -1783,6 +1813,37 @@ mod tests {
             side.selected < side.entries.len(),
             "the selection stays in range"
         );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A middle click asks for the file under the pointer without
+    /// opening it in place: a file row answers its path, a folder row,
+    /// the parent row and the space below the list answer nothing.
+    #[test]
+    fn the_file_under_a_point_answers_only_for_a_file_row() {
+        let dir = temp_tree("file-at");
+        let mut side = Sidebar::new(&dir);
+        side.list_h = 600.0;
+        let row_y = |index: usize| PAD + CAPTION_H + index as f32 * ROW_H + 5.0;
+        let zeta = side
+            .entries
+            .iter()
+            .position(|e| e.name == "zeta.md")
+            .unwrap();
+        assert_eq!(side.file_at(40.0, row_y(zeta)), Some(dir.join("zeta.md")));
+        let sub = side.entries.iter().position(|e| e.name == "sub").unwrap();
+        assert_eq!(side.file_at(40.0, row_y(sub)), None, "a folder");
+        assert_eq!(side.file_at(40.0, row_y(0)), None, "the parent row");
+        assert_eq!(
+            side.file_at(40.0, row_y(side.entries.len() + 2)),
+            None,
+            "below the list"
+        );
+        assert_eq!(side.file_at(40.0, 10.0), None, "the caption row");
+        side.selected = zeta;
+        assert_eq!(side.selected_file(), Some(dir.join("zeta.md")));
+        side.selected = sub;
+        assert_eq!(side.selected_file(), None);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

@@ -115,7 +115,11 @@ pub enum Launch {
     Folder(PathBuf),
 }
 
-pub fn run(launch: Launch, theme_name: Option<String>) -> anyhow::Result<()> {
+pub fn run(
+    launch: Launch,
+    theme_name: Option<String>,
+    beside: Option<(i32, i32)>,
+) -> anyhow::Result<()> {
     let (path, folder) = match launch {
         Launch::Empty => (None, None),
         Launch::File(path) => (Some(path), None),
@@ -333,6 +337,7 @@ pub fn run(launch: Launch, theme_name: Option<String>) -> anyhow::Result<()> {
         disk_check_at: Instant::now(),
         disk_misses: 0,
         file_deleted: false,
+        beside,
         crlf: opened_crlf,
         bom: opened_bom,
         caret_snap: false,
@@ -596,6 +601,34 @@ fn disk_verdict(seen: DiskState, now: Option<DiskState>, misses: u8, deleted: bo
         Some(state) if state == seen => DiskVerdict::Same,
         Some(_) => DiskVerdict::Changed,
     }
+}
+
+/// The arguments a second copy is started with: the position to open at
+/// through the private `--beside` flag when the first knows its own,
+/// then the file.
+fn beside_args(path: &Path, at: Option<(i32, i32)>) -> Vec<std::ffi::OsString> {
+    let mut args = Vec::new();
+    if let Some((x, y)) = at {
+        args.push("--beside".into());
+        args.push(format!("{x},{y}").into());
+    }
+    args.push(path.as_os_str().to_owned());
+    args
+}
+
+/// A step down and right of a window's corner, where its second window
+/// opens so both stay visible.
+fn beside_step((x, y): (i32, i32)) -> (i32, i32) {
+    (x + 40, y + 40)
+}
+
+/// The program to start for a second window: the AppImage file when
+/// running from one, so the copy gets its own mount and survives the
+/// first quitting; else this executable.
+fn own_executable() -> Option<PathBuf> {
+    std::env::var_os("APPIMAGE")
+        .map(PathBuf::from)
+        .or_else(|| std::env::current_exe().ok())
 }
 
 /// The notice for a deleted file, naming the way back: a save recreates
@@ -932,6 +965,9 @@ struct App {
     /// file Oryx can write back it is the unsaved mark too: the title's
     /// dot, the question before closing, `Ctrl+S` writing the text back.
     file_deleted: bool,
+    /// Where to open, when a running copy started this one beside
+    /// itself: taken over the saved position, and never maximized.
+    beside: Option<(i32, i32)>,
     /// Normalized-text offsets of the open file's CRLF endings, for the
     /// ledger's byte-exact emission.
     crlf: Vec<u32>,
@@ -2162,6 +2198,35 @@ impl App {
                     self.reload_now();
                 }
             }
+        }
+    }
+
+    /// A file opened in a second Oryx window, a step down and right of
+    /// this one, this window untouched: a second copy of the program on
+    /// the file, sharing the settings file, the last to write winning.
+    fn open_beside(&mut self, path: &Path) {
+        let at = self
+            .gfx
+            .as_ref()
+            .and_then(|g| g.window.outer_position().ok())
+            .map(|p| beside_step((p.x, p.y)));
+        let Some(exe) = own_executable() else {
+            self.show_notice("Cannot open a second window: no program path");
+            return;
+        };
+        if let Err(err) = std::process::Command::new(exe)
+            .args(beside_args(path, at))
+            .spawn()
+        {
+            self.show_notice(&format!("Cannot open a second window: {err}"));
+        }
+    }
+
+    /// Ctrl+Enter with the sidebar's keys: the highlighted file in a
+    /// second window.
+    fn open_selected_beside(&mut self) {
+        if let Some(path) = self.sidebar.as_ref().and_then(Sidebar::selected_file) {
+            self.open_beside(&path);
         }
     }
 
@@ -6257,6 +6322,11 @@ impl ApplicationHandler for App {
             }
             attributes = attributes.with_maximized(win.maximized);
         }
+        if let Some((x, y)) = self.beside {
+            attributes = attributes
+                .with_position(PhysicalPosition::new(x, y))
+                .with_maximized(false);
+        }
         // Wayland compositors resolve the window icon from a desktop entry
         // matching this app_id; the same call sets WM_CLASS on X11.
         #[cfg(target_os = "linux")]
@@ -6380,6 +6450,12 @@ impl ApplicationHandler for App {
                         self.sidebar_move(1);
                     }
                     None if self.sidebar_owns_keys()
+                        && ctrl
+                        && matches!(logical_key, Key::Named(NamedKey::Enter)) =>
+                    {
+                        self.open_selected_beside();
+                    }
+                    None if self.sidebar_owns_keys()
                         && matches!(logical_key, Key::Named(NamedKey::Enter)) =>
                     {
                         let outline_tab = self
@@ -6500,6 +6576,23 @@ impl ApplicationHandler for App {
                     self.extend_selection();
                 } else {
                     self.update_hover();
+                }
+            }
+            WindowEvent::MouseInput {
+                state: ElementState::Pressed,
+                button: MouseButton::Middle,
+                ..
+            } => {
+                // The file manager's gesture: a middle click on a file
+                // row opens it in a new window, this one untouched.
+                if self.mouse_muted() || self.confirm.is_some() {
+                    return;
+                }
+                if (self.cursor.x as f32) < self.inset() && self.sidebar.is_some() {
+                    let (x, y) = self.ui_cursor();
+                    if let Some(path) = self.sidebar.as_ref().and_then(|s| s.file_at(x, y)) {
+                        self.open_beside(&path);
+                    }
                 }
             }
             WindowEvent::MouseInput {
@@ -7085,5 +7178,27 @@ mod tests {
             super::deleted_notice(false),
             "The file and its folder were deleted; Save As writes it elsewhere"
         );
+    }
+
+    /// The second copy gets the file and, when the first knows where it
+    /// stands, the position to open at, a step down and right.
+    #[test]
+    fn the_second_window_is_launched_with_the_file_and_its_place() {
+        use std::ffi::OsString;
+        use std::path::Path;
+        assert_eq!(
+            super::beside_args(Path::new("/docs/notes.md"), Some((40, 60))),
+            vec![
+                OsString::from("--beside"),
+                OsString::from("40,60"),
+                OsString::from("/docs/notes.md")
+            ]
+        );
+        assert_eq!(
+            super::beside_args(Path::new("/docs/notes.md"), None),
+            vec![OsString::from("/docs/notes.md")],
+            "on Wayland the compositor places it"
+        );
+        assert_eq!(super::beside_step((100, 200)), (140, 240));
     }
 }

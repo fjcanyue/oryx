@@ -90,6 +90,9 @@ enum Cli {
     Run {
         path: Option<PathBuf>,
         theme: Option<String>,
+        /// Where to open, from a running copy that opens a second
+        /// window beside itself; private, absent from the usage.
+        beside: Option<(i32, i32)>,
     },
     Version,
     Register,
@@ -102,6 +105,7 @@ enum Cli {
 fn parse_args(args: impl Iterator<Item = OsString>) -> Cli {
     let mut path: Option<PathBuf> = None;
     let mut theme: Option<String> = None;
+    let mut beside: Option<(i32, i32)> = None;
     let mut args = args;
     while let Some(arg) = args.next() {
         match arg.to_str() {
@@ -113,13 +117,30 @@ fn parse_args(args: impl Iterator<Item = OsString>) -> Cli {
                 Some(name) => theme = Some(name),
                 None => return Cli::Refused("--theme takes a theme name".to_string()),
             },
+            Some("--beside") => {
+                let position = args
+                    .next()
+                    .and_then(|value| value.into_string().ok())
+                    .and_then(|value| {
+                        let (x, y) = value.split_once(',')?;
+                        Some((x.parse().ok()?, y.parse().ok()?))
+                    });
+                match position {
+                    Some(at) => beside = Some(at),
+                    None => return Cli::Refused("--beside takes a position as X,Y".to_string()),
+                }
+            }
             Some(flag) if flag.starts_with("--") => {
                 return Cli::Refused(format!("unknown option {flag}"));
             }
             _ => path = Some(PathBuf::from(&arg)),
         }
     }
-    Cli::Run { path, theme }
+    Cli::Run {
+        path,
+        theme,
+        beside,
+    }
 }
 
 fn main() -> ExitCode {
@@ -146,7 +167,11 @@ fn main() -> ExitCode {
             eprintln!("oryx: {message}\n{USAGE_LINE}\nTry 'oryx --help' for the options.");
             ExitCode::FAILURE
         }
-        Cli::Run { path, theme } => match app::run(launch(path), theme) {
+        Cli::Run {
+            path,
+            theme,
+            beside,
+        } => match app::run(launch(path), theme, beside) {
             Ok(()) => ExitCode::SUCCESS,
             Err(error) => {
                 eprintln!("oryx: {error}");
@@ -225,13 +250,15 @@ mod tests {
             Cli::Run {
                 path: Some(PathBuf::from("notes.md")),
                 theme: Some("dracula".to_string()),
+                beside: None,
             }
         );
         assert_eq!(
             parse_args(args(&[])),
             Cli::Run {
                 path: None,
-                theme: None
+                theme: None,
+                beside: None,
             }
         );
         assert_eq!(
@@ -239,8 +266,40 @@ mod tests {
             Cli::Run {
                 path: Some(PathBuf::from("./--odd.md")),
                 theme: None,
+                beside: None,
             },
             "a path form opens a file whose name starts with dashes"
+        );
+    }
+
+    /// The private flag a running copy passes to the second window it
+    /// opens: where to place it, a step down and right of itself.
+    #[test]
+    fn the_beside_flag_carries_a_position() {
+        assert_eq!(
+            parse_args(args(&["--beside", "40,60", "notes.md"])),
+            Cli::Run {
+                path: Some(PathBuf::from("notes.md")),
+                theme: None,
+                beside: Some((40, 60)),
+            }
+        );
+        assert_eq!(
+            parse_args(args(&["--beside", "-10,7"])),
+            Cli::Run {
+                path: None,
+                theme: None,
+                beside: Some((-10, 7)),
+            },
+            "a monitor left of the main one has negative x"
+        );
+        assert_eq!(
+            parse_args(args(&["--beside", "x"])),
+            Cli::Refused("--beside takes a position as X,Y".to_string())
+        );
+        assert_eq!(
+            parse_args(args(&["--beside"])),
+            Cli::Refused("--beside takes a position as X,Y".to_string())
         );
     }
 

@@ -239,6 +239,11 @@ pub const TIPS: &[Tip] = &[
     Tip {
         kind: TipKind::Tip,
         area: Area::Moving,
+        text: r#"Middle click a file in the sidebar, or press `Ctrl+Enter` on it, and it opens in a second Oryx window. The file you are editing stays as it is."#,
+    },
+    Tip {
+        kind: TipKind::Tip,
+        area: Area::Moving,
         text: r#"`Ctrl+Plus` and `Ctrl+Minus` zoom in and out, and `Ctrl+0` brings the size back. You can also hold `Ctrl` and turn the mouse wheel."#,
     },
     Tip {
@@ -728,10 +733,13 @@ pub fn page() -> String {
         "`{}` moves the keys to the sidebar and `{}` brings them back to the document. \
          In the sidebar, `Up` and `Down` move the selection, `Enter` opens the selected \
          file or folder (the `..` row goes up), or jumps to the selected heading on the \
-         outline tab, and `{}` switches between the files and the outline.",
+         outline tab, and `{}` switches between the files and the outline. `{}` opens the \
+         highlighted file in a new Oryx window, and so does a middle click on its row, so \
+         the file you are editing stays as it is.",
         keymap::display("Left"),
         keymap::display("Right"),
         keymap::display("Ctrl+Tab"),
+        keymap::display("Ctrl+Enter"),
     );
     out.push_str("\n### Mouse and touch\n\n");
     let _ = writeln!(
