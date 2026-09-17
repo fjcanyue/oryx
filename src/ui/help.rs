@@ -20,7 +20,7 @@ pub fn welcome(tip: usize) -> String {
          `{}` shows or hides the folder sidebar, where you browse and open files.\n\n\
          `{}` opens the settings: fonts, sizes and the interface scale, \
          if the page looks too small or too large on this screen.\n\n\
-         `{}` lists the shortcuts.\n\n\
+         `{}` lists the shortcuts and the markdown syntax.\n\n\
          You can also drag and drop a file here.\n\n\
          Please refer to the full documentation on \
          [GitHub](https://github.com/wmahfoudh/oryx).\n\n{}",
@@ -659,7 +659,7 @@ pub const TIPS: &[Tip] = &[
     Tip {
         kind: TipKind::Tip,
         area: Area::Help,
-        text: r#"`F1` lists every shortcut on a page of its own. Press `F1` again, or `Escape`, to close it."#,
+        text: r#"`F1` opens the quick reference on a page of its own: every shortcut, then every markdown construct Oryx understands, as written and as rendered. Press `F1` again, or `Escape`, to close it."#,
     },
     Tip {
         kind: TipKind::Note,
@@ -671,13 +671,18 @@ pub const TIPS: &[Tip] = &[
 /// The generated page.
 pub fn page() -> String {
     use std::fmt::Write;
-    let mut out = String::with_capacity(4096);
-    let _ = write!(out, "# Oryx v{} Shortcuts\n\n", env!("CARGO_PKG_VERSION"));
+    let mut out = String::with_capacity(SYNTAX.len() + 8192);
+    let _ = write!(
+        out,
+        "# Oryx v{} quick reference\n\n",
+        env!("CARGO_PKG_VERSION")
+    );
     let _ = writeln!(
         out,
-        "Press {} or {} to close this. \
+        "Two parts: [Shortcuts](#shortcuts) and [Markdown syntax](#markdown-syntax). \
+         Press {} or {} to close this. \
          Please refer to the full documentation on \
-         [GitHub](https://github.com/wmahfoudh/oryx).",
+         [GitHub](https://github.com/wmahfoudh/oryx).\n\n## Shortcuts",
         keymap::display("F1"),
         keymap::display("Escape"),
     );
@@ -685,7 +690,7 @@ pub fn page() -> String {
     for row in keymap::SHORTCUTS {
         if row.section != section {
             section = row.section;
-            let _ = write!(out, "\n## {section}\n\n| Shortcut | Action |\n|---|---|\n");
+            let _ = write!(out, "\n### {section}\n\n| Shortcut | Action |\n|---|---|\n");
         }
         let _ = writeln!(
             out,
@@ -694,7 +699,7 @@ pub fn page() -> String {
             row.action
         );
     }
-    out.push_str("\n## While editing\n\n");
+    out.push_str("\n### While editing\n\n");
     let _ = writeln!(
         out,
         "The arrows, `Home`, `End`, `Page Up` and `Page Down` move the caret. \
@@ -717,7 +722,7 @@ pub fn page() -> String {
          `S` saves, `D` discards, `Escape` keeps editing, or the arrows and `Enter` \
          pick one of the three.\n",
     );
-    out.push_str("\n## Sidebar\n\n");
+    out.push_str("\n### Sidebar\n\n");
     let _ = writeln!(
         out,
         "`{}` moves the keys to the sidebar and `{}` brings them back to the document. \
@@ -728,7 +733,7 @@ pub fn page() -> String {
         keymap::display("Right"),
         keymap::display("Ctrl+Tab"),
     );
-    out.push_str("\n## Mouse and touch\n\n");
+    out.push_str("\n### Mouse and touch\n\n");
     let _ = writeln!(
         out,
         "A double click selects the word, a triple click the paragraph or the code line. \
@@ -738,7 +743,90 @@ pub fn page() -> String {
          clicks, and a two-finger pinch zooms.",
         keymap::display("Ctrl"),
     );
+    out.push('\n');
+    out.push_str(&syntax_part());
     out
+}
+
+/// The syntax reference as shipped, in step with each release by
+/// construction.
+const SYNTAX: &str = include_str!("../../SYNTAX.md");
+
+/// Where the reference's links to files beside it reach from a page
+/// with no file behind it: the README and the test picture on GitHub.
+const README_URL: &str = "https://github.com/wmahfoudh/oryx/blob/main/README.md";
+const TEST_IMAGE_URL: &str =
+    "https://raw.githubusercontent.com/wmahfoudh/oryx/main/examples/oryx-test.png";
+
+/// The syntax reference as the page's second part: the frontmatter
+/// dropped, the file's title turned into the part's heading and every
+/// other heading moved one level down so the outline folds the part
+/// as one branch, the rendered links and pictures reaching GitHub. Code
+/// samples pass through exactly as typed, being the lesson; a fence
+/// closes only on a fence of its own kind at least as long, so the
+/// sample that holds fences of its own stays whole.
+fn syntax_part() -> String {
+    let body = strip_frontmatter(SYNTAX);
+    let mut out = String::with_capacity(body.len() + 512);
+    let mut fence: Option<(char, usize)> = None;
+    for line in body.lines() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
+            let ch = trimmed.chars().next().unwrap_or('`');
+            let len = trimmed.chars().take_while(|&c| c == ch).count();
+            match fence {
+                None => fence = Some((ch, len)),
+                Some((open, open_len))
+                    if ch == open && len >= open_len && trimmed[len..].trim().is_empty() =>
+                {
+                    fence = None
+                }
+                Some(_) => {}
+            }
+            out.push_str(line);
+        } else if fence.is_some() {
+            out.push_str(line);
+        } else if line == "# Oryx syntax reference" {
+            out.push_str("## Markdown syntax");
+        } else if line.starts_with('#') {
+            // Markdown has six levels: the deepest stays where it is.
+            if line.chars().take_while(|&c| c == '#').count() < 6 {
+                out.push('#');
+            }
+            out.push_str(line);
+        } else {
+            out.push_str(&demote_html_headings(
+                &line
+                    .replace("](README.md", &format!("]({README_URL}"))
+                    .replace("examples/oryx-test.png", TEST_IMAGE_URL),
+            ));
+        }
+        out.push('\n');
+    }
+    out
+}
+
+/// An HTML heading one level down, `<h3>` to `<h4>`, the way the `#`
+/// lines move; `<h6>` stays, the deepest there is.
+fn demote_html_headings(line: &str) -> String {
+    let mut out = line.to_string();
+    for level in (1..6).rev() {
+        out = out
+            .replace(&format!("<h{level}>"), &format!("<h{}>", level + 1))
+            .replace(&format!("</h{level}>"), &format!("</h{}>", level + 1));
+    }
+    out
+}
+
+/// The text after a leading `---` block, or the whole text without one.
+fn strip_frontmatter(text: &str) -> &str {
+    let Some(rest) = text.strip_prefix("---\n") else {
+        return text;
+    };
+    match rest.find("\n---\n") {
+        Some(end) => &rest[end + 5..],
+        None => text,
+    }
 }
 
 /// A chord as a code span. A chord holding a backtick takes the
@@ -754,6 +842,7 @@ fn code(chord: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::doc::model::BlockKind;
 
     #[test]
     fn every_shortcut_stands_on_the_page() {
@@ -1082,5 +1171,116 @@ mod tests {
             welcome.contains("shows or hides the folder sidebar"),
             "the key toggles, and the page says so: {welcome}"
         );
+    }
+
+    fn headings(doc: &crate::doc::model::Document) -> Vec<(u8, String)> {
+        doc.blocks
+            .iter()
+            .filter_map(|b| match &b.kind {
+                BlockKind::Heading { level, spans, .. } => Some((
+                    *level,
+                    spans
+                        .iter()
+                        .map(|s| s.text(&doc.source))
+                        .collect::<String>(),
+                )),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The syntax reference stands on the page whole, every heading of
+    /// the file one level down, so the outline shows it as one branch
+    /// beside the shortcuts.
+    #[test]
+    fn every_heading_of_the_syntax_reference_stands_on_the_page_one_level_down() {
+        let reference = crate::doc::markdown::parse(include_str!("../../SYNTAX.md").to_string());
+        let page = crate::doc::markdown::parse(page());
+        let on_page = headings(&page);
+        for (level, text) in headings(&reference) {
+            let want = if text == "Oryx syntax reference" {
+                (2, "Markdown syntax".to_string())
+            } else {
+                ((level + 1).min(6), text)
+            };
+            assert!(on_page.contains(&want), "missing {want:?}");
+        }
+        assert!(on_page.contains(&(2, "Shortcuts".to_string())));
+        assert!(
+            on_page.contains(&(3, "Files".to_string())),
+            "the shortcut sections moved down under their part"
+        );
+    }
+
+    #[test]
+    fn the_two_jump_links_resolve_to_headings_on_the_page() {
+        let text = page();
+        assert!(text.contains("[Shortcuts](#shortcuts)"), "{text}");
+        assert!(text.contains("[Markdown syntax](#markdown-syntax)"));
+        let doc = crate::doc::markdown::parse(text);
+        for slug in ["shortcuts", "markdown-syntax"] {
+            assert!(
+                doc.blocks.iter().any(
+                    |b| matches!(&b.kind, BlockKind::Heading { anchor, .. } if anchor == slug)
+                ),
+                "no heading with the anchor {slug}"
+            );
+        }
+    }
+
+    /// The bundled copy drops the file's frontmatter, reaches the README
+    /// and the test picture on GitHub where the file reached them beside
+    /// it, and leaves the code samples exactly as typed.
+    #[test]
+    fn the_reference_arrives_without_its_frontmatter_or_files_beside_it() {
+        let text = page();
+        assert_eq!(
+            text.matches("title: Oryx syntax reference").count(),
+            1,
+            "the frontmatter is dropped; its code sample in the Frontmatter section stays"
+        );
+        assert_eq!(
+            text.matches("](README.md").count(),
+            2,
+            "the code samples keep the link"
+        );
+        assert_eq!(
+            text.matches("](https://github.com/wmahfoudh/oryx/blob/main/README.md")
+                .count(),
+            2,
+            "the rendered links reach GitHub"
+        );
+        assert_eq!(text.matches("](examples/oryx-test.png)").count(), 1);
+        assert_eq!(text.matches("src=\"examples/oryx-test.png\"").count(), 1);
+        assert_eq!(
+            text.matches(
+                "https://raw.githubusercontent.com/wmahfoudh/oryx/main/examples/oryx-test.png"
+            )
+            .count(),
+            2,
+            "the rendered picture comes from GitHub"
+        );
+        assert!(
+            text.contains("```markdown\n# Heading 1\n## Heading 2\n"),
+            "sample headings stay as typed"
+        );
+        assert!(
+            text.contains("\n#### Heading 3\n"),
+            "rendered headings move down"
+        );
+    }
+
+    #[test]
+    fn the_page_is_the_quick_reference() {
+        let text = page();
+        assert!(
+            text.starts_with(&format!(
+                "# Oryx v{} quick reference\n",
+                env!("CARGO_PKG_VERSION")
+            )),
+            "{}",
+            text.lines().next().unwrap_or("")
+        );
+        assert!(welcome(0).contains("lists the shortcuts and the markdown syntax"));
     }
 }

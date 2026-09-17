@@ -19,6 +19,10 @@
 - A folder Oryx cannot read now shows one row saying so, under the `..` row, so you can climb back out. Before, the panel went blank.
 - The welcome page says that the sidebar key shows and hides the panel.
 
+### Quick reference
+
+- The F1 page is now the quick reference, in two parts: the shortcuts, then the whole markdown syntax reference, every construct Oryx understands shown as written and as rendered. Two links at the top jump to either part, and the outline in the sidebar lists both.
+
 ### Embedded HTML
 
 - `<p align="right">` and `<div align="right">` put their content against the right edge, as on GitHub. Before, only `center` was honored.

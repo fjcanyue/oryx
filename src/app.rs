@@ -4818,7 +4818,7 @@ impl App {
         self.pending_recolor.clear();
         self.bottom_hold.clear();
         if let Some(gfx) = self.gfx.as_ref() {
-            gfx.window.set_title("Oryx help");
+            gfx.window.set_title("Oryx quick reference");
         }
         self.request_redraw();
     }
