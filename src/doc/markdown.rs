@@ -219,10 +219,11 @@ struct HtmlPre {
 }
 
 /// One open HTML list level.
-/// An open `<p>` or `<div>`: whether it centers its content, and
-/// whether a page break follows it (`page-break-after`).
+/// An open `<p>` or `<div>`: whether it centers or right-aligns its
+/// content, and whether a page break follows it (`page-break-after`).
 struct HtmlDiv {
     centered: bool,
+    right: bool,
     break_after: bool,
 }
 
@@ -1156,14 +1157,20 @@ impl Builder {
                     return;
                 }
                 self.flush_spans();
-                let centered =
-                    html_attr(attrs, "align").is_some_and(|a| a.eq_ignore_ascii_case("center"));
+                let align = html_attr(attrs, "align");
+                let centered = align
+                    .as_deref()
+                    .is_some_and(|a| a.eq_ignore_ascii_case("center"));
+                let right = align
+                    .as_deref()
+                    .is_some_and(|a| a.eq_ignore_ascii_case("right"));
                 let side = html_attr(attrs, "style").and_then(|s| page_break_side(&s));
                 if side == Some(BreakSide::Before) {
                     self.emit(BlockKind::PageBreak);
                 }
                 self.html_divs.push(HtmlDiv {
                     centered,
+                    right,
                     break_after: side == Some(BreakSide::After),
                 });
             }
@@ -1641,6 +1648,7 @@ impl Builder {
         if let Some(caption) = t.caption {
             self.html_divs.push(HtmlDiv {
                 centered: true,
+                right: false,
                 break_after: false,
             });
             self.emit(BlockKind::Paragraph { spans: caption });
@@ -1676,6 +1684,7 @@ impl Builder {
                 alert: None,
                 range: start..start,
                 centered: false,
+                right: false,
                 details: self.details[id as usize].parent,
                 kind: BlockKind::Summary {
                     spans: vec![Span::plain("Details")],
@@ -1887,6 +1896,7 @@ impl Builder {
             alert: self.alerts.iter().rev().find_map(|a| *a),
             range,
             centered: self.html_divs.iter().any(|d| d.centered),
+            right: self.html_divs.iter().any(|d| d.right),
             details,
             kind,
         });
@@ -2623,6 +2633,30 @@ mod tests {
             .expect("cell keeps its image span");
         assert_eq!(image.src, "badge.svg");
         assert_eq!(image.width, Some(90));
+    }
+
+    /// `align="right"` on a p or div puts its blocks against the right
+    /// edge, as GitHub does; center keeps working, and a plain block
+    /// carries neither.
+    #[test]
+    fn html_align_right_marks_the_blocks_inside() {
+        let d = parse("<p align=\"right\">\n\n[More tips...](tip:next)\n\n</p>\n\nplain\n");
+        let link = d
+            .blocks
+            .iter()
+            .find(|b| matches!(b.kind, BlockKind::Paragraph { .. }))
+            .expect("the paragraph inside");
+        assert!(link.right, "right-aligned");
+        assert!(!link.centered);
+        let plain = d.blocks.last().unwrap();
+        assert!(!plain.right && !plain.centered, "outside the div, neither");
+        let c = parse("<div align=\"CENTER\">\n\ntext\n\n</div>\n");
+        let inner = c
+            .blocks
+            .iter()
+            .find(|b| matches!(b.kind, BlockKind::Paragraph { .. }))
+            .unwrap();
+        assert!(inner.centered && !inner.right);
     }
 
     #[test]

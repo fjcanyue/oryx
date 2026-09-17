@@ -19,6 +19,10 @@
 - A folder Oryx cannot read now shows one row saying so, under the `..` row, so you can climb back out. Before, the panel went blank.
 - The welcome page says that the sidebar key shows and hides the panel.
 
+### Embedded HTML
+
+- `<p align="right">` and `<div align="right">` put their content against the right edge, as on GitHub. Before, only `center` was honored.
+
 ### Task lists
 
 - The checkboxes are a little bigger, and the check mark fills the box. The click target and the PDF follow.
@@ -26,6 +30,10 @@
 ### Source view
 
 - Heading lines are bold, as they are on the page and in VS Code. A code font without a bold face shows no difference.
+
+### Welcome page
+
+- The welcome page ends with a tip, a different one at each launch, from a list that covers every feature of Oryx: a shortcut, a markdown construct, something about books or the export. A "More tips" link under it shows another. Nothing to close and nothing to switch off: the tips only live on the page you see when no file is open.
 
 ## v1.1.1
 

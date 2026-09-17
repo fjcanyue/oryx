@@ -46,6 +46,10 @@ pub struct Config {
     /// Manual interface scale on top of the display's own factor, 1.0
     /// at the detected baseline. Adjusted in the settings dialog.
     pub ui_scale: f32,
+    /// Where the welcome page's tips stand in their rotation: the index
+    /// of the next tip to show. Advances each time the page shows one,
+    /// at a launch with no file or on the link under the tip.
+    pub tip: u32,
     /// How the reader last exported; None until the first export, which
     /// seeds it from the fields above. A table, so it follows the plain
     /// values and precedes the window.
@@ -106,6 +110,7 @@ impl Default for Config {
             justify: true,
             justify_markdown: false,
             ui_scale: 1.0,
+            tip: 0,
             export: None,
             window: None,
         }
@@ -423,6 +428,7 @@ mod tests {
             justify: false,
             justify_markdown: true,
             ui_scale: 1.15,
+            tip: 7,
             export: None,
             window: None,
         };
@@ -708,6 +714,19 @@ mod tests {
             browse_dir([None, None, Some(home.clone())]),
             home,
             "a first run browses home, not the folder the process started in"
+        );
+    }
+
+    #[test]
+    fn a_fresh_config_starts_at_the_first_tip() {
+        assert_eq!(Config::default().tip, 0);
+        let path = temp_path("tipless.toml");
+        std::fs::write(&path, "theme = \"nord\"\n").unwrap();
+        let loaded = load_from(&path);
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(
+            loaded.tip, 0,
+            "a config from before the tips starts at the first"
         );
     }
 }

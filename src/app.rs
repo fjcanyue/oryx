@@ -127,6 +127,7 @@ pub fn run(launch: Launch, theme_name: Option<String>) -> anyhow::Result<()> {
     // the canonical form; a path as typed on the command line would
     // key the first file differently from the same file reopened.
     let path = path.map(|p| p.canonicalize().unwrap_or(p));
+    let mut config = config::load();
     let (document, pending, streamed, book, book_toc, lossy, opened_crlf, opened_bom) = match &path
     {
         Some(p) => {
@@ -146,7 +147,7 @@ pub fn run(launch: Launch, theme_name: Option<String>) -> anyhow::Result<()> {
         // path behind it, nothing can be edited, saved or reloaded, and
         // the first file opened replaces it.
         None => (
-            oryx::doc::markdown::parse(help::welcome()),
+            oryx::doc::markdown::parse(help::welcome(config.tip as usize)),
             Vec::new(),
             false,
             None,
@@ -186,10 +187,14 @@ pub fn run(launch: Launch, theme_name: Option<String>) -> anyhow::Result<()> {
         let waker = waker.clone();
         parser.start(document.source.clone(), move || waker());
     }
-    let mut config = config::load();
+    let mut changed = false;
+    if path.is_none() {
+        // The welcome page showed its tip; the next launch gets the next.
+        config.tip = config.tip.wrapping_add(1);
+        changed = true;
+    }
     if path.is_some() || folder.is_some() {
         let dir_text = doc_dir.display().to_string();
-        let mut changed = false;
         if !dir_text.is_empty() && config.last_dir != dir_text {
             config.last_dir = dir_text;
             changed = true;
@@ -201,9 +206,9 @@ pub fn run(launch: Launch, theme_name: Option<String>) -> anyhow::Result<()> {
             config.sidebar_open = true;
             changed = true;
         }
-        if changed {
-            config::save(&config);
-        }
+    }
+    if changed {
+        config::save(&config);
     }
     let cfg = ViewConfig {
         body_family: config.body_family.clone(),
@@ -4740,6 +4745,23 @@ impl App {
         }
     }
 
+    /// The link under the welcome page's tip: the page again with the
+    /// next tip, the rotation advanced and saved, so the next launch
+    /// carries on from here. Only the welcome page carries the link,
+    /// and only while no file is open.
+    fn next_tip(&mut self) {
+        if self.path.is_some() || self.help_stash.is_some() {
+            return;
+        }
+        self.document = oryx::doc::markdown::parse(help::welcome(self.config.tip as usize));
+        self.config.tip = self.config.tip.wrapping_add(1);
+        config::save(&self.config);
+        self.outline = OutlineTree::build(&self.document);
+        self.selection = None;
+        self.sel_anchor = None;
+        self.restart_layout();
+    }
+
     /// F1: the help page in the document's place and back. The open
     /// document is stashed whole, edits, undo and layout included, and
     /// nothing touches the disk in either direction.
@@ -5252,6 +5274,8 @@ impl App {
         if let Some(anchor) = lay.anchor_y(&target) {
             self.push_jump();
             self.scroll_to(anchor);
+        } else if target == help::NEXT_TIP_LINK {
+            self.next_tip();
         } else if let Some(rest) = target.strip_prefix("book:") {
             // An internal book link: the whole model first, so a forward
             // reference resolves, then the anchor map answers.

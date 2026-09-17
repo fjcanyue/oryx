@@ -2981,8 +2981,15 @@ fn replay_position(
             }
         }
     }
-    if block.centered {
-        center_lines(out, run_mark, rect_mark, image_mark, x_base, avail);
+    let align = if block.centered {
+        Some(0.5)
+    } else if block.right {
+        Some(1.0)
+    } else {
+        None
+    };
+    if let Some(factor) = align {
+        align_lines(out, run_mark, rect_mark, image_mark, x_base, avail, factor);
     }
     if entry.deco_top.is_finite() {
         let decoration = quote_decoration(
@@ -3091,14 +3098,22 @@ fn finish_block(
     pass: &mut LayoutPass,
     source: &str,
 ) {
-    if block.centered {
-        center_lines(
+    let align = if block.centered {
+        Some(0.5)
+    } else if block.right {
+        Some(1.0)
+    } else {
+        None
+    };
+    if let Some(factor) = align {
+        align_lines(
             out,
             frame.marks.runs,
             frame.marks.rects,
             frame.marks.images,
             frame.x_base,
             frame.avail,
+            factor,
         );
     }
 
@@ -5647,15 +5662,18 @@ fn fit_side_text(
     best
 }
 
-/// Shifts every element of a centered block so each visual line sits in the
-/// middle of the content width. Lines are clustered by vertical overlap.
-fn center_lines(
+/// Shifts every element of an aligned block so each visual line sits at
+/// `factor` of the room left in the content width: 0.5 centers it, 1.0
+/// puts it against the right edge. Lines are clustered by vertical
+/// overlap.
+fn align_lines(
     out: &mut LayoutDoc,
     runs_mark: usize,
     rects_mark: usize,
     images_mark: usize,
     x0: f32,
     avail: f32,
+    factor: f32,
 ) {
     // (top, bottom, kind, index) per element; kinds: 0 runs, 1 rects, 2 images.
     let mut items: Vec<(f32, f32, u8, usize)> = Vec::new();
@@ -5693,7 +5711,7 @@ fn center_lines(
                 x + w
             })
             .fold(0.0, f32::max);
-        let dx = x0 + (avail - (max_x - min_x)) / 2.0 - min_x;
+        let dx = x0 + (avail - (max_x - min_x)) * factor - min_x;
         if dx > 0.5 {
             for item in group {
                 match item.2 {

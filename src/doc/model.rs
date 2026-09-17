@@ -208,6 +208,9 @@ pub struct Block {
     pub range: Range<usize>,
     /// Set inside `<p align="center">` or `<div align="center">`.
     pub centered: bool,
+    /// Set inside `<p align="right">` or `<div align="right">`: the
+    /// block's lines end at the content's right edge.
+    pub right: bool,
     /// Innermost enclosing `<details>` group; a summary row carries the
     /// group enclosing its own, being the toggle.
     pub details: Option<u16>,
@@ -221,6 +224,7 @@ impl Block {
             alert: None,
             range: 0..0,
             centered: false,
+            right: false,
             details: None,
             kind,
         }

@@ -884,6 +884,23 @@ fn badge_row_centers_and_shares_a_line() {
     assert!((mid - 400.0).abs() < 20.0, "row centered, mid {mid}");
 }
 
+// A right-aligned block ends where a full line would: the text's right
+// edge meets the content's right edge, and a plain block starts at the
+// left as before.
+#[test]
+fn right_aligned_text_ends_at_the_right_edge() {
+    let (doc, l) = lay2("plain\n\n<p align=\"right\">\n\nshort\n\n</p>\n", 800.0);
+    let plain = find_text(&l, &doc, "plain");
+    let short = find_text(&l, &doc, "short");
+    let right_edge = 800.0 - plain.x;
+    assert!(
+        (short.x + short.width - right_edge).abs() < 2.0,
+        "ends at {} for an edge at {right_edge}",
+        short.x + short.width
+    );
+    assert!(short.x > plain.x + 300.0, "moved right, x {}", short.x);
+}
+
 #[test]
 fn inline_badge_joins_the_text_line() {
     let (doc, l) = lay2(
