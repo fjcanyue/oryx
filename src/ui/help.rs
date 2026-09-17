@@ -57,454 +57,613 @@ impl TipKind {
     }
 }
 
+/// The part of Oryx a tip is about. The list groups by area for
+/// maintenance; the rotation takes one area after another, in this
+/// order, so consecutive launches show different kinds of things.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum Area {
+    Files,
+    Moving,
+    Finding,
+    Selecting,
+    Editing,
+    Looks,
+    Export,
+    Markdown,
+    Books,
+    Help,
+}
+
 /// One entry of the tips list: markdown, one paragraph, the keys in
 /// code spans as the keymap spells them, so `keymap::display` can turn
 /// Ctrl into Cmd on macOS when the page is built.
 pub struct Tip {
     pub kind: TipKind,
+    pub area: Area,
     pub text: &'static str,
+}
+
+/// The order the welcome page walks the list in: the first tip of each
+/// area in turn, then the second of each, and so on, an area dropping
+/// out of the round once it has no tip left. The first launches show
+/// one basic thing per area, and two launches in a row come from the
+/// same area only when no other area has anything left. Computed once.
+pub fn rotation() -> &'static Vec<usize> {
+    static ORDER: std::sync::OnceLock<Vec<usize>> = std::sync::OnceLock::new();
+    ORDER.get_or_init(|| {
+        let mut by_area: Vec<Vec<usize>> = Vec::new();
+        let mut areas: Vec<Area> = Vec::new();
+        for (index, tip) in TIPS.iter().enumerate() {
+            match areas.iter().position(|&a| a == tip.area) {
+                Some(slot) => by_area[slot].push(index),
+                None => {
+                    areas.push(tip.area);
+                    by_area.push(vec![index]);
+                }
+            }
+        }
+        let mut order = Vec::with_capacity(TIPS.len());
+        let mut round = 0;
+        while order.len() < TIPS.len() {
+            for tips in &by_area {
+                if let Some(&index) = tips.get(round) {
+                    order.push(index);
+                }
+            }
+            round += 1;
+        }
+        order
+    })
 }
 
 /// The tip at `index` in the rotation as its alert block, the link to
 /// the next one under it against the right edge, the way a "more" link
 /// sits under a card. The index wraps, so any launch count works.
 pub fn tip_block(index: usize) -> String {
-    let tip = &TIPS[index % TIPS.len()];
+    let order = rotation();
+    let tip = &TIPS[order[index % order.len()]];
     format!(
-        "> [!{}]\n> {}\n\n<p align=\"right\">\n\n[More tips...]({NEXT_TIP_LINK})\n\n</p>\n",
+        "> [!{}]\n> {}\n\n<p align=\"right\">\n\n[more tips...]({NEXT_TIP_LINK})\n\n</p>\n",
         tip.kind.marker(),
         keymap::display(tip.text)
     )
 }
 
-/// Every feature of Oryx, one tip each, in the order the welcome page
-/// rotates through them. A dependency of every release: each tip is
+/// Every feature of Oryx, one tip each, grouped by area with the most
+/// basic tip of each area first; `rotation` sets the reading order. A
+/// dependency of every release: each tip is
 /// checked still true against what the release changed, and each new
 /// feature worth a tip gets one. Written as one person telling another
 /// what to press, what happens and why it helps.
 pub const TIPS: &[Tip] = &[
     Tip {
         kind: TipKind::Tip,
-        text: r#"Press `Ctrl+O` to open a file. The dialog opens in the folder of the file you are reading, or in the folder the sidebar shows."#,
-    },
-    Tip {
-        kind: TipKind::Tip,
+        area: Area::Files,
         text: r#"You can drop a file on the window to open it. Drop a folder instead, and Oryx opens the sidebar on it."#,
     },
     Tip {
         kind: TipKind::Tip,
+        area: Area::Files,
+        text: r#"Press `Ctrl+O` to open a file. The dialog opens in the folder of the file you are reading, or in the folder the sidebar shows."#,
+    },
+    Tip {
+        kind: TipKind::Tip,
+        area: Area::Files,
         text: r#"`Ctrl+N` creates a new file. Oryx will ask you to save it first, so it knows the file's type and can apply the right syntax highlighting as you type."#,
     },
     Tip {
         kind: TipKind::Note,
+        area: Area::Files,
         text: r#"`Ctrl+M` starts a markdown note right away, without any dialog. The note has no file on disk until you save it with `Ctrl+S`, and Oryx will ask before letting you close it."#,
     },
     Tip {
         kind: TipKind::Tip,
+        area: Area::Files,
         text: r#"`Ctrl+S` saves your work. Oryx only writes the lines you changed, and each line keeps its own ending, so a file with Windows line endings stays that way."#,
     },
     Tip {
         kind: TipKind::Tip,
+        area: Area::Files,
         text: r#"`Ctrl+Shift+S` saves the file you are editing under a new name. From then on you are working on the new file, and the old one stays as it was."#,
     },
     Tip {
         kind: TipKind::Note,
+        area: Area::Files,
         text: r#"If the file you are reading changes on disk, Oryx reloads it by itself, as long as you have no unsaved edits. `F5` or `Ctrl+R` reloads whenever you want."#,
     },
     Tip {
         kind: TipKind::Tip,
+        area: Area::Files,
         text: r#"`Ctrl+Shift+R` reloads the file and fetches its remote images again. You will rarely need it, because a cached image older than a day is refreshed by itself."#,
     },
     Tip {
         kind: TipKind::Warning,
+        area: Area::Files,
         text: r#"If the file changes on disk while you have unsaved edits, Oryx keeps your edits and shows you a notice. Save your version under another name with `Ctrl+Shift+S` if you want to keep both."#,
     },
     Tip {
         kind: TipKind::Note,
+        area: Area::Files,
         text: r#"If you close, quit or reload with unsaved changes, Oryx asks first. Press `S` to save, `D` to discard, or `Escape` to keep editing."#,
     },
     Tip {
         kind: TipKind::Tip,
+        area: Area::Files,
         text: r#"From a terminal, `oryx file.md` opens a file, and `oryx notes/` starts Oryx with the sidebar on that folder."#,
     },
     Tip {
         kind: TipKind::Tip,
+        area: Area::Files,
         text: r#"Start Oryx with `oryx --theme nord file.md` to use a theme for this session only. Your usual theme stays as it is."#,
     },
     Tip {
         kind: TipKind::Tip,
+        area: Area::Files,
         text: r#"Run `oryx --register` once and your files will open with Oryx from the file manager, with the right icons."#,
     },
     Tip {
         kind: TipKind::Tip,
+        area: Area::Moving,
         text: r#"`Up` and `Down` scroll one line at a time. `Page Up`, `Page Down`, `Space` and `Shift+Space` scroll a whole page."#,
     },
     Tip {
         kind: TipKind::Tip,
+        area: Area::Moving,
         text: r#"`Home` takes you to the top of the document and `End` to the bottom, however long the document is."#,
     },
     Tip {
         kind: TipKind::Tip,
+        area: Area::Moving,
         text: r#"After you follow a link, a footnote or an outline entry, `Alt+Left` takes you back to where you were reading, one jump at a time."#,
     },
     Tip {
         kind: TipKind::Tip,
+        area: Area::Moving,
         text: r#"`Ctrl+Shift+B` shows or hides the sidebar, where you browse folders and open files."#,
     },
     Tip {
         kind: TipKind::Tip,
+        area: Area::Moving,
         text: r#"The sidebar has two tabs, the files and the outline of the document's headings. Press `Ctrl+Tab` to switch between them."#,
     },
     Tip {
         kind: TipKind::Tip,
+        area: Area::Moving,
         text: r#"Press `Left` to move the keyboard to the sidebar and `Right` to come back to the document. In the sidebar, `Up` and `Down` move the selection and `Enter` opens what is selected."#,
     },
     Tip {
         kind: TipKind::Note,
+        area: Area::Moving,
         text: r#"The outline follows you as you read, folds its branches, and jumps when you click an entry. For a book, it is the table of contents."#,
     },
     Tip {
         kind: TipKind::Tip,
+        area: Area::Moving,
         text: r#"`Ctrl+Plus` and `Ctrl+Minus` zoom in and out, and `Ctrl+0` brings the size back. You can also hold `Ctrl` and turn the mouse wheel."#,
     },
     Tip {
         kind: TipKind::Tip,
+        area: Area::Moving,
         text: r#"On a touch screen, swipe to scroll and let go while moving to keep it going. Tap to click, and pinch with two fingers to zoom."#,
     },
     Tip {
         kind: TipKind::Note,
+        area: Area::Moving,
         text: r#"Oryx remembers the window size, the theme, the sidebar and the last folder from one run to the next, so it opens the way you left it."#,
     },
     Tip {
         kind: TipKind::Note,
+        area: Area::Moving,
         text: r#"While Oryx is open, each file keeps its place when you switch between files. A file you left in the editor comes back in the editor, at the same spot."#,
     },
     Tip {
         kind: TipKind::Tip,
+        area: Area::Finding,
         text: r#"`Ctrl+F` opens the search bar and finds text as you type. Press `Escape`, or click in the document, to close it."#,
     },
     Tip {
         kind: TipKind::Tip,
+        area: Area::Finding,
         text: r#"The search is smart about capitals. Type `oryx` and it matches Oryx and ORYX too; type `Oryx` with a capital and it matches exactly that."#,
     },
     Tip {
         kind: TipKind::Tip,
+        area: Area::Finding,
         text: r#"Once you have searched with `Ctrl+F`, `F3` jumps to the next match and `Shift+F3` to the previous one."#,
     },
     Tip {
         kind: TipKind::Tip,
+        area: Area::Finding,
         text: r#"To search with regular expressions, press `Ctrl+F` to open the search bar, then `Alt+R` or the `.*` button at its end. Capture groups, backreferences and lookarounds all work."#,
     },
     Tip {
         kind: TipKind::Note,
+        area: Area::Finding,
         text: r#"A search looks through the styling, so `fast viewer` is found even where it was written as `**fast** *viewer*`. A match can span a wrapped line too."#,
     },
     Tip {
         kind: TipKind::Note,
+        area: Area::Finding,
         text: r#"You can search a big file while it is still loading. The whole document is searchable from the first second."#,
     },
     Tip {
         kind: TipKind::Tip,
+        area: Area::Finding,
         text: r#"In the editor, `Ctrl+H` adds a replace field under the search box. `Enter` replaces the current match and moves on, `Ctrl+Enter` replaces them all."#,
     },
     Tip {
         kind: TipKind::Tip,
+        area: Area::Finding,
         text: r#"A replace-all is one step. A single `Ctrl+Z` brings every replaced match back."#,
     },
     Tip {
         kind: TipKind::Tip,
+        area: Area::Finding,
         text: r#"When searching with regular expressions in the editor, the replacement can reuse what the search captured. Search for `(\w+)/(\w+)` and replace with `$2/$1` to swap the two sides of every pair."#,
     },
     Tip {
         kind: TipKind::Tip,
+        area: Area::Finding,
         text: r#"In regular expression mode, `\n` stands for a line break, in the search and in the replacement. That lets you join lines, collapse blank lines, or add a line after every line."#,
     },
     Tip {
         kind: TipKind::Tip,
+        area: Area::Finding,
         text: r#"Looking for the task markers you left behind? Switch the search to regular expressions with `Alt+R` and search for `TODO|FIXME`."#,
     },
     Tip {
         kind: TipKind::Tip,
+        area: Area::Finding,
         text: r#"To find spaces left at the end of lines, switch the search to regular expressions with `Alt+R` and search for ` +$`."#,
     },
     Tip {
         kind: TipKind::Tip,
+        area: Area::Finding,
         text: r#"A word typed twice in a row, like "the the", is found by searching for `\b(\w+) \1\b` with regular expressions on."#,
     },
     Tip {
         kind: TipKind::Tip,
+        area: Area::Selecting,
         text: r#"`Ctrl+A` selects the whole document, instantly, however big the file is."#,
     },
     Tip {
         kind: TipKind::Tip,
+        area: Area::Selecting,
         text: r#"Double click a word to select it. Triple click selects the whole paragraph, or the code line, or the table cell."#,
     },
     Tip {
         kind: TipKind::Tip,
+        area: Area::Selecting,
         text: r#"`Ctrl+C` copies your selection as plain text. `Ctrl+Shift+C` copies the markdown behind it, exactly as it was written."#,
     },
     Tip {
         kind: TipKind::Tip,
+        area: Area::Editing,
         text: r#"`Ctrl+E` opens the editor, with a caret and the usual keys, and `Escape` takes you back to reading."#,
     },
     Tip {
         kind: TipKind::Tip,
+        area: Area::Editing,
         text: r#"In the editor, a markdown file shows you its source with the markers visible. Code and text files are edited right on the page."#,
     },
     Tip {
         kind: TipKind::Note,
+        area: Area::Editing,
         text: r#"While you are editing, the window title says `editing` and a thin line in the selection color runs along the top of the page. A dot next to the file name means you have unsaved changes."#,
     },
     Tip {
         kind: TipKind::Tip,
+        area: Area::Editing,
         text: r#"In the editor, `Ctrl+X` cuts and `Ctrl+V` pastes, as in any text editor."#,
     },
     Tip {
         kind: TipKind::Tip,
+        area: Area::Editing,
         text: r#"`Ctrl+Z` undoes and `Ctrl+Shift+Z` or `Ctrl+Y` redoes. Every editing shortcut is a single step, so one `Ctrl+Z` takes it back whole."#,
     },
     Tip {
         kind: TipKind::Tip,
+        area: Area::Editing,
         text: r#"Select some text, or just leave the caret on a word, and press `Ctrl+B` for bold, `Ctrl+I` for italic or `` Ctrl+` `` for code. Press the same key again to remove it."#,
     },
     Tip {
         kind: TipKind::Tip,
+        area: Area::Editing,
         text: r#"`Ctrl+K` turns the selected text into a link. You can also paste a web address over a selection and Oryx will make it a link."#,
     },
     Tip {
         kind: TipKind::Tip,
+        area: Area::Editing,
         text: r#"Select a few lines and press `Alt+-` for a bullet list, `Alt+1` for a numbered list or `Alt+X` for a task list. The same key again removes it."#,
     },
     Tip {
         kind: TipKind::Tip,
+        area: Area::Editing,
         text: r#"To quote a few lines, select them and press `Alt+.`. Press it again to remove the quote."#,
     },
     Tip {
         kind: TipKind::Tip,
+        area: Area::Editing,
         text: r#"`Ctrl+1` to `Ctrl+6` turn the current line into a heading of that level. Press the same level again to make it a plain line."#,
     },
     Tip {
         kind: TipKind::Tip,
+        area: Area::Editing,
         text: r#"In the editor, `Ctrl+L` ticks or unticks the task box on the current line."#,
     },
     Tip {
         kind: TipKind::Tip,
+        area: Area::Editing,
         text: r#"You can tick a task box by clicking it on the page, without opening the editor. Nothing else moves, `Ctrl+Z` undoes it and `Ctrl+S` saves it."#,
     },
     Tip {
         kind: TipKind::Tip,
+        area: Area::Editing,
         text: r#"`Alt+Up` and `Alt+Down` move the current line, or the selected lines, up and down."#,
     },
     Tip {
         kind: TipKind::Tip,
+        area: Area::Editing,
         text: r#"`Ctrl+Shift+D` duplicates the current line or the selected lines, and `Ctrl+Shift+K` deletes them."#,
     },
     Tip {
         kind: TipKind::Tip,
+        area: Area::Editing,
         text: r#"`Ctrl+/` comments out the current line or the selected lines, in code as in markdown. Press it again to bring them back."#,
     },
     Tip {
         kind: TipKind::Tip,
+        area: Area::Editing,
         text: r#"When text is selected, typing a bracket or a quote wraps the selection instead of replacing it. In a markdown file, `*`, `_` and the backtick do the same."#,
     },
     Tip {
         kind: TipKind::Tip,
+        area: Area::Editing,
         text: r#"`Enter` carries a list on: the next bullet or number, an unchecked task, another quoted line. Press `Enter` on an empty item to end the list."#,
     },
     Tip {
         kind: TipKind::Tip,
+        area: Area::Editing,
         text: r#"`Tab` indents and `Shift+Tab` removes an indent, on every selected line at once. With the caret at a list marker, `Tab` nests the item under the one above."#,
     },
     Tip {
         kind: TipKind::Tip,
+        area: Area::Editing,
         text: r#"In the editor, `Ctrl+Left` and `Ctrl+Right` move a word at a time, and `Ctrl+Backspace` and `Ctrl+Delete` delete a whole word."#,
     },
     Tip {
         kind: TipKind::Tip,
+        area: Area::Editing,
         text: r#"In the editor, `Ctrl+Home` and `Ctrl+End` jump to the start and the end of the file."#,
     },
     Tip {
         kind: TipKind::Note,
+        area: Area::Editing,
         text: r#"Books cannot be edited, and neither can a file whose text Oryx could not read cleanly, since it could not write it back as it was. A small notice in the corner tells you when that is the case."#,
     },
     Tip {
         kind: TipKind::Tip,
+        area: Area::Looks,
         text: r#"`Ctrl+T` opens the theme browser. Move through it with the arrows and the document takes each theme as you go. `Enter` keeps the one you are on, `Escape` brings back the one you had."#,
     },
     Tip {
         kind: TipKind::Tip,
+        area: Area::Looks,
         text: r#"Oryx comes with over thirty themes, and each is a plain TOML file with 51 color roles, one for every kind of element on the page."#,
     },
     Tip {
         kind: TipKind::Tip,
+        area: Area::Looks,
         text: r#"In the theme browser, each row has three small icons at its right: one opens the theme in the color editor, one duplicates it and one deletes it. A double click on the name renames it."#,
     },
     Tip {
         kind: TipKind::Tip,
+        area: Area::Looks,
         text: r#"The theme editor changes any color of a theme with a color picker while the document restyles in front of you. Editing a bundled theme makes a copy, so the original stays."#,
     },
     Tip {
         kind: TipKind::Tip,
+        area: Area::Looks,
         text: r#"Would you like a theme of your own? Give one of the TOML theme files to an AI assistant, along with a picture whose colors you like, and ask for a matching theme."#,
     },
     Tip {
         kind: TipKind::Tip,
+        area: Area::Looks,
         text: r#"`Ctrl+,` opens the settings: the body font and the code font, their sizes, and the interface scale."#,
     },
     Tip {
         kind: TipKind::Tip,
+        area: Area::Looks,
         text: r#"Does the page look too small or too large on your screen? The interface scale in the settings adjusts it from -50% to +100%, and Oryx remembers your choice."#,
     },
     Tip {
         kind: TipKind::Tip,
+        area: Area::Looks,
         text: r#"`Ctrl+J` justifies the text so lines end on the same right edge, like print. Books start justified and markdown files ragged, and Oryx remembers your choice for each kind."#,
     },
     Tip {
         kind: TipKind::Tip,
+        area: Area::Looks,
         text: r#"If Oryx gets the reading direction of a book wrong, `Ctrl+D` cycles through automatic, right to left and left to right. The choice is remembered for that book."#,
     },
     Tip {
         kind: TipKind::Tip,
+        area: Area::Export,
         text: r#"`Ctrl+P` exports the document to PDF with your export settings, in one go. Headings become the PDF's outline and the fonts are embedded."#,
     },
     Tip {
         kind: TipKind::Tip,
+        area: Area::Export,
         text: r#"`Ctrl+Shift+P` lets you choose the export settings before exporting: theme, fonts, sizes, page size, orientation and page numbers."#,
     },
     Tip {
         kind: TipKind::Note,
+        area: Area::Export,
         text: r#"The export settings are separate from your reading settings. You can read in a dark theme at a large size and export in a light one at a small size, without switching back and forth."#,
     },
     Tip {
         kind: TipKind::Tip,
+        area: Area::Export,
         text: r#"To force a page break in the PDF, write `\newpage` on a line of its own. On screen it shows as a dashed line. `<div style="page-break-after: always"></div>` does the same."#,
     },
     Tip {
         kind: TipKind::Note,
+        area: Area::Export,
         text: r#"When exporting, Oryx keeps a heading with the text below it, never cuts a line or an image in two, and keeps a table row whole unless the row is taller than the page."#,
     },
     Tip {
         kind: TipKind::Tip,
+        area: Area::Markdown,
         text: r#"To break a line inside a paragraph, end it with two spaces or a backslash. A plain line ending simply joins with the next line."#,
     },
     Tip {
         kind: TipKind::Tip,
+        area: Area::Markdown,
         text: r#"Write `==text==` or `::text::` to highlight a phrase, the way a marker pen would."#,
     },
     Tip {
         kind: TipKind::Tip,
+        area: Area::Markdown,
         text: r#"`H~2~O` lowers the 2 into a subscript, and `x^2^` raises the 2 into a superscript."#,
     },
     Tip {
         kind: TipKind::Tip,
+        area: Area::Markdown,
         text: r#"Emoji shortcodes like `:tada:` show as the emoji, and pasted emoji show as they are."#,
     },
     Tip {
         kind: TipKind::Tip,
+        area: Area::Markdown,
         text: r#"Oryx tidies your punctuation as it renders: straight quotes become curly, `--` and `---` become dashes, and three dots become an ellipsis."#,
     },
     Tip {
         kind: TipKind::Tip,
+        area: Area::Markdown,
         text: r#"For a definition list, write the term on its own line and each definition on the lines below, starting with a colon."#,
     },
     Tip {
         kind: TipKind::Tip,
+        area: Area::Markdown,
         text: r#"Start a quote with `[!NOTE]`, `[!TIP]`, `[!IMPORTANT]`, `[!WARNING]` or `[!CAUTION]` on its first line and it renders as a GitHub alert, like this one."#,
     },
     Tip {
         kind: TipKind::Tip,
+        area: Area::Markdown,
         text: r#"A heading can carry its own anchor in braces at the end, like `{#custom-id}`, and a link to `#custom-id` will jump to it."#,
     },
     Tip {
         kind: TipKind::Tip,
+        area: Area::Markdown,
         text: r#"Footnotes are numbered in the order you use them, whatever their labels say, and gather at the foot of the document. The number there links back to the text, and `Alt+Left` returns you."#,
     },
     Tip {
         kind: TipKind::Tip,
+        area: Area::Markdown,
         text: r#"Write `*[W3C]: World Wide Web Consortium` anywhere in the file and every W3C in the document gets a dotted underline. Rest the mouse on it to see the expansion."#,
     },
     Tip {
         kind: TipKind::Tip,
+        area: Area::Markdown,
         text: r#"Math works in all four GitHub notations: `$...$`, `$$...$$`, a `math` fence and the backtick form. Prices like `$5-$10` are left alone."#,
     },
     Tip {
         kind: TipKind::Tip,
+        area: Area::Markdown,
         text: r#"A YAML block between two `---` lines at the top of a file shows as a small metadata panel above the document."#,
     },
     Tip {
         kind: TipKind::Tip,
+        area: Area::Markdown,
         text: r#"Tables keep each column's alignment, shade every other row and wrap long cells, so a wide table never runs off the page."#,
     },
     Tip {
         kind: TipKind::Tip,
+        area: Area::Markdown,
         text: r#"A fenced code block with a language name gets syntax colors, and over a hundred languages are recognized."#,
     },
     Tip {
         kind: TipKind::Tip,
+        area: Area::Markdown,
         text: r#"Open a source file directly and Oryx renders the whole file with syntax colors, as one document."#,
     },
     Tip {
         kind: TipKind::Tip,
+        area: Area::Markdown,
         text: r#"A `Dockerfile` or a `Makefile` is recognized by its name. Any other text file simply opens in the code font."#,
     },
     Tip {
         kind: TipKind::Tip,
+        area: Area::Markdown,
         text: r#"A link to another file opens it in Oryx, and `README.md#install` takes you straight to that section. A web address opens in your browser."#,
     },
     Tip {
         kind: TipKind::Note,
+        area: Area::Markdown,
         text: r#"Remote images and badges are fetched in the background and kept on disk, so a file full of badges comes up at once the second time, even offline. `oryx --clear-cache` empties that cache."#,
     },
     Tip {
         kind: TipKind::Tip,
+        area: Area::Markdown,
         text: r#"A `<details>` section folds its content under its summary line. Search still looks inside a closed one, and jumping to a match unfolds it."#,
     },
     Tip {
         kind: TipKind::Tip,
+        area: Area::Markdown,
         text: r#"Oryx renders the HTML that GitHub allows in READMEs: tables, headings, lists, images at a set width, rows of clickable badges, and inline tags like `<kbd>`, `<mark>`, `<sub>` and `<sup>`."#,
     },
     Tip {
         kind: TipKind::Tip,
+        area: Area::Markdown,
         text: r#"`<p align="center">` centers a block and `<p align="right">` puts it against the right edge, as on GitHub. The link under this tip is one."#,
     },
     Tip {
         kind: TipKind::Tip,
+        area: Area::Books,
         text: r#"Oryx opens EPUB, FB2, MOBI and AZW3 books as one continuous document, in the theme you are using rather than the book's own styling. The first chapters show at once and the rest loads while you read."#,
     },
     Tip {
         kind: TipKind::Note,
+        area: Area::Books,
         text: r#"A book reopens where you stopped reading, even after you close Oryx. Other files open at the top."#,
     },
     Tip {
         kind: TipKind::Tip,
+        area: Area::Books,
         text: r#"Arabic and Hebrew read from right to left, paragraph by paragraph, in fonts made for them, whatever body font you chose."#,
     },
     Tip {
         kind: TipKind::Note,
+        area: Area::Books,
         text: r#"The window title shows a book's title and its format. That helps when you have the same book in several formats."#,
     },
     Tip {
         kind: TipKind::Tip,
+        area: Area::Books,
         text: r#"A comic, CBZ or CBR, opens as a vertical strip. `Ctrl+Minus` shows one whole page at a time, then two pages side by side like an open book, and `Ctrl+0` shows the whole page from wherever you are."#,
     },
     Tip {
         kind: TipKind::Tip,
+        area: Area::Books,
         text: r#"In a comic's page views, `Up`, `Down` and `Space` turn the pages."#,
     },
     Tip {
         kind: TipKind::Tip,
+        area: Area::Books,
         text: r#"For a manga, or any comic that reads from right to left, `Ctrl+D` flips the order of the two pages side by side, and Oryx remembers it for that comic."#,
     },
     Tip {
         kind: TipKind::Tip,
+        area: Area::Books,
         text: r#"The examples folder installed with Oryx has sample documents, a math sample and *The Adventures of Sherlock Holmes*, so you can try the book reader right away."#,
     },
     Tip {
         kind: TipKind::Tip,
+        area: Area::Help,
         text: r#"`F1` lists every shortcut on a page of its own. Press `F1` again, or `Escape`, to close it."#,
     },
     Tip {
         kind: TipKind::Note,
+        area: Area::Help,
         text: r#"`Escape` closes whatever is open: a dialog, the search bar, a selection, the editor. When nothing is open, it quits Oryx."#,
     },
 ];
@@ -772,17 +931,79 @@ mod tests {
         assert!(block.contains(&keymap::display(tip.text)), "{block}");
         assert!(
             block.ends_with(&format!(
-                "\n\n<p align=\"right\">\n\n[More tips...]({NEXT_TIP_LINK})\n\n</p>\n"
+                "\n\n<p align=\"right\">\n\n[more tips...]({NEXT_TIP_LINK})\n\n</p>\n"
             )),
             "{block}"
         );
-        let note = TIPS.iter().position(|t| t.kind == TipKind::Note).unwrap();
-        assert!(tip_block(note).starts_with("> [!NOTE]\n> "));
-        let warning = TIPS
+        let order = rotation();
+        let note = order
             .iter()
-            .position(|t| t.kind == TipKind::Warning)
+            .position(|&i| TIPS[i].kind == TipKind::Note)
+            .unwrap();
+        assert!(tip_block(note).starts_with("> [!NOTE]\n> "));
+        let warning = order
+            .iter()
+            .position(|&i| TIPS[i].kind == TipKind::Warning)
             .unwrap();
         assert!(tip_block(warning).starts_with("> [!WARNING]\n> "));
+    }
+
+    /// The rotation takes one tip from each area in turn, so the first
+    /// launches show one basic thing per area and two launches in a row
+    /// never come from the same area while another area still has tips.
+    #[test]
+    fn the_rotation_takes_turns_across_the_areas() {
+        let order = rotation();
+        assert_eq!(order.len(), TIPS.len(), "every tip once");
+        let mut seen = order.clone();
+        seen.sort_unstable();
+        seen.dedup();
+        assert_eq!(seen.len(), TIPS.len(), "no tip twice");
+        let areas: Vec<Area> = order.iter().map(|&i| TIPS[i].area).collect();
+        let mut first_ten = areas[..10].to_vec();
+        first_ten.sort();
+        first_ten.dedup();
+        assert_eq!(
+            first_ten.len(),
+            10,
+            "the first ten launches cover the ten areas"
+        );
+        assert_eq!(order[0], 0, "the first tip is the first of the files area");
+        let mut left: std::collections::HashMap<Area, usize> = Default::default();
+        for tip in TIPS {
+            *left.entry(tip.area).or_default() += 1;
+        }
+        for pair in order.windows(2) {
+            let (a, b) = (TIPS[pair[0]].area, TIPS[pair[1]].area);
+            *left.get_mut(&a).unwrap() -= 1;
+            let others_left = left.iter().any(|(area, n)| *area != a && *n > 0);
+            assert!(
+                a != b || !others_left,
+                "two {a:?} tips in a row while another area still has some"
+            );
+        }
+    }
+
+    #[test]
+    fn every_area_opens_on_its_most_basic_tip() {
+        let order = rotation();
+        let first: Vec<&str> = order[..10].iter().map(|&i| TIPS[i].text).collect();
+        assert!(first[0].starts_with("You can drop a file"), "{}", first[0]);
+        assert!(
+            first[1].starts_with("`Up` and `Down` scroll"),
+            "{}",
+            first[1]
+        );
+        assert!(
+            first[2].starts_with("`Ctrl+F` opens the search bar"),
+            "{}",
+            first[2]
+        );
+        assert!(
+            first[4].starts_with("`Ctrl+E` opens the editor"),
+            "{}",
+            first[4]
+        );
     }
 
     #[test]

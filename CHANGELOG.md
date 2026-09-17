@@ -33,7 +33,7 @@
 
 ### Welcome page
 
-- The welcome page ends with a tip, a different one at each launch, from a list that covers every feature of Oryx: a shortcut, a markdown construct, something about books or the export. A "More tips" link under it shows another. Nothing to close and nothing to switch off: the tips only live on the page you see when no file is open.
+- The welcome page ends with a tip, a different one at each launch, from a list that covers every feature of Oryx. The tips take turns between the areas, files, moving around, search, editing, themes, export, markdown, books, so ten launches show ten different kinds of things. A "more tips" link under it shows another. Nothing to close and nothing to switch off: the tips only live on the page you see when no file is open.
 
 ## v1.1.1
 
