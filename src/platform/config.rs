@@ -30,7 +30,9 @@ pub struct Config {
     pub last_dir: String,
     /// Whether the folder sidebar was open at the last toggle, and how
     /// wide it was left. Both are written when a gesture ends, not per
-    /// frame, so a drag does not hammer the disk.
+    /// frame, so a drag does not hammer the disk. Open on a first run,
+    /// so a fresh install shows where its files are; the first close
+    /// is remembered like any toggle.
     pub sidebar_open: bool,
     pub sidebar_width: f32,
     /// The panel tab last active, so the sidebar reopens where it was.
@@ -98,7 +100,7 @@ impl Default for Config {
             body_size: 22.0,
             code_size: 20.0,
             last_dir: String::new(),
-            sidebar_open: false,
+            sidebar_open: true,
             sidebar_width: crate::ui::sidebar::DEFAULT_WIDTH,
             sidebar_tab: crate::ui::sidebar::Tab::Files,
             justify: true,
@@ -120,6 +122,13 @@ pub fn browse_dir(candidates: impl IntoIterator<Item = Option<PathBuf>>) -> Path
         .flatten()
         .find(|dir| dir.is_dir())
         .unwrap_or_else(|| PathBuf::from("."))
+}
+
+/// The user's home folder, the last browsing candidate before the
+/// working directory: a packaged app may start in a system folder
+/// (System32 for a Store app), which is no place to browse from.
+pub fn home_dir() -> Option<PathBuf> {
+    directories::BaseDirs::new().map(|base| base.home_dir().to_path_buf())
 }
 
 /// Location of the config file, None when the platform gives no home.
@@ -443,7 +452,7 @@ mod tests {
         let loaded = load_from(&path);
         std::fs::remove_file(&path).unwrap();
         assert_eq!(loaded.theme, "nord");
-        assert!(!loaded.sidebar_open, "closed until the reader opens it");
+        assert!(loaded.sidebar_open, "open until the reader closes it");
         assert_eq!(loaded.sidebar_width, crate::ui::sidebar::DEFAULT_WIDTH);
         assert_eq!(
             loaded.sidebar_tab,
@@ -681,5 +690,24 @@ mod tests {
         assert_eq!(loaded.theme, "nord");
         assert_eq!(loaded.body_size, 22.0);
         assert_eq!(loaded.last_dir, "");
+    }
+
+    #[test]
+    fn a_fresh_config_opens_the_sidebar() {
+        assert!(
+            Config::default().sidebar_open,
+            "a first run shows the panel; the first close keeps it closed"
+        );
+    }
+
+    #[test]
+    fn the_home_folder_is_the_last_candidate_before_the_working_directory() {
+        let home = home_dir().expect("this machine has a home folder");
+        assert!(home.is_dir());
+        assert_eq!(
+            browse_dir([None, None, Some(home.clone())]),
+            home,
+            "a first run browses home, not the folder the process started in"
+        );
     }
 }

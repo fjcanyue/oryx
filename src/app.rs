@@ -1872,7 +1872,7 @@ impl App {
         };
         let bytes = ledger.emit();
         let mut dialog = rfd::FileDialog::new();
-        let home = directories::BaseDirs::new().map(|base| base.home_dir().to_path_buf());
+        let home = config::home_dir();
         if let Some(dir) = save_dialog_dir(
             self.on_note(),
             self.note_from.as_deref(),
@@ -4287,10 +4287,15 @@ impl App {
     }
 
     /// Opens or closes the panel, restoring the persisted width when it
-    /// comes back.
+    /// comes back. A first run, with no document and nothing remembered,
+    /// roots at home rather than where the process started.
     fn open_sidebar(&mut self, open: bool) {
         if open && self.sidebar.is_none() {
-            let dir = config::browse_dir([self.document_dir(), self.remembered_dir()]);
+            let dir = config::browse_dir([
+                self.document_dir(),
+                self.remembered_dir(),
+                config::home_dir(),
+            ]);
             self.sidebar_at(&dir);
         } else {
             self.sidebar = None;
@@ -4644,6 +4649,7 @@ impl App {
             self.document_dir(),
             self.sidebar.as_ref().map(|side| side.root().to_path_buf()),
             self.remembered_dir(),
+            config::home_dir(),
         ]);
         let target = rfd::FileDialog::new()
             .set_file_name(format!("{stem}.pdf"))
@@ -4724,6 +4730,7 @@ impl App {
             self.document_dir(),
             self.sidebar.as_ref().map(|side| side.root().to_path_buf()),
             self.remembered_dir(),
+            config::home_dir(),
         ]);
         dialog = dialog.set_directory(start);
         if let Some(path) = dialog.pick_file() {

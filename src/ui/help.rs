@@ -16,7 +16,7 @@ pub fn welcome() -> String {
     format!(
         "# Oryx\n\n\
          Press `{}` to open a file, or `{}` to start a markdown note.\n\n\
-         `{}` shows the folder sidebar, to browse and open files from there.\n\n\
+         `{}` shows or hides the folder sidebar, where you browse and open files.\n\n\
          `{}` opens the settings: fonts, sizes and the interface scale, \
          if the page looks too small or too large on this screen.\n\n\
          `{}` lists the shortcuts.\n\n\
@@ -247,6 +247,15 @@ mod tests {
         assert!(
             spans.iter().any(|span| span == &chord),
             "markdown reads the chord back whole: {spans:?}"
+        );
+    }
+
+    #[test]
+    fn the_welcome_page_says_the_sidebar_key_shows_and_hides_the_panel() {
+        let welcome = welcome();
+        assert!(
+            welcome.contains("shows or hides the folder sidebar"),
+            "the key toggles, and the page says so: {welcome}"
         );
     }
 }

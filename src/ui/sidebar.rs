@@ -4,7 +4,8 @@
 //! drawn dimmed. Expansion is in place and children are read on demand.
 //! A folder reached through a symbolic link is entered rather than
 //! expanded: the tree moves to the real folder, as if it had been
-//! opened directly.
+//! opened directly. A folder the system refuses to list shows one
+//! notice row in place of its entries, so the tree never goes blank.
 
 use std::path::{Path, PathBuf};
 
@@ -196,6 +197,9 @@ fn icon_for(path: &Path) -> Icon {
     }
 }
 
+/// The one row a folder shows when the system refuses to list it.
+pub const UNREADABLE: &str = "This folder cannot be read";
+
 /// One visible row of the tree.
 pub struct Entry {
     pub name: String,
@@ -207,6 +211,24 @@ pub struct Entry {
     pub expanded: bool,
     /// Dot entry, rendered dimmed.
     pub hidden: bool,
+    /// A notice standing in for a folder's entries, not an entry itself:
+    /// drawn dimmed without a mark, opens nothing, takes no hover.
+    pub notice: bool,
+}
+
+impl Entry {
+    fn notice(dir: &Path, depth: usize) -> Entry {
+        Entry {
+            name: UNREADABLE.to_string(),
+            path: dir.to_path_buf(),
+            is_dir: false,
+            linked: false,
+            depth,
+            expanded: false,
+            hidden: false,
+            notice: true,
+        }
+    }
 }
 
 pub struct Sidebar {
@@ -242,10 +264,11 @@ fn recognized(path: &Path, is_dir: bool) -> bool {
 
 /// The recognized entries of one directory, directories first, both
 /// groups alphabetical and case-insensitive. A symbolic link counts as
-/// what it points at, so a linked folder lists among the folders.
+/// what it points at, so a linked folder lists among the folders. A
+/// directory that cannot be read yields its notice row instead.
 fn scan(dir: &Path, depth: usize) -> Vec<Entry> {
     let Ok(read) = std::fs::read_dir(dir) else {
-        return Vec::new();
+        return vec![Entry::notice(dir, depth)];
     };
     let mut entries: Vec<Entry> = read
         .flatten()
@@ -261,6 +284,7 @@ fn scan(dir: &Path, depth: usize) -> Vec<Entry> {
                 depth,
                 expanded: false,
                 name,
+                notice: false,
             })
         })
         .collect();
@@ -285,6 +309,7 @@ fn tree(root: &Path) -> Vec<Entry> {
             depth: 0,
             expanded: false,
             hidden: false,
+            notice: false,
         });
     }
     entries.extend(scan(root, 0));
@@ -387,13 +412,16 @@ impl Sidebar {
     }
 
     /// A row was chosen: a file returns its path to open, a directory
-    /// toggles its expansion, a linked directory becomes the root.
+    /// toggles its expansion, a linked directory becomes the root, a
+    /// notice does nothing.
     pub fn activate(&mut self, index: usize) -> Option<PathBuf> {
         let entry = self.entries.get(index)?;
         self.selected = index;
         if index == 0 && entry.name == ".." {
             let parent = entry.path.clone();
             self.go_up(&parent);
+            None
+        } else if entry.notice {
             None
         } else if entry.linked {
             let link = entry.path.clone();
@@ -787,19 +815,37 @@ impl Sidebar {
             }
             slot += 1;
             let entry = &self.entries[index];
-            let current = self.current.as_deref() == Some(entry.path.as_path());
-            let attended =
-                self.hover == Some(Hover::Row(index)) || (owns_keys && index == self.selected);
+            let current = !entry.notice && self.current.as_deref() == Some(entry.path.as_path());
+            // A notice takes the selection fill, so the keys stay visible,
+            // but no hover fill: there is nothing to click.
+            let attended = (!entry.notice && self.hover == Some(Hover::Row(index)))
+                || (owns_keys && index == self.selected);
             draw_row_ground(painter, width, ry, current, attended, fg, accent);
             for level in 0..entry.depth {
                 draw_guide(painter, level, ry, fg);
             }
             let layout = row_layout(entry.depth, true);
             let mut color = if current { accent } else { fg };
-            if entry.hidden {
+            if entry.hidden || entry.notice {
                 color = dim(color);
             }
             let iy = ry + (ROW_H - MARK_H) / 2.0;
+            if entry.notice {
+                // The sentence starts where a mark would, so it reads as
+                // a notice about the folder rather than as one of its rows.
+                let avail = width - layout.mark_x - STRIP_W;
+                let text = truncated(painter, &entry.name, avail, 400);
+                painter.text(
+                    layout.mark_x,
+                    ry + 5.0,
+                    &text,
+                    BODY_FAMILY,
+                    TEXT_SIZE,
+                    400,
+                    color,
+                );
+                continue;
+            }
             if index == 0 && entry.name == ".." {
                 // Up chevron in the mark column for the parent row.
                 let (cx, cy) = (layout.mark_x + 5.0, ry + ROW_H / 2.0);
@@ -1510,6 +1556,73 @@ mod tests {
             &mut outline,
         );
         assert_eq!(click, SideClick::Open(dir.join("zeta.md")));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A folder the system refuses to list shows one notice row under
+    /// `..`, so the reader can climb out; the notice opens nothing.
+    #[cfg(unix)]
+    #[test]
+    fn an_unreadable_folder_shows_a_notice_under_the_parent_row() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = temp_tree("unreadable");
+        let locked = dir.join("locked");
+        std::fs::create_dir(&locked).unwrap();
+        std::fs::write(locked.join("secret.md"), "x").unwrap();
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+        if std::fs::read_dir(&locked).is_ok() {
+            // Running as root: nothing is unreadable, nothing to prove.
+            std::fs::remove_dir_all(&dir).unwrap();
+            return;
+        }
+        let mut side = Sidebar::new(&locked);
+        assert_eq!(names(&side), ["..", UNREADABLE]);
+        assert!(side.entries[1].notice);
+        assert!(side.activate(1).is_none(), "the notice opens nothing");
+        assert_eq!(side.root(), locked.as_path(), "and moves nowhere");
+        assert!(side.activate(0).is_none());
+        assert_eq!(
+            side.root(),
+            dir.as_path(),
+            "the parent row still climbs out"
+        );
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_unreadable_subfolder_expands_to_its_notice_and_collapses_clean() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = temp_tree("unreadable-sub");
+        let locked = dir.join("locked");
+        std::fs::create_dir(&locked).unwrap();
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+        if std::fs::read_dir(&locked).is_ok() {
+            std::fs::remove_dir_all(&dir).unwrap();
+            return;
+        }
+        let mut side = Sidebar::new(&dir);
+        let row = side
+            .entries
+            .iter()
+            .position(|e| e.name == "locked")
+            .unwrap();
+        assert!(side.activate(row).is_none());
+        assert_eq!(side.entries[row + 1].name, UNREADABLE);
+        assert_eq!(
+            side.entries[row + 1].depth,
+            1,
+            "the notice sits inside the folder"
+        );
+        assert!(side.entries[row + 2].depth == 0, "and nothing else joined");
+        assert!(side.activate(row).is_none());
+        assert_ne!(
+            side.entries[row + 1].name,
+            UNREADABLE,
+            "collapsing removes it"
+        );
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

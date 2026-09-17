@@ -13,6 +13,12 @@
 - Empty lines added at the end of a file now get their rows. Before, each Enter at the end of a long file added a line the page did not show: the caret left the screen and the wheel could not reach it. The file's final line break still opens no empty row.
 - The page no longer moves by a pixel on every keystroke at a fractional display scale, such as 125%. Each frame now paints the page at a whole pixel, and the caret sits on the text it belongs to.
 
+### Sidebar
+
+- A fresh install now opens with the folder sidebar showing, rooted at your home folder. Before, the sidebar was closed, and once opened it stood in the folder Oryx was started from, which on Windows can be a system folder. Close it once and it stays closed, as before. The open and export dialogs fall back to your home folder the same way.
+- A folder Oryx cannot read now shows one row saying so, under the `..` row, so you can climb back out. Before, the panel went blank.
+- The welcome page says that the sidebar key shows and hides the panel.
+
 ## v1.1.1
 
 A small release for the first two reports from a user, issues #1 and #2 on GitHub. The details, by area:
