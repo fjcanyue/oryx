@@ -21,9 +21,10 @@ pub fn welcome(tip: usize) -> String {
          `{}` opens the settings: fonts, sizes and the interface scale, \
          if the page looks too small or too large on this screen.\n\n\
          `{}` lists the shortcuts and the markdown syntax.\n\n\
+         {}\n\
          You can also drag and drop a file here.\n\n\
          Please refer to the full documentation on \
-         [GitHub](https://github.com/wmahfoudh/oryx).\n\n{}",
+         [GitHub](https://github.com/wmahfoudh/oryx).\n",
         keymap::display("Ctrl+O"),
         keymap::display("Ctrl+M"),
         keymap::display("Ctrl+Shift+B"),
@@ -961,8 +962,8 @@ mod tests {
             .iter()
             .map(|row| keymap::display(row.keys))
             .collect();
-        // The tip block at the end names its own keys; the lines above
-        // it are the fixed page.
+        // The tip block names its own keys; the page's chords all stand
+        // in the lines above it.
         let fixed = page.split("\n> [!").next().unwrap();
         for chord in fixed.split('`').skip(1).step_by(2) {
             assert!(
@@ -1142,11 +1143,33 @@ mod tests {
         );
         assert_eq!(tip_block(TIPS.len() + 3), tip_block(3));
         let page = welcome(5);
-        assert!(
-            page.ends_with(&tip_block(5)),
-            "the tip closes the page: {page}"
-        );
+        assert!(page.contains(&tip_block(5)), "{page}");
         assert_ne!(welcome(5), welcome(6), "each index its own tip");
+    }
+
+    #[test]
+    fn the_tip_sits_under_the_shortcuts_line() {
+        let page = welcome(0);
+        let at = |needle: &str| {
+            page.find(needle)
+                .unwrap_or_else(|| panic!("{needle} is missing: {page}"))
+        };
+        let shortcuts = at("lists the shortcuts and the markdown syntax.");
+        let tip = at("> [!");
+        let drop = at("You can also drag and drop a file here.");
+        let github = at("[GitHub](https://github.com/wmahfoudh/oryx)");
+        assert!(shortcuts < tip, "the tip comes after the F1 line: {page}");
+        assert!(tip < drop, "the tip comes before the drop line: {page}");
+        assert!(
+            drop < github,
+            "the page closes on the documentation: {page}"
+        );
+        let between = &page[shortcuts..tip];
+        assert_eq!(
+            between.matches("\n\n").count(),
+            1,
+            "nothing stands between the F1 line and the tip: {page}"
+        );
     }
 
     #[test]
