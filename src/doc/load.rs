@@ -194,6 +194,11 @@ pub struct Opened {
     /// ledger restores them on save, so the normalization the viewer
     /// needs never reaches the disk.
     pub crlf: Vec<u32>,
+    /// The file breaks its lines with CR alone, the classic Mac OS way,
+    /// and has no LF at all: the text reads with LF in their place, and
+    /// the splice ledger writes CR back on save, for new lines too. A
+    /// file with any LF keeps a lone CR as text.
+    pub cr: bool,
     /// The file opened with a UTF-8 byte order mark, stripped from the
     /// text; the splice ledger writes it back first on save.
     pub bom: bool,
@@ -259,6 +264,7 @@ pub fn open(path: &Path, deadline: Option<Instant>) -> anyhow::Result<Opened> {
             toc,
             lossy: false,
             crlf: Vec::new(),
+            cr: false,
             bom: false,
         });
     }
@@ -288,7 +294,7 @@ pub fn open(path: &Path, deadline: Option<Instant>) -> anyhow::Result<Opened> {
     // break's normalized offset behind, one entry per return, so the
     // splice ledger can put every untouched ending back verbatim on
     // save. A return with no line break after it is text.
-    let (text, crlf) = if text.contains("\r\n") {
+    let (text, crlf, cr) = if text.contains("\r\n") {
         let mut out = String::with_capacity(text.len());
         let mut crlf = Vec::new();
         for piece in text.split_inclusive('\n') {
@@ -303,9 +309,16 @@ pub fn open(path: &Path, deadline: Option<Instant>) -> anyhow::Result<Opened> {
             }
             out.push('\n');
         }
-        (std::borrow::Cow::Owned(out), crlf)
+        (std::borrow::Cow::Owned(out), crlf, false)
+    } else if text.contains('\r') && !text.contains('\n') {
+        // A classic Mac OS file: CR alone breaks its lines.
+        (
+            std::borrow::Cow::Owned(text.replace('\r', "\n")),
+            Vec::new(),
+            true,
+        )
     } else {
-        (text, Vec::new())
+        (text, Vec::new(), false)
     };
     let mut streamed = false;
     let mut document = match detect(path) {
@@ -341,6 +354,7 @@ pub fn open(path: &Path, deadline: Option<Instant>) -> anyhow::Result<Opened> {
         toc: Vec::new(),
         lossy,
         crlf,
+        cr,
         bom,
     })
 }
@@ -885,6 +899,32 @@ mod tests {
         );
         let led = crate::edit::splice::Ledger::new(opened.document.source.clone(), opened.crlf);
         assert_eq!(led.emit(), bytes, "the bytes come back untouched");
+    }
+
+    /// A classic Mac OS file breaks its lines with CR alone and has no
+    /// LF at all. It reads as lines, is marked, and saves with CR again.
+    #[test]
+    fn a_file_of_cr_line_breaks_reads_as_lines_and_is_marked() {
+        let dir = std::env::temp_dir().join(format!("oryx-cr-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("mac.txt");
+        let bytes = b"one\rtwo\r\rfour\r";
+        std::fs::write(&path, bytes).unwrap();
+        let opened = open(&path, None).unwrap();
+        assert_eq!(&*opened.document.source, "one\ntwo\n\nfour\n");
+        assert!(opened.cr, "the file's line break is CR");
+        assert!(opened.crlf.is_empty());
+        let led = crate::edit::splice::Ledger::new(opened.document.source.clone(), opened.crlf)
+            .with_cr(opened.cr);
+        assert_eq!(led.emit(), bytes, "the bytes come back untouched");
+        // A file with any LF keeps its lone returns as text: only a file
+        // with no LF at all is a CR file.
+        let mixed = dir.join("mixed.txt");
+        std::fs::write(&mixed, b"one\rtwo\nthree\n").unwrap();
+        let opened = open(&mixed, None).unwrap();
+        assert_eq!(&*opened.document.source, "one\rtwo\nthree\n");
+        assert!(!opened.cr);
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

@@ -53,6 +53,10 @@ pub struct Ledger {
     /// before, one entry per return: a Windows line break lists its
     /// newline once, a damaged CR CR LF twice.
     crlf: Vec<u32>,
+    /// The file breaks its lines with CR alone: every newline of the
+    /// text, untouched or new, is written as CR. Never set beside
+    /// `crlf`, since such a file has no LF for a return to precede.
+    cr: bool,
     /// The file opened with a UTF-8 byte order mark; the emission
     /// writes it back first. Never part of the text, so no offset
     /// counts it.
@@ -66,12 +70,18 @@ impl Ledger {
         Ledger {
             base,
             crlf,
+            cr: false,
             bom: false,
             splices: Vec::new(),
         }
     }
 
     /// Marks the ledger's file as opened with a byte order mark.
+    pub fn with_cr(mut self, cr: bool) -> Ledger {
+        self.cr = cr;
+        self
+    }
+
     pub fn with_bom(mut self, bom: bool) -> Ledger {
         self.bom = bom;
         self
@@ -251,6 +261,7 @@ impl Ledger {
         if self.bom {
             out.extend_from_slice(b"\xEF\xBB\xBF");
         }
+        let newline = if self.cr { b'\r' } else { b'\n' };
         let mut written = Vec::with_capacity(self.crlf.len());
         // The normalized position of the next byte, walked alongside
         // the emission so the positions record in current coordinates.
@@ -271,14 +282,22 @@ impl Ledger {
                             out.push(b'\r');
                             written.push((*cur + p - at) as u32);
                         }
-                        out.push(b'\n');
+                        out.push(newline);
                         *cur += p - at + 1;
                         at = p + 1;
                         continue;
                     }
                     crlf.next();
                 }
-                out.extend_from_slice(self.base[at..range.end].as_bytes());
+                if self.cr {
+                    // A CR file has no record: every one of its
+                    // newlines is written as CR.
+                    for byte in self.base[at..range.end].bytes() {
+                        out.push(if byte == b'\n' { b'\r' } else { byte });
+                    }
+                } else {
+                    out.extend_from_slice(self.base[at..range.end].as_bytes());
+                }
                 *cur += range.end - at;
             };
         let mut base = 0;
@@ -293,7 +312,7 @@ impl Ledger {
                         out.extend_from_slice(b"\r\n");
                         written.push(cur as u32);
                     } else {
-                        out.push(b'\n');
+                        out.push(newline);
                     }
                     cur += 1;
                 } else {
@@ -370,6 +389,17 @@ mod tests {
         let mut led = Ledger::new(Arc::from("a\nb\nc\nd\ne\nf\ng\n"), vec![1, 1, 3, 3]);
         led.edit(8..8, "x\n");
         assert_eq!(led.emit(), b"a\r\r\nb\r\r\nc\nd\nx\ne\nf\ng\n");
+    }
+
+    #[test]
+    fn a_cr_file_writes_every_line_break_as_cr_the_new_ones_too() {
+        let mut led = Ledger::new(Arc::from("a\nb\n"), Vec::new()).with_cr(true);
+        assert_eq!(led.emit(), b"a\rb\r");
+        led.edit(2..2, "x\ny");
+        assert_eq!(led.current(), "a\nx\nyb\n");
+        assert_eq!(led.emit(), b"a\rx\ryb\r");
+        led.commit();
+        assert_eq!(led.emit(), b"a\rx\ryb\r", "the mark survives the commit");
     }
 
     #[test]

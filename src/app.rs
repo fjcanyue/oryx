@@ -134,35 +134,37 @@ pub fn run(
     // key the first file differently from the same file reopened.
     let path = path.map(|p| p.canonicalize().unwrap_or(p));
     let mut config = config::load();
-    let (document, pending, streamed, book, book_toc, lossy, opened_crlf, opened_bom) = match &path
-    {
-        Some(p) => {
-            let opened = load::open(p, Some(Instant::now() + load::OPEN_BUDGET))?;
-            (
-                opened.document,
-                opened.pending,
-                opened.streamed,
-                opened.book,
-                opened.toc,
-                opened.lossy,
-                opened.crlf,
-                opened.bom,
-            )
-        }
-        // No file: the welcome page fills the document area. With no
-        // path behind it, nothing can be edited, saved or reloaded, and
-        // the first file opened replaces it.
-        None => (
-            oryx::doc::markdown::parse(help::welcome(config.tip as usize)),
-            Vec::new(),
-            false,
-            None,
-            Vec::new(),
-            false,
-            Vec::new(),
-            false,
-        ),
-    };
+    let (document, pending, streamed, book, book_toc, lossy, opened_crlf, opened_cr, opened_bom) =
+        match &path {
+            Some(p) => {
+                let opened = load::open(p, Some(Instant::now() + load::OPEN_BUDGET))?;
+                (
+                    opened.document,
+                    opened.pending,
+                    opened.streamed,
+                    opened.book,
+                    opened.toc,
+                    opened.lossy,
+                    opened.crlf,
+                    opened.cr,
+                    opened.bom,
+                )
+            }
+            // No file: the welcome page fills the document area. With no
+            // path behind it, nothing can be edited, saved or reloaded, and
+            // the first file opened replaces it.
+            None => (
+                oryx::doc::markdown::parse(help::welcome(config.tip as usize)),
+                Vec::new(),
+                false,
+                None,
+                Vec::new(),
+                false,
+                Vec::new(),
+                false,
+                false,
+            ),
+        };
     // Absolute from here on: a bare relative name like `README.md` has the
     // empty string as parent, which breaks the sidebar root and the dialog.
     let path = path.map(|p| p.canonicalize().unwrap_or(p));
@@ -341,6 +343,7 @@ pub fn run(
         file_deleted: false,
         beside,
         crlf: opened_crlf,
+        cr: opened_cr,
         bom: opened_bom,
         caret_snap: false,
         blink_visible: true,
@@ -527,6 +530,7 @@ struct Stash {
     ledger: Option<Ledger>,
     undo: Option<Undo>,
     crlf: Vec<u32>,
+    cr: bool,
     bom: bool,
     lossy: bool,
     mode: edit::Mode,
@@ -1013,6 +1017,9 @@ struct App {
     /// Normalized-text offsets of the open file's CRLF endings, for the
     /// ledger's byte-exact emission.
     crlf: Vec<u32>,
+    /// The open file breaks its lines with CR alone, which the ledger
+    /// writes back for every line.
+    cr: bool,
     /// The open file began with a byte order mark, which the ledger
     /// writes back first.
     bom: bool,
@@ -1759,7 +1766,9 @@ impl App {
     fn ensure_ledger(&mut self) {
         if self.ledger.is_none() {
             self.ledger = Some(
-                Ledger::new(self.document.source.clone(), self.crlf.clone()).with_bom(self.bom),
+                Ledger::new(self.document.source.clone(), self.crlf.clone())
+                    .with_cr(self.cr)
+                    .with_bom(self.bom),
             );
             self.undo = Some(Undo::new());
         }
@@ -4872,6 +4881,7 @@ impl App {
                 self.document = o.document;
                 self.lossy = o.lossy;
                 self.crlf = o.crlf;
+                self.cr = o.cr;
                 self.bom = o.bom;
                 book_job = o.book;
                 self.book_toc = o.toc;
@@ -4891,6 +4901,7 @@ impl App {
                 // it lossy keeps the editing door shut on it.
                 self.lossy = true;
                 self.crlf = Vec::new();
+                self.cr = false;
                 self.bom = false;
                 self.start_highlight(Vec::new());
                 self.parser.cancel();
@@ -5249,6 +5260,7 @@ impl App {
             ledger: self.ledger.take(),
             undo: self.undo.take(),
             crlf: std::mem::take(&mut self.crlf),
+            cr: std::mem::replace(&mut self.cr, false),
             bom: std::mem::replace(&mut self.bom, false),
             lossy: std::mem::replace(&mut self.lossy, false),
             mode,
@@ -5300,6 +5312,7 @@ impl App {
         self.ledger = stash.ledger;
         self.undo = stash.undo;
         self.crlf = stash.crlf;
+        self.cr = stash.cr;
         self.bom = stash.bom;
         self.lossy = stash.lossy;
         self.mode = stash.mode;
