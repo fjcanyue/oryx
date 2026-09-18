@@ -237,7 +237,7 @@ fn fold_backlog_measured() {
             })
             .collect();
         let started = Instant::now();
-        recolor_batch(&mut lay, &doc, &theme, &mut fonts, &cfg, &patches);
+        recolor_batch(&mut lay, &doc, &theme, &mut fonts, &cfg, &patches, None);
         println!(
             "fold {name}: {} blocks over {} runs in {}ms",
             patches.len(),
@@ -287,7 +287,7 @@ fn fold_trickle_measured() {
             let count = drains.len();
             let started = Instant::now();
             for drain in drains {
-                recolor_batch(&mut lay, &doc, &theme, &mut fonts, &cfg, drain);
+                recolor_batch(&mut lay, &doc, &theme, &mut fonts, &cfg, drain, None);
             }
             println!(
                 "trickle {name}: {} drains of {} blocks over {} runs in {}ms",

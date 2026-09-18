@@ -3417,6 +3417,28 @@ impl App {
             self.wake_caret();
         } else {
             self.push_jump();
+            // A rendered page is indexed by blocks, and a line mostly
+            // opens on markup no drawn row holds (`#`, `-`, `|`), so the
+            // block's own top is the landing, through the outline's
+            // pending path, a folded section opened first. A block's
+            // range starts after that markup: the line's end is the
+            // offset sure to lie inside the block the line belongs to.
+            if !self.document.code_file && !self.document.plain_file {
+                let source = &self.document.source;
+                let line_end = source[offset..]
+                    .find('\n')
+                    .map_or(source.len(), |at| offset + at);
+                let folded = self
+                    .document
+                    .block_at_offset(line_end)
+                    .is_some_and(|block| self.document.reveal(block));
+                if folded {
+                    self.restart_layout();
+                }
+                self.pending_offset = Some(line_end);
+                self.request_redraw();
+                return;
+            }
         }
         self.seat_editor_on(offset);
         self.request_redraw();
@@ -4533,6 +4555,7 @@ impl App {
                 &mut self.fonts,
                 &self.cfg,
                 &patches,
+                self.pass.as_mut(),
             );
             if spliced.is_some() {
                 // Selection and matches anchor on the model, which the

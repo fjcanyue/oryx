@@ -15,6 +15,7 @@
 
 ### Files
 
+- Fixed a rare crash while a big markdown file with many code blocks was still loading: syntax colors arriving at the wrong moment could leave the page's bookkeeping out of step, and Oryx quit. Seen on an 8 MB file opened straight at a far line.
 - When the open file is deleted or moved away outside Oryx, a notice says so, the title shows the unsaved dot, and Oryx asks before closing, as it does for unsaved edits. `Ctrl+S` writes the text back where the file was; if its folder went too, Save As writes it elsewhere. Before, nothing said anything and the text was gone at the next quit. A file missing for an instant while another editor saves it is not mistaken for a deleted one.
 - The file Oryx was started with now reloads when it changes on disk, like any file opened later. Before, only a file opened from the sidebar or the dialog did.
 - A file whose lines end in CR CR LF (an old Mac file converted to Windows, or converted twice) no longer breaks the editor. Before, each typed letter pushed its line down on screen, and Oryx soon crashed. Every return before a line break now leaves the text on load and is written back on save, so an untouched line keeps its bytes; a new line takes the file's usual ending. Pasted text is cleaned the same way. A classic Mac OS file, whose lines end in CR alone, now reads as lines too and saves with CR again, new lines included. Before, it opened as one long line.

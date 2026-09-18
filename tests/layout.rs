@@ -2005,7 +2005,15 @@ fn a_multi_patch_batch_matches_the_sequential_path() {
         .collect();
     let theme = Theme::default_dark();
     let patches: Vec<(usize, std::ops::Range<usize>)> = blocks.iter().map(|&b| (b, 0..2)).collect();
-    recolor_batch(&mut batched, &doc, &theme, &mut store, &cfg(), &patches);
+    recolor_batch(
+        &mut batched,
+        &doc,
+        &theme,
+        &mut store,
+        &cfg(),
+        &patches,
+        None,
+    );
     for &b in &blocks {
         recolor_code_lines(&mut sequential, &doc, &theme, &mut store, &cfg(), b, 0..2);
     }
@@ -2037,6 +2045,7 @@ fn a_middle_patch_shifts_later_records_like_the_sequential_path() {
         &mut store,
         &cfg(),
         &[(middle, 0..2)],
+        None,
     );
     recolor_code_lines(
         &mut sequential,
@@ -2084,6 +2093,7 @@ fn an_empty_batch_is_a_no_op() {
         &mut store,
         &cfg(),
         &[],
+        None,
     );
     assert_eq!(lay.runs, before);
 }
@@ -2431,6 +2441,7 @@ fn recolor_preserves_accessor_texts() {
         &mut fonts,
         &cfg(),
         &[(0, 0..2)],
+        None,
     );
     let after: String = lay
         .runs
@@ -2932,6 +2943,102 @@ fn a_pooled_slide_matches_the_serial_window() {
     assert!(pool.completed() > before, "the pool shaped window fills");
 }
 
+// The pass holds a code block open across steps and remembers the run
+// count at its start, to drop the block whole when it lands outside the
+// view. Colors arriving meanwhile for a block above add runs before it;
+// the drop must then cut at the block's moved start, not into the lines
+// above it. Found 18/09/2026 on `huge.md:100000`, a panic in the recolor.
+#[test]
+fn a_recolor_while_a_far_code_block_is_open_keeps_the_records_in_step() {
+    let mut source = String::from("```rust\nlet a = 1;\nlet b = \"two\";\n```\n\n");
+    for i in 0..60 {
+        source.push_str(&format!(
+            "Paragraph {i} pushes the second block far below.\n\n"
+        ));
+    }
+    source.push_str("```rust\nfn far() {\n    let c = 3;\n    let d = 4;\n}\n```\n");
+    let mut doc = markdown::parse(source.as_str());
+    let mut fonts = fonts();
+    let mut media = MediaCache::new(PathBuf::from("."));
+    let (mut lay, mut pass) = layout_begin(&doc, &cfg(), 800.0);
+    pass.retain_around(0.0, 200.0);
+    // Steps until the pass is inside (or back outside) a code block.
+    {
+        let mut step_until = |open: bool,
+                              lay: &mut LayoutDoc,
+                              pass: &mut oryx::layout::LayoutPass,
+                              fonts: &mut FontStore| {
+            while pass.has_open_code() != open {
+                assert!(
+                    !layout_step(&doc, &theme(), fonts, &mut media, &cfg(), lay, pass),
+                    "the pass ended before the far block opened"
+                );
+            }
+        };
+        step_until(true, &mut lay, &mut pass, &mut fonts);
+        step_until(false, &mut lay, &mut pass, &mut fonts);
+        step_until(true, &mut lay, &mut pass, &mut fonts);
+    }
+    assert_eq!(
+        lay.code_lines.len(),
+        2,
+        "the first block's two lines are kept"
+    );
+    lay.records_consistent().expect("in step before the colors");
+
+    // The first block's colors arrive while the far block is open.
+    let (first, spans) = {
+        let BlockKind::CodeBlock {
+            language, lines, ..
+        } = &doc.blocks[0].kind
+        else {
+            panic!("the first block is code")
+        };
+        (0, highlight::spans(&doc.source, lines, language.as_deref()))
+    };
+    let BlockKind::CodeBlock { highlights, .. } = &mut doc.blocks[first].kind else {
+        panic!()
+    };
+    *highlights = spans;
+    let (_, _, delta) = recolor_batch(
+        &mut lay,
+        &doc,
+        &theme(),
+        &mut fonts,
+        &cfg(),
+        &[(first, 0..2)],
+        Some(&mut pass),
+    )
+    .expect("the colors move runs");
+    assert!(delta > 0, "colored lines hold more runs, delta {delta}");
+    lay.records_consistent().expect("in step after the colors");
+
+    // The far block closes outside the view and is dropped whole.
+    let mut media = MediaCache::new(PathBuf::from("."));
+    layout_more(
+        &doc,
+        &theme(),
+        &mut fonts,
+        &mut media,
+        &cfg(),
+        &mut lay,
+        &mut pass,
+        None,
+    );
+    lay.records_consistent()
+        .expect("in step after the far block dropped");
+    let text: String = lay
+        .runs
+        .iter()
+        .filter(|run| run.block == first)
+        .map(|run| lay.run_text(&doc, run))
+        .collect();
+    assert_eq!(
+        text, "let a = 1;let b = \"two\";",
+        "both lines keep every run"
+    );
+}
+
 #[test]
 fn zoom_rebuilds_the_table() {
     let doc = tour_doc();
@@ -3047,6 +3154,7 @@ fn model_selection_survives_recolor_and_relayout() {
         &mut fonts,
         &cfg(),
         &[(1, 0..1)],
+        None,
     );
     assert_eq!(
         oryx::ui::selection::plain_text(&sel, &doc),

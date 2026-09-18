@@ -1001,6 +1001,38 @@ impl LayoutPass {
         }
     }
 
+    /// Follows a recolor that rebuilt the runs `run_lo..run_hi` into a
+    /// span `delta` longer. An open code block holds the run count at
+    /// its start across steps, to drop the block whole or to align it
+    /// when it closes; runs added before that start move it. A rebuild
+    /// reaching into the block's own lines leaves the start at its
+    /// first record's. The family table only grows under a recolor, and
+    /// the names it added stay, since recolored runs carry their ids.
+    fn follow_recolor(&mut self, lay: &LayoutDoc, run_lo: usize, run_hi: usize, delta: isize) {
+        let Some(open) = self.open.as_mut() else {
+            return;
+        };
+        let first_record = lay.code_lines.get(open.counts.code).map(|c| c.runs.start);
+        let moved = |start: usize| {
+            if start <= run_lo {
+                start
+            } else if start >= run_hi {
+                start.wrapping_add_signed(delta)
+            } else {
+                first_record.unwrap_or(start)
+            }
+        };
+        open.counts.runs = moved(open.counts.runs);
+        open.frame.marks.runs = moved(open.frame.marks.runs);
+        open.counts.families = open.counts.families.max(lay.families.len());
+    }
+
+    /// True while the pass stands inside a code block it places line by
+    /// line: the block's element counts are held across steps.
+    pub fn has_open_code(&self) -> bool {
+        self.open.is_some()
+    }
+
     /// Bounds retention around a scroll position: blocks outside the
     /// band and its margin are measured into the table and dropped.
     pub fn retain_around(&mut self, scroll: f32, viewport_h: f32) {
@@ -2458,6 +2490,55 @@ impl LayoutDoc {
             record.runs = record.runs.start - base.runs..record.runs.end - base.runs;
         }
         self.index = YIndex::default();
+    }
+
+    /// Whether the code line records, the run vector and the window's
+    /// marks agree: every record's runs lie inside the vector and rise
+    /// with the records, the marks rise and stay inside both, and each
+    /// position's records lie inside the position's own runs. The error
+    /// names the first thing out of step. Every operation that moves
+    /// runs has to leave this true; the tests hold them to it.
+    pub fn records_consistent(&self) -> Result<(), String> {
+        let runs = self.runs.len();
+        let mut floor = 0;
+        for (i, record) in self.code_lines.iter().enumerate() {
+            let range = &record.runs;
+            if range.start > range.end || range.end > runs || range.start < floor {
+                return Err(format!(
+                    "record {i} (block {}, line {}) holds runs {range:?} after {floor}, of {runs}",
+                    record.block, record.line
+                ));
+            }
+            floor = range.end;
+        }
+        let Some(window) = self.window.as_ref() else {
+            return Ok(());
+        };
+        let (mut lo_runs, mut lo_code) = (0, 0);
+        for (i, mark) in window.marks.iter().enumerate() {
+            if mark.runs < lo_runs
+                || mark.code < lo_code
+                || mark.runs > runs
+                || mark.code > self.code_lines.len()
+            {
+                return Err(format!(
+                    "mark {i} ends at run {} and record {} after {lo_runs} and {lo_code}, of {runs} and {}",
+                    mark.runs,
+                    mark.code,
+                    self.code_lines.len()
+                ));
+            }
+            for record in &self.code_lines[lo_code..mark.code] {
+                if record.runs.start < lo_runs || record.runs.end > mark.runs {
+                    return Err(format!(
+                        "position {i} spans runs {lo_runs}..{} and its record (block {}, line {}) holds {:?}",
+                        mark.runs, record.block, record.line, record.runs
+                    ));
+                }
+            }
+            (lo_runs, lo_code) = (mark.runs, mark.code);
+        }
+        Ok(())
     }
 
     /// Drops the last `count` materialized positions' elements.
@@ -5843,7 +5924,9 @@ fn place_marker(runs: Vec<TextRun>, x: f32, y: f32, block_index: usize, out: &mu
 /// trusted only as far as the document reaches. Answers the splice it
 /// made, (first run, old end run, length delta), so callers can remap
 /// positions they hold instead of dropping them; None means no run
-/// moved.
+/// moved. `pass` is the pass still placing this layout, when there is
+/// one: the run counts it holds for an open code block follow the
+/// splice, or the block's drop would cut into the lines above it.
 pub fn recolor_batch(
     lay: &mut LayoutDoc,
     doc: &Document,
@@ -5851,6 +5934,7 @@ pub fn recolor_batch(
     fonts: &mut FontStore,
     cfg: &ViewConfig,
     patches: &[(usize, Range<usize>)],
+    pass: Option<&mut LayoutPass>,
 ) -> Option<(usize, usize, isize)> {
     // Records sort by (block, line) and their run ranges rise with it,
     // so the affected list visits the run vector strictly left to right.
@@ -5962,6 +6046,9 @@ pub fn recolor_batch(
                 mark.runs = lay.code_lines[mark.code - 1].runs.end;
             }
         }
+    }
+    if let Some(pass) = pass {
+        pass.follow_recolor(lay, run_lo, run_hi, delta);
     }
     Some((run_lo, run_hi, delta))
 }
@@ -6107,7 +6194,7 @@ pub fn recolor_code_lines(
     block: usize,
     lines: Range<usize>,
 ) -> Option<(usize, usize, isize)> {
-    recolor_batch(lay, doc, theme, fonts, cfg, &[(block, lines)])
+    recolor_batch(lay, doc, theme, fonts, cfg, &[(block, lines)], None)
 }
 
 /// Shapes one code line into the scratch from zero, record included:
