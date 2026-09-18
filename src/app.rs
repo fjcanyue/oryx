@@ -38,6 +38,7 @@ use oryx::style::highlight::{self, Highlighter, PendingBlock};
 use oryx::style::theme::{self, Rgba, Theme};
 use oryx::ui::confirm;
 use oryx::ui::export::{ExportDialog, ExportProgress};
+use oryx::ui::goto::{self, GotoState};
 use oryx::ui::help;
 use oryx::ui::notice::{self, Notice};
 use oryx::ui::outline::{entry_offset, OutlineTree};
@@ -114,6 +115,9 @@ fn wheel_notches(carry: &mut f32, delta: f32) -> i32 {
 pub enum Launch {
     Empty,
     File(PathBuf),
+    /// A file and the line to open it at, `file:412:10` on the command
+    /// line.
+    FileAt(PathBuf, goto::Target),
     Folder(PathBuf),
 }
 
@@ -122,10 +126,11 @@ pub fn run(
     theme_name: Option<String>,
     beside: Option<(i32, i32)>,
 ) -> anyhow::Result<()> {
-    let (path, folder) = match launch {
-        Launch::Empty => (None, None),
-        Launch::File(path) => (Some(path), None),
-        Launch::Folder(dir) => (None, Some(dir.canonicalize().unwrap_or(dir))),
+    let (path, folder, launch_target) = match launch {
+        Launch::Empty => (None, None, None),
+        Launch::File(path) => (Some(path), None, None),
+        Launch::FileAt(path, target) => (Some(path), None, Some(target)),
+        Launch::Folder(dir) => (None, Some(dir.canonicalize().unwrap_or(dir)), None),
     };
     // One form of the path for the whole session. Everything keyed on
     // it, the edit marks, the resume note, the disk identity, has to
@@ -311,6 +316,8 @@ pub fn run(
         outline,
         sidebar_canvas: None,
         search: None,
+        goto: None,
+        pending_goto: launch_target,
         search_canvas: None,
         last_query: String::new(),
         last_regex: false,
@@ -920,6 +927,13 @@ struct App {
     sidebar_canvas: Option<OverlayCanvas>,
     /// Find session while the search bar is open.
     search: Option<SearchState>,
+    /// The go to line field while it is open; never beside the search
+    /// bar, since both stand in the same corner and take the keys.
+    goto: Option<GotoState>,
+    /// A line asked for while the file's text was still arriving, from
+    /// the command line or the field: the jump waits for the whole
+    /// source, since a line is counted from the top of it.
+    pending_goto: Option<goto::Target>,
     /// Reused search bar canvas, mirroring the overlay canvas mechanics.
     search_canvas: Option<OverlayCanvas>,
     /// Query of the last closed search, restored when the bar reopens.
@@ -1197,6 +1211,7 @@ impl App {
             Command::Refetch => self.refetch(),
             Command::Sidebar => self.toggle_sidebar(),
             Command::HiddenFiles => self.toggle_hidden_files(),
+            Command::GoToLine => self.open_goto(),
             Command::Help => self.toggle_help(),
             Command::Settings => self.toggle_settings(),
             Command::ThemeBrowser => self.toggle_theme_browser(),
@@ -1440,6 +1455,7 @@ impl App {
         // document swap.
         self.cfg.comic = ComicFit::Width;
         self.close_search();
+        self.close_goto();
         self.start_highlight(load::pending(&self.document));
     }
 
@@ -1449,12 +1465,16 @@ impl App {
     /// table answers by line index, which is what a source view is
     /// indexed by.
     fn seat_editor_on(&mut self, offset: usize) {
+        // A row the block table knows may still lie below the height the
+        // pass has placed; scrolling now would stop short, so the target
+        // is held until the document is tall enough to show it.
+        let (height, vh) = (self.doc_height(), self.viewport_h());
         match self.editor_row_y(offset) {
-            Some(y) => {
+            Some(y) if scroll::reached(y, height, vh) || !self.layout_pending() => {
                 self.pending_row = None;
                 self.scroll_to(y);
             }
-            None => self.pending_row = Some(offset),
+            _ => self.pending_row = Some(offset),
         }
     }
 
@@ -3185,6 +3205,7 @@ impl App {
     /// Opens the search bar with the last query standing selected, so
     /// typing replaces it; Ctrl+F on an open bar reselects the same way.
     fn open_search(&mut self) {
+        self.close_goto();
         if let Some(state) = self.search.as_mut() {
             state.query.select_all();
             if let Some(row) = state.replace.as_mut() {
@@ -3254,6 +3275,151 @@ impl App {
             self.band = None;
             self.request_redraw();
         }
+    }
+
+    /// True when the page is a file of lines a number can name: not a
+    /// book, not a comic, and not a page of Oryx's own.
+    fn has_lines(&self) -> bool {
+        self.path.is_some()
+            && !self.open_failed
+            && self.document.book_id.is_none()
+            && !self.document.comic_file
+    }
+
+    /// Ctrl+G: the go to line field in the search bar's corner, empty
+    /// each time. A second press closes it, and a page without lines
+    /// leaves the key quiet.
+    fn open_goto(&mut self) {
+        if self.goto.is_some() {
+            self.close_goto();
+            return;
+        }
+        if !self.has_lines() {
+            return;
+        }
+        self.close_search();
+        self.goto = Some(GotoState::new(goto::line_count(&self.document.source)));
+        self.request_redraw();
+    }
+
+    /// A press on the go to line field puts its caret under the
+    /// pointer; the press is the field's, so the page under it stays
+    /// as it was.
+    fn goto_bar_press(&mut self) -> bool {
+        let Some(width) = self.logical_width() else {
+            return false;
+        };
+        let (x, y) = self.ui_cursor();
+        let Some(state) = self.goto.as_mut().filter(|_| goto::bar_hit(width, x, y)) else {
+            return false;
+        };
+        let (left, offsets) = (state.view.left, state.view.offsets.clone());
+        state.field.click(x - left, &offsets, Instant::now());
+        self.search_mouse = true;
+        self.request_redraw();
+        true
+    }
+
+    fn close_goto(&mut self) {
+        if self.goto.take().is_some() {
+            self.search_mouse = false;
+            self.request_redraw();
+        }
+    }
+
+    /// Keys the open go to line field consumes: Enter goes and closes,
+    /// Escape closes, digits and the colon type, and the field's own
+    /// editing keys act on it. Everything else falls through to the
+    /// app-wide commands, never to the document.
+    fn goto_key(&mut self, key: &Key, ctrl: bool, shift: bool) -> bool {
+        if self.goto.is_none() || self.modifiers.alt_key() {
+            return false;
+        }
+        match key {
+            Key::Named(NamedKey::Escape) => {
+                self.close_goto();
+                true
+            }
+            Key::Named(NamedKey::Enter) => {
+                let target = self.goto.as_ref().and_then(GotoState::target);
+                self.close_goto();
+                if let Some(target) = target {
+                    self.go_to(target);
+                }
+                true
+            }
+            Key::Named(NamedKey::Tab) => true,
+            Key::Character(s) if ctrl && s.eq_ignore_ascii_case("v") => {
+                if self.clipboard.is_none() {
+                    self.clipboard = arboard::Clipboard::new()
+                        .map_err(|err| eprintln!("oryx: no clipboard: {err}"))
+                        .ok();
+                }
+                let text = self.clipboard.as_mut().and_then(|c| c.get_text().ok());
+                let state = self.goto.as_mut().expect("goto open");
+                if let Some(text) = text.as_deref().map(str::trim).filter(|t| goto::accepts(t)) {
+                    state.field.insert(text);
+                    self.request_redraw();
+                }
+                true
+            }
+            Key::Character(s)
+                if ctrl
+                    && (s.eq_ignore_ascii_case("c") || s.eq_ignore_ascii_case("x"))
+                    && !shift =>
+            {
+                let state = self.goto.as_mut().expect("goto open");
+                let text = state.field.selected_text().to_string();
+                if !text.is_empty() {
+                    if s.eq_ignore_ascii_case("x") {
+                        state.field.delete_selection();
+                    }
+                    self.set_clipboard(text);
+                    self.request_redraw();
+                }
+                true
+            }
+            // A typed character enters only when the field takes it;
+            // a letter is swallowed, so nothing reaches the page.
+            Key::Character(s) if !ctrl && !goto::accepts(s) => true,
+            key => {
+                let state = self.goto.as_mut().expect("goto open");
+                match state.field.key(key, ctrl, shift) {
+                    Edit::Ignored => false,
+                    Edit::Handled | Edit::Changed => {
+                        self.request_redraw();
+                        true
+                    }
+                }
+            }
+        }
+    }
+
+    /// Goes to a line of the open file. In the editor the caret lands
+    /// on the line, at the column when one was given, and the row comes
+    /// to the top the way every jump lands. While reading, the row of a
+    /// code or text file comes to the top, or the block of a rendered
+    /// page that holds the line; the place left is kept for Back.
+    fn go_to(&mut self, target: goto::Target) {
+        if !self.has_lines() {
+            return;
+        }
+        if self.parse_pending {
+            self.pending_goto = Some(target);
+            return;
+        }
+        let offset = goto::offset(&self.document.source, target);
+        if self.mode == edit::Mode::Edit {
+            self.selection = None;
+            self.sel_anchor = None;
+            self.band = None;
+            self.caret = Some(Caret::at(offset));
+            self.wake_caret();
+        } else {
+            self.push_jump();
+        }
+        self.seat_editor_on(offset);
+        self.request_redraw();
     }
 
     /// Flips the search bar between plain and regex matching.
@@ -3906,12 +4072,13 @@ impl App {
             );
             let result = overlay.click(x, y);
             self.overlay_result(result);
-        } else if self.search_bar_press() {
+        } else if self.search_bar_press() || self.goto_bar_press() {
         } else {
             // A click anywhere off the bar closes it, the panels' own
             // outside-click manner; the click still acts on what it hit,
             // and the document owns every key again.
             self.close_search();
+            self.close_goto();
             if self.sidebar_edge_press() {
             } else if (self.cursor.x as f32) < self.inset() && self.sidebar.is_some() {
                 let (x, y) = self.ui_cursor();
@@ -4948,6 +5115,7 @@ impl App {
         self.pending_scroll = None;
         self.pending_anchor = None;
         self.pending_row = None;
+        self.pending_goto = None;
         self.bottom_hold.clear();
         // A remembered file resumes where reading stopped, once placed:
         // a book from the persisted store, a plain file from the
@@ -6016,6 +6184,11 @@ impl App {
     /// Applies a scroll position or an anchor asked for before the pass
     /// had placed it.
     fn resolve_pending(&mut self) {
+        if !self.parse_pending {
+            if let Some(target) = self.pending_goto.take() {
+                self.go_to(target);
+            }
+        }
         if self.pending_scroll.is_none()
             && self.pending_anchor.is_none()
             && self.pending_offset.is_none()
@@ -6404,6 +6577,29 @@ impl App {
             if let Some((canvas, stale)) = self.search_canvas.as_mut() {
                 let mut painter = Painter::new(canvas, &mut self.fonts, stale.take(), self.scale);
                 search::draw_bar(
+                    &mut painter,
+                    &self.theme,
+                    state,
+                    size.width as f32 / self.scale,
+                );
+                painter.composite(&mut buffer, size.width);
+                *stale = painter.dirty();
+            }
+        }
+        // The go to line field borrows the search bar's canvas: the
+        // two are never open together and stand in the same corner.
+        if let Some(state) = self.goto.as_mut() {
+            let fits = self
+                .search_canvas
+                .as_ref()
+                .is_some_and(|(p, _)| p.width() == size.width && p.height() == size.height);
+            if !fits {
+                self.search_canvas =
+                    tiny_skia::Pixmap::new(size.width, size.height).map(|pixmap| (pixmap, None));
+            }
+            if let Some((canvas, stale)) = self.search_canvas.as_mut() {
+                let mut painter = Painter::new(canvas, &mut self.fonts, stale.take(), self.scale);
+                goto::draw_bar(
                     &mut painter,
                     &self.theme,
                     state,
@@ -6803,6 +6999,15 @@ impl ApplicationHandler for App {
                         let overlay = self.overlay.as_mut().expect("overlay open");
                         let result = overlay.key(&logical_key, ctrl, shift);
                         self.overlay_result(result);
+                    }
+                    _ if self.goto_key(&logical_key, ctrl, shift) => {}
+                    // The go to line field has the keyboard, under the
+                    // search fields' own rule: what it did not claim
+                    // acts only when it is app-wide.
+                    _ if self.goto.is_some() => {
+                        if let Some(cmd) = resolved.filter(|cmd| cmd.live_under_a_field()) {
+                            self.run_command(cmd, event_loop);
+                        }
                     }
                     _ if self.search_key(&logical_key, ctrl, shift) => {}
                     // A search field has the keyboard: what the bar did

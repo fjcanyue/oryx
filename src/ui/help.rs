@@ -278,6 +278,16 @@ pub const TIPS: &[Tip] = &[
     },
     Tip {
         kind: TipKind::Tip,
+        area: Area::Moving,
+        text: r#"Press `Ctrl+G` to go to a line. Type its number and press Enter, and Oryx takes you there. Type `412:10` and the caret lands on the tenth character of line 412, which helps when an error message names a line and a column."#,
+    },
+    Tip {
+        kind: TipKind::Tip,
+        area: Area::Moving,
+        text: r#"From a terminal, `oryx main.rs:412` opens the file at line 412, and `oryx main.rs:412:10` at the tenth character of that line. It is the form compilers print, so you can paste it as it is."#,
+    },
+    Tip {
+        kind: TipKind::Tip,
         area: Area::Finding,
         text: r#"`Ctrl+F` opens the search bar and finds text as you type. Press `Escape`, or click in the document, to close it."#,
     },

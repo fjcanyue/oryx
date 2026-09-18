@@ -29,6 +29,7 @@ pub enum Command {
     FindNext,
     FindPrev,
     Replace,
+    GoToLine,
     LineUp,
     LineDown,
     PaneLeft,
@@ -70,7 +71,7 @@ pub enum Command {
 
 impl Command {
     /// Every variant; the coverage test checks each one against the table.
-    pub const ALL: [Command; 60] = [
+    pub const ALL: [Command; 61] = [
         Command::OpenFile,
         Command::Reload,
         Command::Refetch,
@@ -91,6 +92,7 @@ impl Command {
         Command::FindNext,
         Command::FindPrev,
         Command::Replace,
+        Command::GoToLine,
         Command::LineUp,
         Command::LineDown,
         Command::PaneLeft,
@@ -337,6 +339,12 @@ pub const SHORTCUTS: &[Shortcut] = &[
         action: "Replace all (replace open); in the sidebar, open the highlighted file in a new window, as a middle click on its row does",
         section: "Find",
         bindings: &[],
+    },
+    Shortcut {
+        keys: "Ctrl+G",
+        action: "Go to a line: 412, or 412:10 for a column too",
+        section: "Find",
+        bindings: &[(Binding::Ctrl("g"), Command::GoToLine)],
     },
     Shortcut {
         keys: "Ctrl+A",
@@ -1101,6 +1109,12 @@ mod tests {
     #[test]
     fn find_chords_resolve() {
         assert_eq!(command(&chr("f"), true, false), Some(Command::Find));
+        assert_eq!(command(&chr("g"), true, false), Some(Command::GoToLine));
+        assert_eq!(command(&chr("G"), true, true), Some(Command::GoToLine));
+        assert!(
+            Command::GoToLine.live_under_a_field(),
+            "Ctrl+G under the search field swaps the two bars"
+        );
         assert_eq!(
             command(&Key::Named(NamedKey::F3), false, false),
             Some(Command::FindNext)

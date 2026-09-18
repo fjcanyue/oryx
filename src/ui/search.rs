@@ -17,18 +17,18 @@ use crate::ui::textfield::TextField;
 const BLOCK_SEP: char = '\u{1}';
 
 const BAR_WIDTH: f32 = 344.0;
-const BAR_HEIGHT: f32 = 40.0;
-const MARGIN: f32 = 16.0;
-const PAD: f32 = 16.0;
-const RADIUS: f32 = 20.0;
-const QUERY_SIZE: f32 = 15.0;
-const COUNTER_SIZE: f32 = 13.0;
+pub(crate) const BAR_HEIGHT: f32 = 40.0;
+pub(crate) const MARGIN: f32 = 16.0;
+pub(crate) const PAD: f32 = 16.0;
+pub(crate) const RADIUS: f32 = 20.0;
+pub(crate) const QUERY_SIZE: f32 = 15.0;
+pub(crate) const COUNTER_SIZE: f32 = 13.0;
 const TOGGLE_W: f32 = 26.0;
 const TOGGLE_H: f32 = 22.0;
 const ROW_H: f32 = 36.0;
 /// The glyphs sit this much below the row's top, so the text's caps
 /// stand centered on the caret and the pill, level with the toggle.
-const TEXT_DROP: f32 = 2.0;
+pub(crate) const TEXT_DROP: f32 = 2.0;
 
 /// Live find session: the query as typed, its matches, and the cursor
 /// among them. `stale` marks the matches for recomputation against the
@@ -287,7 +287,7 @@ pub fn bar_hit(width: f32, replace_row: bool, px: f32, py: f32) -> Option<BarHit
 /// placeholder when empty, selection and caret drawn only on the field
 /// the keyboard feeds. Answers where the text stands, for the mouse.
 #[allow(clippy::too_many_arguments)]
-fn draw_field(
+pub(crate) fn draw_field(
     painter: &mut Painter,
     theme: &Theme,
     field: &TextField,

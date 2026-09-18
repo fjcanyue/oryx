@@ -59,6 +59,12 @@
 - The numbers sit in the margin the page already has, so turning them on moves nothing. When the digits need more room (a very long file, a narrow window, a big zoom), the text steps right by what is missing.
 - A line that wraps gets its number on its first row only. Copy never takes the numbers. In the editor, the number of the caret's line reads brighter, as in other editors.
 
+### Go to line
+
+- `Ctrl+G` opens a small field where the search bar stands. Type a line number and press Enter, and Oryx goes there. `412:10` lands on the tenth character of line 412. A number past the end goes to the last line.
+- In the editor the caret lands on the line. While reading a code or text file the line comes to the top, and on a rendered markdown page the block that holds that line of the source does. While reading, `Alt+Left` goes back to where you were. Books and comics have no lines, so the key does nothing there.
+- From a terminal, `oryx main.rs:412` and `oryx main.rs:412:10` open the file at that place, the form compilers print. A file really named `notes:412` still opens as typed.
+
 ### Word count
 
 - A new `word count` row in the settings (`Ctrl+,`) shows the size of the file in the bottom right corner of the page: words, characters, lines and reading time. It is off by default, and the choice is remembered. Select some text and the line shows the figures of the selection.

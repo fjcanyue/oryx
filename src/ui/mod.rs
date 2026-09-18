@@ -1,5 +1,6 @@
 pub mod confirm;
 pub mod export;
+pub mod goto;
 pub mod help;
 pub mod notice;
 pub mod outline;

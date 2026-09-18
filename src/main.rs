@@ -28,7 +28,11 @@ fn launch(path: Option<PathBuf>) -> app::Launch {
     match path {
         None => app::Launch::Empty,
         Some(p) if p.is_dir() => app::Launch::Folder(p),
-        Some(p) => app::Launch::File(p),
+        Some(p) => match oryx::ui::goto::split_arg(&p, |name| name.exists()) {
+            (file, Some(_)) if file.is_dir() => app::Launch::Folder(file.to_path_buf()),
+            (file, Some(target)) => app::Launch::FileAt(file.to_path_buf(), target),
+            (_, None) => app::Launch::File(p),
+        },
     }
 }
 
@@ -41,7 +45,8 @@ fn usage() -> String {
         "oryx {}\n\n{USAGE_LINE}\n\n\
          Opens a markdown, code or text file, or a book (EPUB, FB2, MOBI,\n\
          AZW3, CBZ, CBR). A folder opens the sidebar on it. Without an\n\
-         argument the window explains how to open a file.\n\n\
+         argument the window explains how to open a file. FILE:412 opens\n\
+         the file at line 412, and FILE:412:10 at column 10 of that line.\n\n\
          Options:\n\
          \x20 --theme NAME   start with the named theme\n\
          \x20 --register     install the file association and icons\n\
@@ -193,12 +198,41 @@ mod tests {
         std::fs::write(&file, "# notes\n").unwrap();
         let missing = dir.join("absent.md");
         assert_eq!(launch(None), app::Launch::Empty);
-        assert_eq!(launch(Some(file.clone())), app::Launch::File(file));
+        assert_eq!(launch(Some(file.clone())), app::Launch::File(file.clone()));
         assert_eq!(launch(Some(dir.clone())), app::Launch::Folder(dir.clone()));
         assert_eq!(
             launch(Some(missing.clone())),
             app::Launch::File(missing),
             "a missing path goes to the loader, whose error names it"
+        );
+        let with = |tail: &str| {
+            let mut name = file.clone().into_os_string();
+            name.push(tail);
+            PathBuf::from(name)
+        };
+        let at = |line, column| oryx::ui::goto::Target { line, column };
+        assert_eq!(
+            launch(Some(with(":412"))),
+            app::Launch::FileAt(file.clone(), at(412, None))
+        );
+        assert_eq!(
+            launch(Some(with(":412:10"))),
+            app::Launch::FileAt(file.clone(), at(412, Some(10))),
+            "the form a compiler prints"
+        );
+        let odd = dir.join("notes:7");
+        std::fs::write(&odd, "text\n").unwrap();
+        assert_eq!(
+            launch(Some(odd.clone())),
+            app::Launch::File(odd),
+            "a file really named so opens as typed"
+        );
+        let mut folder = dir.clone().into_os_string();
+        folder.push(":3");
+        assert_eq!(
+            launch(Some(PathBuf::from(folder))),
+            app::Launch::Folder(dir.clone()),
+            "a line means nothing on a folder"
         );
         std::fs::remove_dir_all(&dir).ok();
     }
