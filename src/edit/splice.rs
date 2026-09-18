@@ -49,7 +49,9 @@ pub fn combine(source: &str, edits: &[(Range<usize>, String)]) -> Option<(Range<
 pub struct Ledger {
     /// The normalized text fixed at edit entry; splice ranges index it.
     base: Arc<str>,
-    /// Baseline-text offsets of newlines the load normalized from CRLF.
+    /// Baseline-text offsets of the newlines the load stripped returns
+    /// before, one entry per return: a Windows line break lists its
+    /// newline once, a damaged CR CR LF twice.
     crlf: Vec<u32>,
     /// The file opened with a UTF-8 byte order mark; the emission
     /// writes it back first. Never part of the text, so no offset
@@ -226,24 +228,32 @@ impl Ledger {
 
     /// The file bytes the current text saves as: untouched baseline
     /// bytes verbatim, normalized line endings restored where they
-    /// stood, and every newline inside a replacement written in the
-    /// file's dominant ending.
+    /// stood with every return they had, and every newline inside a
+    /// replacement written in the file's usual ending.
     pub fn emit(&self) -> Vec<u8> {
         self.render().0
     }
 
     /// The emission and, beside it, the current-text offsets of every
-    /// newline written as CRLF: the commit's new recording.
+    /// return written before a newline: the commit's new recording.
     fn render(&self) -> (Vec<u8>, Vec<u32>) {
         let newlines = self.base.matches('\n').count();
-        let dominant_crlf = self.crlf.len() * 2 > newlines;
+        // The usual ending is the one most line breaks had; a break
+        // counts once whatever the run of returns before it.
+        let with_returns = self
+            .crlf
+            .iter()
+            .enumerate()
+            .filter(|&(i, p)| i == 0 || self.crlf[i - 1] != *p)
+            .count();
+        let dominant_crlf = with_returns * 2 > newlines;
         let mut out = Vec::with_capacity(self.base.len() + self.crlf.len() + 3);
         if self.bom {
             out.extend_from_slice(b"\xEF\xBB\xBF");
         }
         let mut written = Vec::with_capacity(self.crlf.len());
         // The normalized position of the next byte, walked alongside
-        // the emission so CRLF positions record in current coordinates.
+        // the emission so the positions record in current coordinates.
         let mut cur = 0;
         let mut crlf = self.crlf.iter().map(|&p| p as usize).peekable();
         let mut push_base =
@@ -255,10 +265,16 @@ impl Ledger {
                     }
                     if p >= at {
                         out.extend_from_slice(self.base[at..p].as_bytes());
-                        out.extend_from_slice(b"\r\n");
-                        written.push((*cur + p - at) as u32);
+                        // Every entry at this newline is one return
+                        // before it.
+                        while crlf.next_if_eq(&p).is_some() {
+                            out.push(b'\r');
+                            written.push((*cur + p - at) as u32);
+                        }
+                        out.push(b'\n');
                         *cur += p - at + 1;
                         at = p + 1;
+                        continue;
                     }
                     crlf.next();
                 }
@@ -327,6 +343,33 @@ mod tests {
         led.commit();
         assert_eq!(led.crlf, vec![1, 3], "offsets stay in text coordinates");
         assert_eq!(led.emit(), b"\xEF\xBB\xBFa\r\nb\r\n");
+    }
+
+    #[test]
+    fn a_run_of_returns_writes_back_on_untouched_lines_and_one_on_new_ones() {
+        let mut led = Ledger::new(Arc::from("a\nb\nc\n"), vec![1, 1, 3]);
+        assert_eq!(led.emit(), b"a\r\r\nb\r\nc\n");
+        // A line typed before c: its own break takes the file's usual
+        // ending, one return; the lines around keep theirs.
+        led.edit(4..4, "x\ny");
+        assert_eq!(led.current(), "a\nb\nx\nyc\n");
+        assert_eq!(led.emit(), b"a\r\r\nb\r\nx\r\nyc\n");
+        led.commit();
+        assert_eq!(
+            led.crlf,
+            vec![1, 1, 3, 5],
+            "the record follows the saved text, the run kept"
+        );
+        assert_eq!(led.emit(), b"a\r\r\nb\r\nx\r\nyc\n");
+    }
+
+    #[test]
+    fn the_usual_ending_counts_line_breaks_not_returns() {
+        // Two damaged lines among five plain ones: LF stays the usual
+        // ending, however many returns the two carry.
+        let mut led = Ledger::new(Arc::from("a\nb\nc\nd\ne\nf\ng\n"), vec![1, 1, 3, 3]);
+        led.edit(8..8, "x\n");
+        assert_eq!(led.emit(), b"a\r\r\nb\r\r\nc\nd\nx\ne\nf\ng\n");
     }
 
     #[test]

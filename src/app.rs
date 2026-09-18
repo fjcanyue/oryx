@@ -3140,7 +3140,7 @@ impl App {
         };
         // Clipboard line endings normalize like the load; the ledger
         // writes the file's own ending back on save.
-        let text = text.replace("\r\n", "\n");
+        let text = load::without_returns(&text);
         if text.is_empty() {
             return;
         }

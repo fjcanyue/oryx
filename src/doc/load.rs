@@ -188,9 +188,11 @@ pub struct Opened {
     /// replacement. Editing refuses such a file: byte fidelity cannot
     /// be promised back to disk over a lossy read.
     pub lossy: bool,
-    /// Offsets in the normalized text of each newline that was CRLF in
-    /// the file bytes. The splice ledger restores them on save, so the
-    /// normalization the viewer needs never reaches the disk.
+    /// Offsets in the normalized text of each newline the file bytes
+    /// had returns before, one entry per return: a Windows line break
+    /// lists its newline once, a damaged CR CR LF twice. The splice
+    /// ledger restores them on save, so the normalization the viewer
+    /// needs never reaches the disk.
     pub crlf: Vec<u32>,
     /// The file opened with a UTF-8 byte order mark, stripped from the
     /// text; the splice ledger writes it back first on save.
@@ -277,22 +279,30 @@ pub fn open(path: &Path, deadline: Option<Instant>) -> anyhow::Result<Opened> {
     } else {
         text
     };
-    // Windows files carry CRLF; the plain-text path strips returns per
-    // line, and everything downstream (offsets, rendering, copy as
-    // markdown) assumes the source is clean of them. Each stripped
-    // return leaves its normalized offset behind, so the splice ledger
-    // can put every untouched ending back verbatim on save.
+    // Windows files carry CRLF, and a damaged file a run of returns
+    // before each line break (CR CR LF, an old Mac and a Windows
+    // conversion on top of each other). Every return before a line
+    // break leaves the text: everything downstream (offsets, the
+    // editor's line math, rendering, copy as markdown) assumes the
+    // source is clean of them. Each stripped return leaves the line
+    // break's normalized offset behind, one entry per return, so the
+    // splice ledger can put every untouched ending back verbatim on
+    // save. A return with no line break after it is text.
     let (text, crlf) = if text.contains("\r\n") {
         let mut out = String::with_capacity(text.len());
         let mut crlf = Vec::new();
-        let mut rest = &*text;
-        while let Some(i) = rest.find("\r\n") {
-            out.push_str(&rest[..i]);
-            crlf.push(out.len() as u32);
+        for piece in text.split_inclusive('\n') {
+            let Some(line) = piece.strip_suffix('\n') else {
+                out.push_str(piece);
+                break;
+            };
+            let head = line.trim_end_matches('\r');
+            out.push_str(head);
+            for _ in head.len()..line.len() {
+                crlf.push(out.len() as u32);
+            }
             out.push('\n');
-            rest = &rest[i + 2..];
         }
-        out.push_str(rest);
         (std::borrow::Cow::Owned(out), crlf)
     } else {
         (text, Vec::new())
@@ -430,6 +440,23 @@ pub fn fold(doc: &mut Document, arrival: &Arrival) {
             *exact = lines.len();
         }
     }
+}
+
+/// `text` with every return before a line break removed, the way the
+/// load cleans a file: what pasted text goes through, so a line break
+/// is always one byte inside the editor.
+pub fn without_returns(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for piece in text.split_inclusive('\n') {
+        match piece.strip_suffix('\n') {
+            Some(line) => {
+                out.push_str(line.trim_end_matches('\r'));
+                out.push('\n');
+            }
+            None => out.push_str(piece),
+        }
+    }
+    out
 }
 
 /// A short notice (an open error) rendered as a plain document.
@@ -834,6 +861,38 @@ mod tests {
         let opened = open(&clean, None).unwrap();
         assert!(opened.crlf.is_empty());
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A damaged file ends its lines in CR CR LF, an old Mac and a
+    /// Windows conversion on top of each other. Every return before a
+    /// line break leaves the text, so the editor's line math sees one
+    /// byte per line break, and each is on record so the save writes
+    /// the line back as it was.
+    #[test]
+    fn stray_returns_before_a_line_break_leave_the_text_and_go_on_record() {
+        let dir = std::env::temp_dir().join(format!("oryx-crcrlf-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("damaged.htm");
+        let bytes = b"one\r\r\ntwo\r\nthree\n\r\r\n";
+        std::fs::write(&path, bytes).unwrap();
+        let opened = open(&path, None).unwrap();
+        std::fs::remove_dir_all(&dir).ok();
+        assert_eq!(&*opened.document.source, "one\ntwo\nthree\n\n");
+        assert_eq!(
+            opened.crlf,
+            vec![3, 3, 7, 14, 14],
+            "one entry per return, at the offset of the line break it stood before"
+        );
+        let led = crate::edit::splice::Ledger::new(opened.document.source.clone(), opened.crlf);
+        assert_eq!(led.emit(), bytes, "the bytes come back untouched");
+    }
+
+    #[test]
+    fn pasted_text_loses_its_returns_before_line_breaks_only() {
+        assert_eq!(without_returns("a\r\nb\r\r\nc\n"), "a\nb\nc\n");
+        assert_eq!(without_returns("a\rb\n"), "a\rb\n", "a lone return is text");
+        assert_eq!(without_returns("tail\r"), "tail\r", "no break, no strip");
+        assert_eq!(without_returns(""), "");
     }
 
     #[test]
