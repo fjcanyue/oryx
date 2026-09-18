@@ -224,12 +224,35 @@ struct HtmlPre {
 }
 
 /// One open HTML list level.
-/// An open `<p>` or `<div>`: whether it centers or right-aligns its
-/// content, and whether a page break follows it (`page-break-after`).
+/// An open `<p>` or `<div>`: the side its `align` attribute names, if
+/// any, and whether a page break follows it (`page-break-after`).
 struct HtmlDiv {
-    centered: bool,
-    right: bool,
+    align: Option<HtmlAlign>,
     break_after: bool,
+}
+
+/// The values of `align` Oryx reads on a `p` or a `div`.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum HtmlAlign {
+    Left,
+    Center,
+    Right,
+}
+
+impl HtmlAlign {
+    /// Any other value, `justify` included, reads as no attribute: the
+    /// block keeps the word of the block around it.
+    fn parse(value: &str) -> Option<Self> {
+        if value.eq_ignore_ascii_case("left") {
+            Some(HtmlAlign::Left)
+        } else if value.eq_ignore_ascii_case("center") {
+            Some(HtmlAlign::Center)
+        } else if value.eq_ignore_ascii_case("right") {
+            Some(HtmlAlign::Right)
+        } else {
+            None
+        }
+    }
 }
 
 /// Which side of an element a page break style puts the break on.
@@ -1162,20 +1185,13 @@ impl Builder {
                     return;
                 }
                 self.flush_spans();
-                let align = html_attr(attrs, "align");
-                let centered = align
-                    .as_deref()
-                    .is_some_and(|a| a.eq_ignore_ascii_case("center"));
-                let right = align
-                    .as_deref()
-                    .is_some_and(|a| a.eq_ignore_ascii_case("right"));
+                let align = html_attr(attrs, "align").and_then(|a| HtmlAlign::parse(&a));
                 let side = html_attr(attrs, "style").and_then(|s| page_break_side(&s));
                 if side == Some(BreakSide::Before) {
                     self.emit(BlockKind::PageBreak);
                 }
                 self.html_divs.push(HtmlDiv {
-                    centered,
-                    right,
+                    align,
                     break_after: side == Some(BreakSide::After),
                 });
             }
@@ -1652,8 +1668,7 @@ impl Builder {
         };
         if let Some(caption) = t.caption {
             self.html_divs.push(HtmlDiv {
-                centered: true,
-                right: false,
+                align: Some(HtmlAlign::Center),
                 break_after: false,
             });
             self.emit(BlockKind::Paragraph { spans: caption });
@@ -1690,6 +1705,7 @@ impl Builder {
                 range: start..start,
                 centered: false,
                 right: false,
+                left: false,
                 details: self.details[id as usize].parent,
                 kind: BlockKind::Summary {
                     spans: vec![Span::plain("Details")],
@@ -1896,12 +1912,15 @@ impl Builder {
             BlockKind::Summary { group, .. } => self.details[*group as usize].parent,
             _ => self.details_stack.last().copied(),
         };
+        // The innermost open block that names a side decides.
+        let align = self.html_divs.iter().rev().find_map(|d| d.align);
         self.blocks.push(Block {
             quote_depth: self.quote_depth,
             alert: self.alerts.iter().rev().find_map(|a| *a),
             range,
-            centered: self.html_divs.iter().any(|d| d.centered),
-            right: self.html_divs.iter().any(|d| d.right),
+            centered: align == Some(HtmlAlign::Center),
+            right: align == Some(HtmlAlign::Right),
+            left: align == Some(HtmlAlign::Left),
             details,
             kind,
         });
@@ -2662,6 +2681,47 @@ mod tests {
             .find(|b| matches!(b.kind, BlockKind::Paragraph { .. }))
             .unwrap();
         assert!(inner.centered && !inner.right);
+    }
+
+    /// The innermost `align` wins, as in HTML: a left block inside a
+    /// centered one goes back to the left, and the outer word holds
+    /// again once the inner block closes.
+    #[test]
+    fn html_align_takes_the_innermost_word() {
+        let paragraph = |d: &Document, text: &str| -> (bool, bool, bool) {
+            let block = d
+                .blocks
+                .iter()
+                .find(|b| match &b.kind {
+                    BlockKind::Paragraph { spans } => {
+                        spans.iter().any(|s| s.text(&d.source) == text)
+                    }
+                    _ => false,
+                })
+                .unwrap_or_else(|| panic!("no paragraph {text}"));
+            (block.left, block.centered, block.right)
+        };
+        let d = parse(
+            "<div align=\"center\">\n\nbefore\n\n<p align=\"LEFT\">\n\ninner\n\n</p>\n\nafter\n\n</div>\n\nplain\n",
+        );
+        assert_eq!(paragraph(&d, "before"), (false, true, false));
+        assert_eq!(paragraph(&d, "inner"), (true, false, false));
+        assert_eq!(paragraph(&d, "after"), (false, true, false));
+        assert_eq!(paragraph(&d, "plain"), (false, false, false));
+
+        let d = parse("<div align=\"center\">\n\n<p align=\"right\">\n\ninner\n\n</p>\n\n</div>\n");
+        assert_eq!(paragraph(&d, "inner"), (false, false, true));
+
+        // The one-line form of SYNTAX.md.
+        let d = parse("<div align=\"center\"><p align=\"left\">inner</p></div>\n");
+        assert_eq!(paragraph(&d, "inner"), (true, false, false));
+
+        // A block without the attribute, or with a value Oryx does not
+        // read, keeps the word of the block around it.
+        let d = parse(
+            "<div align=\"right\">\n\n<div>\n\n<p align=\"justify\">\n\ninner\n\n</p>\n\n</div>\n\n</div>\n",
+        );
+        assert_eq!(paragraph(&d, "inner"), (false, false, true));
     }
 
     #[test]

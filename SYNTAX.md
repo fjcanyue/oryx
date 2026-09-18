@@ -435,6 +435,8 @@ Oryx renders the HTML subset GitHub allows in READMEs. Anything outside it is st
 
 <p align="center">A centered paragraph.</p>
 <div align="center">A centered block.</div>
+<p align="right">A paragraph on the right.</p>
+<div align="center"><p align="left">A left paragraph inside a centered block.</p></div>
 
 <blockquote>A quote, nestable, stacking with markdown quotes.</blockquote>
 
@@ -455,6 +457,8 @@ Oryx renders the HTML subset GitHub allows in READMEs. Anything outside it is st
 
 <p align="center">A centered paragraph.</p>
 <div align="center">A centered block.</div>
+<p align="right">A paragraph on the right.</p>
+<div align="center"><p align="left">A left paragraph inside a centered block.</p></div>
 
 <blockquote>A quote, nestable, stacking with markdown quotes.</blockquote>
 

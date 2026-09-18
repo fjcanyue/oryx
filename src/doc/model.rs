@@ -211,6 +211,11 @@ pub struct Block {
     /// Set inside `<p align="right">` or `<div align="right">`: the
     /// block's lines end at the content's right edge.
     pub right: bool,
+    /// Set inside `<p align="left">` or `<div align="left">`: the
+    /// block's lines start at the content's left edge, whatever the
+    /// direction of the text. At most one of the three is set, the word
+    /// of the innermost block that carries one.
+    pub left: bool,
     /// Innermost enclosing `<details>` group; a summary row carries the
     /// group enclosing its own, being the toggle.
     pub details: Option<u16>,
@@ -225,8 +230,24 @@ impl Block {
             range: 0..0,
             centered: false,
             right: false,
+            left: false,
             details: None,
             kind,
+        }
+    }
+
+    /// Where the block's lines go in the room the content width leaves
+    /// them: 0.0 the left edge, 0.5 the middle, 1.0 the right edge.
+    /// `None` leaves every line where its direction put it.
+    pub fn align_factor(&self) -> Option<f32> {
+        if self.centered {
+            Some(0.5)
+        } else if self.right {
+            Some(1.0)
+        } else if self.left {
+            Some(0.0)
+        } else {
+            None
         }
     }
 }

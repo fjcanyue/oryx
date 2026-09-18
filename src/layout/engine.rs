@@ -2994,14 +2994,7 @@ fn replay_position(
             }
         }
     }
-    let align = if block.centered {
-        Some(0.5)
-    } else if block.right {
-        Some(1.0)
-    } else {
-        None
-    };
-    if let Some(factor) = align {
+    if let Some(factor) = block.align_factor() {
         align_lines(out, run_mark, rect_mark, image_mark, x_base, avail, factor);
     }
     if entry.deco_top.is_finite() {
@@ -3111,14 +3104,7 @@ fn finish_block(
     pass: &mut LayoutPass,
     source: &str,
 ) {
-    let align = if block.centered {
-        Some(0.5)
-    } else if block.right {
-        Some(1.0)
-    } else {
-        None
-    };
-    if let Some(factor) = align {
+    if let Some(factor) = block.align_factor() {
         align_lines(
             out,
             frame.marks.runs,
@@ -5688,9 +5674,11 @@ fn fit_side_text(
 }
 
 /// Shifts every element of an aligned block so each visual line sits at
-/// `factor` of the room left in the content width: 0.5 centers it, 1.0
-/// puts it against the right edge. Lines are clustered by vertical
-/// overlap.
+/// `factor` of the room left in the content width: 0.0 puts it against
+/// the left edge, 0.5 centers it, 1.0 puts it against the right edge.
+/// A line may move either way, since right-to-left text starts on the
+/// right; a line wider than the content stays where it is. Lines are
+/// clustered by vertical overlap.
 fn align_lines(
     out: &mut LayoutDoc,
     runs_mark: usize,
@@ -5737,7 +5725,7 @@ fn align_lines(
             })
             .fold(0.0, f32::max);
         let dx = x0 + (avail - (max_x - min_x)) * factor - min_x;
-        if dx > 0.5 {
+        if dx.abs() > 0.5 && min_x + dx >= x0 - 0.5 {
             for item in group {
                 match item.2 {
                     0 => out.runs[item.3].x += dx,

@@ -38,6 +38,8 @@
 ### Embedded HTML
 
 - `<p align="right">` and `<div align="right">` put their content against the right edge, as on GitHub. Before, only `center` was honored.
+- `align="left"` is read too, and when aligned blocks are nested the innermost one decides, as in HTML. Before, a left paragraph inside a centered block stayed centered.
+- In a right-to-left page, `align="center"` and `align="left"` now move the text. Before, it stayed on the right.
 
 ### Task lists
 
@@ -65,7 +67,7 @@
 
 ### Welcome page
 
-- The welcome page ends with a tip, a different one at each launch, from a list that covers every feature of Oryx. The tips take turns between the areas, files, moving around, search, editing, themes, export, markdown, books, so ten launches show ten different kinds of things. A "more tips" link under it shows another. Nothing to close and nothing to switch off: the tips only live on the page you see when no file is open.
+- The welcome page shows a tip, a different one at each launch, from a list that covers every feature of Oryx. The tips take turns between the areas, files, moving around, search, editing, themes, export, markdown, books, so ten launches show ten different kinds of things. A "more tips" link under it shows another. Nothing to close and nothing to switch off: the tips only live on the page you see when no file is open.
 
 ## v1.1.1
 

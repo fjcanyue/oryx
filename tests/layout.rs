@@ -901,6 +901,54 @@ fn right_aligned_text_ends_at_the_right_edge() {
     assert!(short.x > plain.x + 300.0, "moved right, x {}", short.x);
 }
 
+// A left block inside a centered one starts at the left edge, and the
+// centered text around it stays in the middle.
+#[test]
+fn a_left_block_inside_a_centered_one_starts_at_the_left_edge() {
+    let (doc, l) = lay2(
+        "plain\n\n<div align=\"center\">\n\nmiddle\n\n<p align=\"left\">\n\nshort\n\n</p>\n\n</div>\n",
+        800.0,
+    );
+    let plain = find_text(&l, &doc, "plain");
+    let middle = find_text(&l, &doc, "middle");
+    let short = find_text(&l, &doc, "short");
+    assert!(
+        (short.x - plain.x).abs() < 1.0,
+        "at the left, x {}",
+        short.x
+    );
+    let mid = middle.x + middle.width / 2.0;
+    assert!((mid - 400.0).abs() < 2.0, "still centered, mid {mid}");
+}
+
+// Under a forced right-to-left direction every line sits on the right;
+// `align="left"` brings a block back to the left edge and `center` to
+// the middle.
+#[test]
+fn align_left_and_center_hold_under_a_forced_rtl_direction() {
+    let (doc, l) = lay_dir(
+        "plain\n\n<p align=\"left\">\n\nshort\n\n</p>\n\n<p align=\"center\">\n\nmiddle\n\n</p>\n",
+        800.0,
+        DirectionMode::Rtl,
+    );
+    let plain = find_text(&l, &doc, "plain");
+    let short = find_text(&l, &doc, "short");
+    let middle = find_text(&l, &doc, "middle");
+    let margin = 800.0 - (plain.x + plain.width);
+    assert!(
+        plain.x > 400.0,
+        "the plain line sits on the right, x {}",
+        plain.x
+    );
+    assert!(
+        (short.x - margin).abs() < 2.0,
+        "at the left edge {margin}, x {}",
+        short.x
+    );
+    let mid = middle.x + middle.width / 2.0;
+    assert!((mid - 400.0).abs() < 2.0, "centered, mid {mid}");
+}
+
 #[test]
 fn inline_badge_joins_the_text_line() {
     let (doc, l) = lay2(
