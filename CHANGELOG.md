@@ -28,6 +28,7 @@
 - A middle click on a file in the sidebar opens it in a second Oryx window, a step down and right of the first, and the file you were editing stays as it is. `Ctrl+Enter` on the highlighted row does the same from the keyboard. The two windows share the settings file; the last to write wins.
 - Files and folders whose name starts with a dot stay out of the sidebar now, as in every file manager. `Ctrl+Shift+H` shows them, dimmed, and hides them again; the choice is remembered. The file you are reading keeps its row whatever the setting.
 - The welcome page says that the sidebar key shows and hides the panel.
+- The folder you are in reads in the accent color in the sidebar, its name and its icon: the folder of the open file, or, with no file open, the folder you last clicked. Before, the folder you had opened and the folder under the mouse looked the same. The accent fill stays on the open file.
 - The sidebar now follows changes on disk: a file added, removed or renamed in a folder it shows appears or goes the next time you come back to the window or touch it, the same way the open file reloads. Before, you had to leave the folder and come back.
 
 ### Quick reference

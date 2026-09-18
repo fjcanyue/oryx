@@ -243,6 +243,9 @@ pub struct Sidebar {
     selected: usize,
     /// The file currently displayed in the document area.
     current: Option<PathBuf>,
+    /// The folder last opened or closed with a click or Enter, the
+    /// accent's folder while no file is open.
+    acted_dir: Option<PathBuf>,
     scroll: f32,
     list_h: f32,
     /// The row or the thumb under the mouse, from the last cursor move.
@@ -363,6 +366,7 @@ impl Sidebar {
             entries: tree(root, filter),
             selected: 0,
             current: None,
+            acted_dir: None,
             scroll: 0.0,
             list_h: 0.0,
             hover: None,
@@ -566,10 +570,22 @@ impl Sidebar {
             self.enter_link(&link);
             None
         } else if entry.is_dir {
+            self.acted_dir = Some(entry.path.clone());
             self.toggle_dir(index);
             None
         } else {
             Some(entry.path.clone())
+        }
+    }
+
+    /// The folder the accent names in the tree: the open file's, or,
+    /// while no file is open, the folder last opened or closed with a
+    /// click or Enter. Its name and mark take the accent color; the
+    /// accent fill stays the open file's own.
+    pub fn accent_dir(&self) -> Option<&Path> {
+        match &self.current {
+            Some(file) => file.parent(),
+            None => self.acted_dir.as_deref(),
         }
     }
 
@@ -981,6 +997,7 @@ impl Sidebar {
         let ui = &theme.ui;
         let width = self.width;
         let (fg, accent) = (ui.sidebar_fg, ui.sidebar_dir);
+        let accent_dir = self.accent_dir().map(Path::to_path_buf);
         self.scroll = self.scroll.clamp(0.0, self.max_scroll());
         let first = (self.scroll / ROW_H).floor() as usize;
         let offset = -(self.scroll - first as f32 * ROW_H);
@@ -1003,7 +1020,12 @@ impl Sidebar {
                 draw_guide(painter, level, ry, fg);
             }
             let layout = row_layout(entry.depth, true);
-            let mut color = if current { accent } else { fg };
+            // The accent's folder reads in the accent color, its name
+            // and its mark, with no fill: the fill is the open file's.
+            let accent_folder = entry.is_dir
+                && !(index == 0 && entry.name == "..")
+                && accent_dir.as_deref() == Some(entry.path.as_path());
+            let mut color = if current || accent_folder { accent } else { fg };
             if entry.hidden || entry.notice {
                 color = dim(color);
             }
@@ -1237,6 +1259,34 @@ mod tests {
 
     fn names(side: &Sidebar) -> Vec<String> {
         side.entries.iter().map(|e| e.name.clone()).collect()
+    }
+
+    #[test]
+    fn the_accent_folder_is_the_open_files_or_the_last_one_clicked() {
+        let dir = temp_tree("accent-dir");
+        let mut side = Sidebar::new(&dir);
+        assert_eq!(side.accent_dir(), None, "nothing open, nothing clicked");
+        let sub = names(&side).iter().position(|n| n == "sub").unwrap();
+        side.activate(sub);
+        assert_eq!(
+            side.accent_dir(),
+            Some(dir.join("sub").as_path()),
+            "with no file open, the folder last clicked"
+        );
+        side.activate(sub);
+        assert_eq!(
+            side.accent_dir(),
+            Some(dir.join("sub").as_path()),
+            "closing it again keeps it the last one clicked"
+        );
+        side.set_current(&dir.join("zeta.md"));
+        assert_eq!(
+            side.accent_dir(),
+            Some(dir.as_path()),
+            "the open file's folder wins over the click"
+        );
+        side.set_current(&dir.join("sub/inner.md"));
+        assert_eq!(side.accent_dir(), Some(dir.join("sub").as_path()));
     }
 
     #[test]
