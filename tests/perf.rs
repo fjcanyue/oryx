@@ -934,3 +934,44 @@ fn count_measured() {
         );
     }
 }
+
+/// What the line numbers add to a band: the editor's band, five
+/// viewports tall, painted over a 1 MB code file with and without them.
+/// The band is repainted at each keystroke, so the difference is what
+/// the setting costs a typed letter.
+#[test]
+#[ignore = "timing probe, release mode"]
+fn gutter_measured() {
+    let (_, _, doc) = measure_open(&large_gen::generate_code(1024 * 1024), "rs");
+    let (_, lay) = measure_layout(&doc, None);
+    let mut fonts = FontStore::new();
+    let mut media = MediaCache::new(PathBuf::from("."));
+    let theme = Theme::default_dark();
+    let height = 5 * VIEWPORT_H as u32;
+    let mut paint = |numbers: Option<oryx::style::theme::Rgba>| {
+        (0..5)
+            .map(|_| {
+                let started = Instant::now();
+                let _ = oryx::paint::band_numbered(
+                    &lay,
+                    &doc,
+                    &theme,
+                    &mut fonts,
+                    &mut media,
+                    &[],
+                    numbers,
+                    lay.height / 2.0,
+                    WIDTH as u32,
+                    height,
+                );
+                started.elapsed().as_secs_f64() * 1000.0
+            })
+            .fold(f64::MAX, f64::min)
+    };
+    let plain = paint(None);
+    let numbered = paint(Some(theme.syntax.comment));
+    println!(
+        "gutter: band {plain:.2}ms plain, {numbered:.2}ms numbered, {:.2}ms for the numbers",
+        numbered - plain
+    );
+}

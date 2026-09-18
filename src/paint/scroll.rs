@@ -99,7 +99,8 @@ pub struct BandCache {
 
 impl BandCache {
     /// Paints a band recentered on `scroll_y`: five viewport heights,
-    /// clamped so it never starts above the document top.
+    /// clamped so it never starts above the document top. `numbers` is
+    /// the line numbers' color, None when they are off.
     #[allow(clippy::too_many_arguments)]
     pub fn repaint(
         layout: &LayoutDoc,
@@ -108,6 +109,7 @@ impl BandCache {
         fonts: &mut FontStore,
         media: &mut MediaCache,
         extra: &[DecoRect],
+        numbers: Option<crate::style::theme::Rgba>,
         scroll_y: f32,
         width: u32,
         viewport_h: u32,
@@ -118,8 +120,8 @@ impl BandCache {
         let y_top = (scroll_y - (2 * viewport_h) as f32)
             .clamp(0.0, max_top)
             .floor();
-        let pixels = super::band(
-            layout, doc, theme, fonts, media, extra, y_top, width, height,
+        let pixels = super::band_numbered(
+            layout, doc, theme, fonts, media, extra, numbers, y_top, width, height,
         );
         BandCache {
             pixels,

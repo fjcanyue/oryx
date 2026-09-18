@@ -36,6 +36,26 @@ pub fn band(
     width: u32,
     height: u32,
 ) -> Vec<u32> {
+    band_numbered(
+        layout, doc, theme, fonts, media, extra, None, y_top, width, height,
+    )
+}
+
+/// As `band`, with the line numbers of a file of lines in the left
+/// margin when `numbers` gives their color.
+#[allow(clippy::too_many_arguments)]
+pub fn band_numbered(
+    layout: &LayoutDoc,
+    doc: &Document,
+    theme: &Theme,
+    fonts: &mut FontStore,
+    media: &mut MediaCache,
+    extra: &[DecoRect],
+    numbers: Option<Rgba>,
+    y_top: f32,
+    width: u32,
+    height: u32,
+) -> Vec<u32> {
     let mut pixmap = Pixmap::new(width.max(1), height.max(1)).expect("pixmap allocation");
     let bg = paper(doc, theme);
     pixmap.fill(tiny_skia::Color::from_rgba8(bg.r, bg.g, bg.b, 255));
@@ -125,6 +145,10 @@ pub fn band(
             continue;
         }
         draw_math_glyph(&mut pixmap, fonts, g, y_top);
+    }
+
+    if let Some(color) = numbers.filter(|_| super::gutter::numbered(doc)) {
+        super::gutter::paint(&mut pixmap, fonts, layout, doc, color, y_top);
     }
 
     pixmap
@@ -241,6 +265,19 @@ fn draw_run(
         .map(|lr| run.width - lr.line_w)
         .unwrap_or(0.0);
     let (origin_x, origin_y) = (run.x + anchor, run.baseline - paint_baseline - y_top);
+    blend_buffer(pixmap, fonts, &mut buffer, color, origin_x, origin_y);
+}
+
+/// Blends a shaped buffer's glyphs onto the pixmap, the buffer's origin
+/// at (`origin_x`, `origin_y`), whole pixels taken by truncation.
+pub(super) fn blend_buffer(
+    pixmap: &mut Pixmap,
+    fonts: &mut FontStore,
+    buffer: &mut Buffer,
+    color: Color,
+    origin_x: f32,
+    origin_y: f32,
+) {
     let width = pixmap.width() as i32;
     let height = pixmap.height() as i32;
     let data = pixmap.data_mut();
@@ -431,6 +468,7 @@ mod tests {
             &mut fonts,
             &mut media,
             &[],
+            None,
             scroll,
             width,
             viewport,

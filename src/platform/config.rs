@@ -49,6 +49,10 @@ pub struct Config {
     /// Manual interface scale on top of the display's own factor, 1.0
     /// at the detected baseline. Adjusted in the settings dialog.
     pub ui_scale: f32,
+    /// Whether a file of lines (code, text, markdown in the editor)
+    /// shows its line numbers in the left margin; off by default, an
+    /// on/off row in the settings dialog.
+    pub line_numbers: bool,
     /// Whether the corner of the page shows the file's word count; off
     /// by default, an on/off row in the settings dialog.
     pub word_count: bool,
@@ -117,6 +121,7 @@ impl Default for Config {
             justify: true,
             justify_markdown: false,
             ui_scale: 1.0,
+            line_numbers: false,
             word_count: false,
             tip: 0,
             export: None,
@@ -437,6 +442,7 @@ mod tests {
             justify: false,
             justify_markdown: true,
             ui_scale: 1.15,
+            line_numbers: true,
             word_count: true,
             tip: 7,
             export: None,
@@ -738,6 +744,16 @@ mod tests {
             loaded.tip, 0,
             "a config from before the tips starts at the first"
         );
+    }
+
+    #[test]
+    fn line_numbers_start_off_and_an_older_config_keeps_them_so() {
+        assert!(!Config::default().line_numbers);
+        let path = temp_path("no-line-numbers-key.toml");
+        std::fs::write(&path, "theme = \"nord\"\n").unwrap();
+        let loaded = load_from(&path);
+        std::fs::remove_file(&path).unwrap();
+        assert!(!loaded.line_numbers);
     }
 
     #[test]

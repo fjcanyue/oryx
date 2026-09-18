@@ -39,6 +39,11 @@ pub struct ViewConfig {
     /// The layout is bound for the page export: marks that only guide a
     /// reader on screen, the page break's dashed line, are left out.
     pub print: bool,
+    /// The room the line numbers need left of a file of lines, zero
+    /// when they are off. The page's own margin usually holds it and
+    /// nothing moves; a wider need steps the lines right by the
+    /// difference. A rendered page ignores it.
+    pub gutter: f32,
 }
 
 impl Default for ViewConfig {
@@ -53,6 +58,7 @@ impl Default for ViewConfig {
             comic: ComicFit::Width,
             direction: DirectionMode::Auto,
             print: false,
+            gutter: 0.0,
         }
     }
 }
@@ -1528,9 +1534,16 @@ pub fn layout_begin(
     cfg: &ViewConfig,
     viewport_width: f32,
 ) -> (LayoutDoc, LayoutPass) {
-    let margin = metrics::MARGIN_RATIO * viewport_width;
+    let right = metrics::MARGIN_RATIO * viewport_width;
+    // A file of lines keeps room for its line numbers on the left: the
+    // margin itself while the digits fit it, more when they do not.
+    let margin = if doc.code_file || doc.plain_file {
+        right.max(cfg.gutter)
+    } else {
+        right
+    };
     let vertical_margin = metrics::VERTICAL_MARGIN_EM * cfg.body_size * cfg.zoom;
-    let content_width = (viewport_width - 2.0 * margin).max(50.0);
+    let content_width = (viewport_width - margin - right).max(50.0);
 
     // Footnote definitions collect at the document end under a rule,
     // wherever the source declared them. Model indices stay untouched so
@@ -3246,6 +3259,13 @@ pub fn code_framed(doc: &Document) -> bool {
 
 /// The face code lines draw in: a plain text file's lines are prose
 /// and keep the body face and color; every other code line is code.
+/// The face and the zoomed size a file of lines draws its text in, what
+/// the line numbers size themselves from before a layout exists.
+pub fn line_face<'a>(doc: &Document, cfg: &'a ViewConfig) -> (&'a str, f32) {
+    let (family, size) = code_face(doc.plain_file, cfg);
+    (family, size * cfg.zoom)
+}
+
 fn code_face(plain: bool, cfg: &ViewConfig) -> (&str, f32) {
     if plain {
         (&cfg.body_family, cfg.body_size)

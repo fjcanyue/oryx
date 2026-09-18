@@ -351,6 +351,7 @@ pub fn run(
         count_inbox: std::sync::mpsc::channel(),
         count_asked: 0,
         open_failed: false,
+        gutter_measured: None,
         notice: None,
         notice_canvas: None,
     };
@@ -474,6 +475,30 @@ fn draw_caret(
         for x in x0..x1 {
             frame[row + x as usize] = value;
         }
+    }
+}
+
+/// Copies a line number strip onto the frame: at the page's left edge,
+/// past the sidebar's `inset`, on the row the scroll puts it. The strip's
+/// top and `scroll_y` are both whole pixels.
+fn draw_strip(
+    frame: &mut [u32],
+    width: u32,
+    height: u32,
+    inset: u32,
+    scroll_y: f32,
+    strip: &paint::gutter::Strip,
+) {
+    let top = (strip.y - scroll_y) as i64;
+    let shown = strip.width.min(width.saturating_sub(inset)) as usize;
+    for row in 0..strip.height as usize {
+        let y = top + row as i64;
+        if y < 0 || y >= height as i64 {
+            continue;
+        }
+        let dst = y as usize * width as usize + inset as usize;
+        let src = row * strip.width as usize;
+        frame[dst..dst + shown].copy_from_slice(&strip.pixels[src..src + shown]);
     }
 }
 
@@ -1020,6 +1045,10 @@ struct App {
     count_asked: u64,
     /// The page shows an open error's message, not the file's text.
     open_failed: bool,
+    /// The room the line numbers were last measured to need, with what
+    /// it was measured for: the face, the size and the digits. The
+    /// measure shapes text, so a frame repeats it only on a change.
+    gutter_measured: Option<((String, u32, usize), f32)>,
 }
 
 /// A finished count: the number of the count that asked, and the
@@ -1972,6 +2001,62 @@ impl App {
             state.stale = true;
         }
         true
+    }
+
+    /// True when the page shows line numbers: the setting on, and a
+    /// file whose rows are its lines.
+    fn numbers_shown(&self) -> bool {
+        self.config.line_numbers && !self.open_failed && paint::gutter::numbered(&self.document)
+    }
+
+    /// The numbers' color for the band, None when they are off.
+    fn numbers_color(&self) -> Option<Rgba> {
+        self.numbers_shown().then_some(self.theme.syntax.comment)
+    }
+
+    /// Keeps the layout's room for the line numbers in step with the
+    /// setting, the face, the zoom and the file's digits. The page's
+    /// margin usually holds the numbers, and then nothing is laid out
+    /// again; only a need past the margin, or back under it, moves the
+    /// lines and restarts the layout. A rendered page ignores the room,
+    /// so its layout is never restarted here.
+    fn sync_gutter(&mut self, avail: f32) {
+        let needed = if self.numbers_shown() {
+            let lines = match self.document.blocks.first().map(|b| &b.kind) {
+                Some(BlockKind::CodeBlock { lines, .. }) => lines.len(),
+                _ => 0,
+            };
+            let digits = lines.max(1).ilog10() as usize + 1;
+            let (family, size) = layout::line_face(&self.document, &self.cfg);
+            let measured = self
+                .gutter_measured
+                .as_ref()
+                .filter(|((face, bits, count), _)| {
+                    face == family && *bits == size.to_bits() && *count == digits
+                })
+                .map(|(_, room)| *room);
+            match measured {
+                Some(room) => room,
+                None => {
+                    let room = paint::gutter::reserve(&mut self.fonts, family, size, lines);
+                    self.gutter_measured =
+                        Some(((family.to_string(), size.to_bits(), digits), room));
+                    room
+                }
+            }
+        } else {
+            0.0
+        };
+        if needed == self.cfg.gutter {
+            return;
+        }
+        let margin = metrics::MARGIN_RATIO * avail;
+        let moved = needed.max(margin) != self.cfg.gutter.max(margin);
+        self.cfg.gutter = needed;
+        if moved && paint::gutter::numbered(&self.document) {
+            self.layout = None;
+            self.band = None;
+        }
     }
 
     /// Schedules the corner count when what it was taken from changed:
@@ -4318,12 +4403,15 @@ impl App {
         } else {
             self.overlay = Some(Box::new(Settings::new(
                 self.fonts.families(),
-                self.cfg.body_family.clone(),
-                self.cfg.code_family.clone(),
-                self.cfg.body_size,
-                self.cfg.code_size,
-                self.config.ui_scale,
-                self.config.word_count,
+                settings::Values {
+                    body_family: self.cfg.body_family.clone(),
+                    code_family: self.cfg.code_family.clone(),
+                    body_size: self.cfg.body_size,
+                    code_size: self.cfg.code_size,
+                    ui_scale: self.config.ui_scale,
+                    line_numbers: self.config.line_numbers,
+                    word_count: self.config.word_count,
+                },
             )));
             self.request_redraw();
         }
@@ -5531,6 +5619,13 @@ impl App {
                 self.layout = None;
                 self.band = None;
             }
+            OverlayResult::Apply(Action::SetLineNumbers(on)) => {
+                self.config.line_numbers = on;
+                self.view_dirty = true;
+                // The numbers paint with the band; the next frame also
+                // checks whether they need more room than the margin.
+                self.band = None;
+            }
             OverlayResult::Apply(Action::SetWordCount(on)) => {
                 self.config.word_count = on;
                 self.view_dirty = true;
@@ -5988,6 +6083,7 @@ impl App {
         };
         let avail_px = size.width.saturating_sub(inset).max(1);
         let avail = avail_px as f32;
+        self.sync_gutter(avail);
         self.sync_comic_viewport(size.height as f32);
         let budget = if self.start_pass(avail) {
             OPEN_SLICE
@@ -6098,6 +6194,7 @@ impl App {
             }
         }
 
+        let numbers = self.numbers_color();
         let band_usable = self.band.as_ref().is_some_and(|b| {
             b.width == avail_px
                 && b.height == size.height * 5
@@ -6115,19 +6212,21 @@ impl App {
                     &mut self.fonts,
                     &mut self.media,
                     &highlight,
+                    numbers,
                     frame_y,
                     avail_px,
                     size.height,
                 ));
                 self.pending_band_for = None;
             } else {
-                direct = Some(paint::band(
+                direct = Some(paint::band_numbered(
                     lay,
                     &self.document,
                     &self.theme,
                     &mut self.fonts,
                     &mut self.media,
                     &highlight,
+                    numbers,
                     frame_y,
                     avail_px,
                     size.height,
@@ -6166,6 +6265,33 @@ impl App {
                     break;
                 }
                 buffer[dst..dst + bw].copy_from_slice(&view[src..src + bw]);
+            }
+        }
+        // The caret's line reads its number brighter, as editors do: that
+        // line's stretch of the margin is painted again over the band.
+        if self.mode == edit::Mode::Edit && numbers.is_some() {
+            let line =
+                self.caret.and_then(
+                    |caret| match self.document.blocks.first().map(|b| &b.kind) {
+                        Some(BlockKind::CodeBlock { lines, .. }) => {
+                            lines.row_at(&self.document.source, caret.offset)
+                        }
+                        _ => None,
+                    },
+                );
+            let strip = line.and_then(|line| {
+                paint::gutter::strip(
+                    &mut self.fonts,
+                    lay,
+                    &self.document,
+                    0,
+                    line,
+                    paint::paper(&self.document, &self.theme),
+                    self.theme.surface.foreground,
+                )
+            });
+            if let Some(strip) = strip {
+                draw_strip(&mut buffer, size.width, size.height, inset, frame_y, &strip);
             }
         }
         if let Some(thumb) = scrollbar::thumb(
@@ -6949,6 +7075,38 @@ mod tests {
         );
         assert_eq!(super::wheel_notches(&mut carry, -0.5), 0);
         assert_eq!(super::wheel_notches(&mut carry, -0.5), -1);
+    }
+
+    #[test]
+    fn a_line_number_strip_lands_at_the_page_edge_on_its_row() {
+        let strip = oryx::paint::gutter::Strip {
+            pixels: vec![7; 6],
+            width: 3,
+            height: 2,
+            y: 4.0,
+        };
+        let (width, height) = (10u32, 10u32);
+        let mut frame = vec![0u32; (width * height) as usize];
+        super::draw_strip(&mut frame, width, height, 2, 1.0, &strip);
+        for y in 0..height {
+            for x in 0..width {
+                let inside = (3..5).contains(&y) && (2..5).contains(&x);
+                assert_eq!(
+                    frame[(y * width + x) as usize],
+                    if inside { 7 } else { 0 },
+                    "row {y}, column {x}"
+                );
+            }
+        }
+        // A strip scrolled half out of the window paints the rows left.
+        let mut frame = vec![0u32; (width * height) as usize];
+        super::draw_strip(&mut frame, width, height, 0, 5.0, &strip);
+        assert_eq!(
+            frame.iter().filter(|&&p| p == 7).count(),
+            3,
+            "one row of three"
+        );
+        assert_eq!(frame[0..3], [7, 7, 7]);
     }
 
     #[test]

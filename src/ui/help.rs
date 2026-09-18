@@ -459,6 +459,11 @@ pub const TIPS: &[Tip] = &[
     Tip {
         kind: TipKind::Tip,
         area: Area::Editing,
+        text: r#"Do you like to see line numbers? Turn them on in the settings (`Ctrl+,`), and Oryx numbers the lines of your code and text files in the left margin, and of a markdown file while you edit it. In the editor, the number of the line you are on reads brighter."#,
+    },
+    Tip {
+        kind: TipKind::Tip,
+        area: Area::Editing,
         text: r#"Do you write to a length? Turn on the word count in the settings (`Ctrl+,`), and Oryx shows the words, characters, lines and reading time of your file in the bottom right corner. Select some text and it counts only that part."#,
     },
     Tip {
@@ -494,7 +499,7 @@ pub const TIPS: &[Tip] = &[
     Tip {
         kind: TipKind::Tip,
         area: Area::Looks,
-        text: r#"`Ctrl+,` opens the settings: the body font and the code font, their sizes, the interface scale, and the word count."#,
+        text: r#"`Ctrl+,` opens the settings: the body font and the code font, their sizes, the interface scale, the line numbers and the word count."#,
     },
     Tip {
         kind: TipKind::Tip,

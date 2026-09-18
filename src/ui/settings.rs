@@ -22,17 +22,19 @@ const _: () = assert!(HEADER_H + PAD / 2.0 >= LIST_ROW_H && FOOTER_H + PAD / 2.0
 const PANEL_W: f32 = 420.0;
 const RADIUS: f32 = 8.0;
 
-const ROWS: [&str; 6] = [
+const ROWS: [&str; 7] = [
     "body font",
     "code font",
     "body size",
     "code size",
     "interface scale",
+    "line numbers",
     "word count",
 ];
 
-/// The word count's row in `ROWS`.
-const WORD_COUNT_ROW: usize = 5;
+/// The on/off rows' places in `ROWS`.
+const LINE_NUMBERS_ROW: usize = 5;
+const WORD_COUNT_ROW: usize = 6;
 
 /// Font size bounds for both families.
 pub const SIZE_MIN: f32 = 8.0;
@@ -96,6 +98,7 @@ pub struct Settings {
     body_size: f32,
     code_size: f32,
     ui_scale: f32,
+    line_numbers: bool,
     word_count: bool,
     row: usize,
     pick: Option<Pick>,
@@ -103,16 +106,28 @@ pub struct Settings {
     geometry: Geometry,
 }
 
+/// What the dialog opens on: the settings as the app holds them.
+pub struct Values {
+    pub body_family: String,
+    pub code_family: String,
+    pub body_size: f32,
+    pub code_size: f32,
+    pub ui_scale: f32,
+    pub line_numbers: bool,
+    pub word_count: bool,
+}
+
 impl Settings {
-    pub fn new(
-        families: Vec<String>,
-        body_family: String,
-        code_family: String,
-        body_size: f32,
-        code_size: f32,
-        ui_scale: f32,
-        word_count: bool,
-    ) -> Settings {
+    pub fn new(families: Vec<String>, values: Values) -> Settings {
+        let Values {
+            body_family,
+            code_family,
+            body_size,
+            code_size,
+            ui_scale,
+            line_numbers,
+            word_count,
+        } = values;
         Settings {
             families,
             body_family,
@@ -120,6 +135,7 @@ impl Settings {
             body_size,
             code_size,
             ui_scale,
+            line_numbers,
             word_count,
             row: 0,
             pick: None,
@@ -168,15 +184,29 @@ impl Settings {
         self.view_change()
     }
 
-    /// An on/off row answers either arrow, Space and Enter the same way.
-    fn flip_word_count(&mut self) -> OverlayResult {
-        self.word_count = !self.word_count;
-        OverlayResult::Apply(Action::SetWordCount(self.word_count))
+    /// An on/off row answers either arrow, Space and Enter the same
+    /// way: it flips. None for a row that is not one.
+    fn flip(&mut self) -> Option<OverlayResult> {
+        match self.row {
+            LINE_NUMBERS_ROW => {
+                self.line_numbers = !self.line_numbers;
+                Some(OverlayResult::Apply(Action::SetLineNumbers(
+                    self.line_numbers,
+                )))
+            }
+            WORD_COUNT_ROW => {
+                self.word_count = !self.word_count;
+                Some(OverlayResult::Apply(Action::SetWordCount(self.word_count)))
+            }
+            _ => None,
+        }
     }
 
     fn step_row(&mut self, delta: f32) -> OverlayResult {
+        if let Some(flipped) = self.flip() {
+            return flipped;
+        }
         match self.row {
-            WORD_COUNT_ROW => return self.flip_word_count(),
             2 => self.body_size = step_size(self.body_size, delta),
             3 => self.code_size = step_size(self.code_size, delta),
             4 => self.ui_scale = step_ui_scale(self.ui_scale, delta * UI_SCALE_STEP),
@@ -373,8 +403,14 @@ impl Overlay for Settings {
                             let value = match index {
                                 2 => format!("{}", self.body_size as i32),
                                 3 => format!("{}", self.code_size as i32),
-                                WORD_COUNT_ROW if self.word_count => "on".to_string(),
-                                WORD_COUNT_ROW => "off".to_string(),
+                                LINE_NUMBERS_ROW | WORD_COUNT_ROW => {
+                                    let on = if index == LINE_NUMBERS_ROW {
+                                        self.line_numbers
+                                    } else {
+                                        self.word_count
+                                    };
+                                    if on { "on" } else { "off" }.to_string()
+                                }
                                 _ => format!("{}%", ui_scale_label(self.ui_scale)),
                             };
                             let text = format!("\u{2039}  {value}  \u{203A}");
@@ -424,8 +460,10 @@ impl Overlay for Settings {
             Key::Named(NamedKey::ArrowDown) => self.row = (self.row + 1).min(ROWS.len() - 1),
             Key::Named(NamedKey::ArrowUp) => self.row = self.row.saturating_sub(1),
             Key::Named(NamedKey::Enter) if self.row < 2 => self.open_pick(),
-            Key::Named(NamedKey::Enter | NamedKey::Space) if self.row == WORD_COUNT_ROW => {
-                return self.flip_word_count()
+            Key::Named(NamedKey::Enter | NamedKey::Space) => {
+                if let Some(flipped) = self.flip() {
+                    return flipped;
+                }
             }
             Key::Named(NamedKey::ArrowRight) => return self.step_row(1.0),
             Key::Named(NamedKey::ArrowLeft) => return self.step_row(-1.0),
@@ -527,12 +565,15 @@ mod tests {
                 "DejaVu Sans".to_string(),
                 "Other Font".to_string(),
             ],
-            "DejaVu Sans".to_string(),
-            "Courier Prime".to_string(),
-            22.0,
-            20.0,
-            1.0,
-            false,
+            Values {
+                body_family: "DejaVu Sans".to_string(),
+                code_family: "Courier Prime".to_string(),
+                body_size: 22.0,
+                code_size: 20.0,
+                ui_scale: 1.0,
+                line_numbers: false,
+                word_count: false,
+            },
         )
     }
 
@@ -580,6 +621,27 @@ mod tests {
             step_ui_scale(UI_SCALE_MIN, -UI_SCALE_STEP),
             UI_SCALE_MIN
         ));
+    }
+
+    #[test]
+    fn the_line_numbers_row_flips_with_the_arrows_space_and_enter() {
+        let mut s = settings();
+        for _ in 0..LINE_NUMBERS_ROW {
+            press(&mut s, NamedKey::ArrowDown);
+        }
+        let mut seen = Vec::new();
+        for key in [
+            NamedKey::ArrowRight,
+            NamedKey::ArrowLeft,
+            NamedKey::Space,
+            NamedKey::Enter,
+        ] {
+            let OverlayResult::Apply(Action::SetLineNumbers(on)) = press(&mut s, key) else {
+                panic!("{key:?} flips the row");
+            };
+            seen.push(on);
+        }
+        assert_eq!(seen, [true, false, true, false]);
     }
 
     #[test]

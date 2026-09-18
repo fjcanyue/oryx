@@ -30,6 +30,9 @@ pub enum Action {
         code_size: f32,
         ui_scale: f32,
     },
+    /// Show or hide the line numbers of a file of lines, and persist
+    /// the choice.
+    SetLineNumbers(bool),
     /// Show or hide the corner word count, and persist the choice.
     SetWordCount(bool),
 }

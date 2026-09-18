@@ -47,6 +47,12 @@
 
 - Heading lines are bold, as they are on the page and in VS Code. A code font without a bold face shows no difference.
 
+### Line numbers
+
+- A new `line numbers` row in the settings (`Ctrl+,`) numbers the lines in the left margin: in code files, in text files, and in a markdown file while you edit it. It is off by default, and the choice is remembered. The rendered markdown page and the PDF stay without numbers.
+- The numbers sit in the margin the page already has, so turning them on moves nothing. When the digits need more room (a very long file, a narrow window, a big zoom), the text steps right by what is missing.
+- A line that wraps gets its number on its first row only. Copy never takes the numbers. In the editor, the number of the caret's line reads brighter, as in other editors.
+
 ### Word count
 
 - A new `word count` row in the settings (`Ctrl+,`) shows the size of the file in the bottom right corner of the page: words, characters, lines and reading time. It is off by default, and the choice is remembered. Select some text and the line shows the figures of the selection.

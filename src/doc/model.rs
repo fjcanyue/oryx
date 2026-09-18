@@ -361,6 +361,27 @@ impl CodeBody {
         Some(range.start as usize..range.end as usize)
     }
 
+    /// The row holding source offset `offset`: the last line starting
+    /// at or before it, so an offset on a line's break belongs to that
+    /// line; past the final newline, the row the caret opens there,
+    /// one after the last line, which an empty file is too. None for
+    /// an owned body, which has no source coordinates.
+    pub fn row_at(&self, source: &str, offset: usize) -> Option<usize> {
+        if self.owned.is_some() {
+            return None;
+        }
+        let after_last = match self.lines.last() {
+            None => true,
+            Some(last) => offset > last.end as usize && source.ends_with('\n'),
+        };
+        if after_last {
+            return Some(self.lines.len());
+        }
+        self.lines
+            .partition_point(|line| line.start as usize <= offset)
+            .checked_sub(1)
+    }
+
     pub fn iter<'a>(&'a self, source: &'a str) -> impl Iterator<Item = &'a str> {
         let base = self.owned.as_deref().unwrap_or(source);
         self.lines.iter().map(move |range| slice(base, range))
@@ -646,6 +667,38 @@ mod tests {
 
     fn body(source: &str) -> CodeBody {
         CodeBody::verbatim(fresh(source))
+    }
+
+    #[test]
+    fn row_at_finds_the_row_of_an_offset_the_one_after_the_final_newline_too() {
+        let source = "ab\n\ncd\n";
+        let b = body(source);
+        assert_eq!(b.row_at(source, 0), Some(0));
+        assert_eq!(
+            b.row_at(source, 2),
+            Some(0),
+            "the break belongs to its line"
+        );
+        assert_eq!(b.row_at(source, 3), Some(1), "a blank line is a line");
+        assert_eq!(b.row_at(source, 4), Some(2));
+        assert_eq!(b.row_at(source, 6), Some(2), "the end of the last line");
+        assert_eq!(
+            b.row_at(source, 7),
+            Some(3),
+            "after the final newline: the row the caret opens there"
+        );
+        let open = "ab";
+        assert_eq!(
+            body(open).row_at(open, 2),
+            Some(0),
+            "no final newline, no extra row"
+        );
+        assert_eq!(
+            body("").row_at("", 0),
+            Some(0),
+            "an empty file is its first row"
+        );
+        assert_eq!(CodeBody::from_text("ab\n").row_at("ab\n", 0), None);
     }
 
     #[test]

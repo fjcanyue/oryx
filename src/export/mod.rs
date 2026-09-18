@@ -279,6 +279,8 @@ impl ExportPass {
                 comic: crate::layout::ComicFit::Width,
                 direction: crate::layout::DirectionMode::Auto,
                 print: true,
+                // The PDF carries no line numbers, whatever the screen shows.
+                gutter: 0.0,
             },
             geometry,
             target,
