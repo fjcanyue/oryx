@@ -3683,14 +3683,16 @@ fn enters_at_the_end_of_a_code_file_add_placed_rows() {
         .code_line_seat(0, 42)
         .expect("the third new row is placed");
     let mut fonts = fonts();
+    // After the final newline the caret opens a row of its own, below
+    // the last placed row and still inside the page's bottom margin.
     let seat = oryx::edit::caret::Caret::at(doc.source.len())
         .geometry(&lay, &doc, &mut fonts)
         .expect("the caret has a row");
     assert!(
-        (seat.y - last.y).abs() < 0.5 && seat.y + seat.h <= lay.height + 0.5,
-        "the caret stands on the last row, inside the page: {} vs {} in {}",
+        (seat.y - (last.y + row)).abs() < 0.5 && seat.y + seat.h <= lay.height + 0.5,
+        "the caret stands one row below the last row, inside the page: {} vs {} in {}",
         seat.y,
-        last.y,
+        last.y + row,
         lay.height
     );
     let fresh = windowed(&reference, width, 0.0, viewport);

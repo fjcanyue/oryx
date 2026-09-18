@@ -611,23 +611,18 @@ impl Caret {
     }
 
     /// Where the caret stands, when its offset is on a placed line.
+    /// The offset after the file's final newline, where Enter at the
+    /// end of the file leaves the caret, stands on a row of its own
+    /// below the last line, the blank-row seat below, as every editor
+    /// draws it; the selection's `model_pos` folds that offset onto
+    /// the last line for its own reasons, and the caret does not.
     pub fn geometry(
         self,
         lay: &LayoutDoc,
         doc: &Document,
         fonts: &mut FontStore,
     ) -> Option<CaretBox> {
-        // The offset after the file's final newline has no row of its
-        // own: it stands where the last row ends, as `model_pos` says.
-        // Only the file's end can be that offset, so every other frame
-        // skips the lookup.
-        let offset = if self.offset >= doc.source.len() {
-            model_pos(doc, self.offset)
-                .and_then(|pos| model_offset(doc, &pos))
-                .map_or(self.offset, |at| at.min(self.offset))
-        } else {
-            self.offset
-        };
+        let offset = self.offset;
         let lines = lines_of(lay, doc);
         if lines.is_empty() {
             return seat_without_rows(fonts, lay, doc, offset);
@@ -680,8 +675,8 @@ impl Caret {
 /// The caret's seat on a page the layout holds no glyphs for, an empty
 /// file or one of blank lines: where the first glyph of its line would
 /// stand, from the block table, advanced over the whitespace before it.
-/// The line counts newlines from the block's start; the caller has
-/// folded the offset after the final newline onto the last row.
+/// The line counts newlines from the block's start, so the offset
+/// after the final newline stands one row below the last line.
 fn seat_without_rows(
     fonts: &mut FontStore,
     lay: &LayoutDoc,
@@ -1147,6 +1142,38 @@ mod tests {
         assert!(tail.y > alpha.y, "the new line stands below the last text");
     }
 
+    /// Enter at the end of a file: the caret moves to a new row below
+    /// the last line, where the next letter will land, as every editor
+    /// shows it. The row has no line of its own until text arrives.
+    #[test]
+    fn enter_at_the_end_of_a_file_puts_the_caret_on_a_new_row() {
+        let doc = code_doc("abc\n");
+        let (l, mut fonts) = lay_of(&doc);
+        let abc = run(&l, &doc, "abc");
+        let h = metrics::LINE_HEIGHT * abc.size;
+        let after = Caret::at(4)
+            .geometry(&l, &doc, &mut fonts)
+            .expect("the row after the final newline");
+        assert!(
+            (after.y - (abc.y + h)).abs() < 0.5,
+            "one row below the last line: {} vs {}",
+            after.y,
+            abc.y + h
+        );
+        assert!((after.x - abc.x).abs() < 0.5, "at the line's start");
+        let two = code_doc("abc\n\n");
+        let (l2, mut f2) = lay_of(&two);
+        let third = Caret::at(5)
+            .geometry(&l2, &two, &mut f2)
+            .expect("the row after two newlines");
+        assert!(
+            (third.y - (abc.y + 2.0 * h)).abs() < 0.5,
+            "two rows below: {} vs {}",
+            third.y,
+            abc.y + 2.0 * h
+        );
+    }
+
     /// A page with no text at all, the untitled note as it opens or a
     /// file of blank lines: the caret stands where the first glyph
     /// would, one row down per line, advanced over the spaces typed.
@@ -1187,10 +1214,10 @@ mod tests {
             .geometry(&lb, &blank, &mut fb)
             .expect("after the final newline");
         assert!(
-            (after.y - second.y).abs() < 0.5,
-            "the final newline opens no row, the caret stays on the last: {} vs {}",
+            (after.y - (second.y + h)).abs() < 0.5,
+            "after the final newline the caret stands on a row of its own: {} vs {}",
             after.y,
-            second.y
+            second.y + h
         );
 
         let spaced = code_doc("   ");
@@ -1703,17 +1730,20 @@ mod tests {
         let (l, mut f) = lay_of(&doc);
         let b = run(&l, &doc, "b");
         let h = metrics::LINE_HEIGHT * b.size;
-        for offset in [4, 5] {
+        // The selection folds the offset after the final newline onto
+        // the last row; the caret stands one row further, where Enter
+        // at the end of the file leaves it.
+        for (offset, rows) in [(4, 1.0), (5, 2.0)] {
             let seat = Caret::at(offset)
                 .geometry(&l, &doc, &mut f)
                 .expect("a seat on the empty row");
             assert!(
-                (seat.y - (b.y + h)).abs() < 0.5 && (seat.x - b.x).abs() < 0.5,
-                "offset {offset} on the row below b: {} {} vs {} {}",
+                (seat.y - (b.y + rows * h)).abs() < 0.5 && (seat.x - b.x).abs() < 0.5,
+                "offset {offset} {rows} rows below b: {} {} vs {} {}",
                 seat.x,
                 seat.y,
                 b.x,
-                b.y + h
+                b.y + rows * h
             );
         }
     }
