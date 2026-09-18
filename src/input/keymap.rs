@@ -70,12 +70,14 @@ pub enum Command {
 }
 
 impl Command {
-    /// Every variant; the coverage test checks each one against the table.
-    pub const ALL: [Command; 61] = [
+    /// Every variant. One test checks each entry has a row in the table,
+    /// another that every command a row binds is listed here.
+    pub const ALL: [Command; 63] = [
         Command::OpenFile,
         Command::Reload,
         Command::Refetch,
         Command::Sidebar,
+        Command::HiddenFiles,
         Command::Export,
         Command::ExportSettings,
         Command::Help,
@@ -85,6 +87,7 @@ impl Command {
         Command::ZoomOut,
         Command::ZoomReset,
         Command::Justify,
+        Command::Direction,
         Command::SelectAll,
         Command::CopyText,
         Command::CopyMarkdown,
@@ -910,6 +913,24 @@ mod tests {
                 "{cmd:?} has no row in SHORTCUTS"
             );
         }
+    }
+
+    /// The other way round, which keeps `ALL` whole: a command the table
+    /// binds stands in the list. A new command is useless until a row
+    /// binds it, and the row fails here until the list names it, so the
+    /// tests that walk `ALL` never miss one.
+    #[test]
+    fn every_bound_command_stands_in_the_list() {
+        let missing: Vec<String> = SHORTCUTS
+            .iter()
+            .flat_map(|row| row.bindings.iter().map(move |(_, cmd)| (row.keys, cmd)))
+            .filter(|(_, cmd)| !Command::ALL.contains(cmd))
+            .map(|(keys, cmd)| format!("{cmd:?} ({keys})"))
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "bound by a row and missing from Command::ALL: {missing:?}"
+        );
     }
 
     /// While a text field has the keyboard, the document's editing and
