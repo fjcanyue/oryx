@@ -5,7 +5,7 @@ description: Every construct Oryx recognizes, as written and as rendered
 
 # Oryx syntax reference
 
-Every construct Oryx recognizes, markdown and embedded HTML. Each one is shown twice: first its source in a code block, so the reader sees how it is written, then the same lines rendered right under it. Open this file in Oryx to see both. On GitHub, the forms outside its own flavor (definition lists, highlight, subscript, superscript, abbreviations, heading IDs) appear as typed in the rendered copy.
+Every construct Oryx recognizes, markdown and embedded HTML. Each one is shown twice: first its source in a code block, so the reader sees how it is written, then the same lines rendered right under it. On GitHub, the forms outside its own flavor (definition lists, highlight, subscript, superscript, abbreviations, heading IDs) appear as typed in the rendered copy, and Oryx renders them all.
 
 Oryx reads CommonMark, the GitHub Flavored Markdown extensions (tables, task lists, strikethrough, footnotes, alerts and math), and the extended syntax listed by the Markdown Guide (heading IDs, definition lists, subscript, superscript, highlight, abbreviations). Emoji shortcodes, smart punctuation and a YAML frontmatter block are recognized too, and the HTML subset GitHub allows in READMEs renders as GitHub renders it.
 

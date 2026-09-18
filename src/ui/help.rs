@@ -23,8 +23,7 @@ pub fn welcome(tip: usize) -> String {
          `{}` lists the shortcuts and the markdown syntax.\n\n\
          {}\n\
          You can also drag and drop a file here.\n\n\
-         Please refer to the full documentation on \
-         [GitHub](https://github.com/wmahfoudh/oryx).\n",
+         Full documentation is on [GitHub](https://github.com/wmahfoudh/oryx).\n",
         keymap::display("Ctrl+O"),
         keymap::display("Ctrl+M"),
         keymap::display("Ctrl+Shift+B"),
@@ -717,8 +716,7 @@ pub fn page() -> String {
         out,
         "Two parts: [Shortcuts](#shortcuts) and [Markdown syntax](#markdown-syntax). \
          Press {} or {} to close this. \
-         Please refer to the full documentation on \
-         [GitHub](https://github.com/wmahfoudh/oryx).\n\n## Shortcuts",
+         Full documentation is on [GitHub](https://github.com/wmahfoudh/oryx).\n\n## Shortcuts",
         keymap::display("F1"),
         keymap::display("Escape"),
     );
@@ -1343,5 +1341,28 @@ mod tests {
             text.lines().next().unwrap_or("")
         );
         assert!(welcome(0).contains("lists the shortcuts and the markdown syntax"));
+    }
+
+    #[test]
+    fn both_pages_point_at_the_documentation_the_same_way() {
+        let link = "Full documentation is on [GitHub](https://github.com/wmahfoudh/oryx).";
+        assert!(welcome(0).contains(link), "{}", welcome(0));
+        let text = page();
+        assert!(
+            text.contains(&format!(
+                "Press {} or {} to close this. {link}",
+                keymap::display("F1"),
+                keymap::display("Escape")
+            )),
+            "{}",
+            text.lines().nth(2).unwrap_or("")
+        );
+    }
+
+    /// The reader of the F1 page is already in Oryx: the syntax part
+    /// never sends them there.
+    #[test]
+    fn the_syntax_part_does_not_ask_to_open_the_file_in_oryx() {
+        assert!(!page().contains("Open this file in Oryx"));
     }
 }
