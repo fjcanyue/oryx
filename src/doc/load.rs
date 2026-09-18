@@ -102,9 +102,47 @@ pub fn detect(path: &Path) -> FileKind {
 
 /// A NUL byte near the start is the standard test, the one `git` and
 /// `grep -I` use: no text encoding Oryx renders produces one, and every
-/// container and executable format has one in its header.
+/// container and executable format has one in its header. A file whose
+/// head has none but is mostly bytes no text reader can show, invalid
+/// UTF-8 and control characters, is binary too: a cartridge ROM whose
+/// first zero sits past the window read that way, and its random
+/// characters had the shaper load every font on the system. Text keeps
+/// such bytes rare, a heavily accented Latin-1 file at 17 percent, so
+/// the line is drawn at 30.
 fn is_binary(bytes: &[u8]) -> bool {
-    bytes[..bytes.len().min(SNIFF)].contains(&0)
+    let head = &bytes[..bytes.len().min(SNIFF)];
+    if head.contains(&0) {
+        return true;
+    }
+    let controls = |text: &[u8]| {
+        text.iter()
+            .filter(|&&b| {
+                (b < 0x20 && !matches!(b, b'\t' | b'\n' | b'\r' | 0x0c | 0x1b)) || b == 0x7f
+            })
+            .count()
+    };
+    let mut unreadable = 0;
+    let mut rest = head;
+    while !rest.is_empty() {
+        match std::str::from_utf8(rest) {
+            Ok(_) => {
+                unreadable += controls(rest);
+                break;
+            }
+            Err(err) => {
+                let valid = err.valid_up_to();
+                unreadable += controls(&rest[..valid]);
+                // A sequence the window cut short is the window's fault,
+                // not the file's.
+                let Some(bad) = err.error_len() else {
+                    break;
+                };
+                unreadable += bad;
+                rest = &rest[valid + bad..];
+            }
+        }
+    }
+    unreadable * 10 > head.len() * 3
 }
 
 /// Whether a file on disk holds text, read from its first bytes. A file
@@ -1170,6 +1208,42 @@ mod tests {
         let mut late = vec![b'a'; SNIFF + 16];
         late[SNIFF + 8] = 0;
         assert!(!is_binary(&late), "a NUL past the window does not count");
+    }
+
+    /// A ROM whose first zero byte sits past the window: its head is
+    /// unreadable bytes from end to end, which no text file is. A
+    /// heavily accented Latin-1 file, a log full of escape codes and a
+    /// window cut inside a character all stay text.
+    #[test]
+    fn a_head_of_unreadable_bytes_marks_binary_without_a_nul() {
+        let mut rom = vec![0xFFu8; SNIFF];
+        rom.extend_from_slice(b"\x00\x00");
+        assert!(
+            is_binary(&rom),
+            "all high bytes, the first zero past the window"
+        );
+        let mut code = Vec::new();
+        for i in 0..SNIFF {
+            code.push((i * 7 % 250) as u8 + 1);
+        }
+        assert!(
+            is_binary(&code),
+            "machine code without a zero in the window"
+        );
+        let latin = b"caf\xe9 au lait, na\xefve r\xe9sum\xe9, cr\xe8me br\xfbl\xe9e.\n".repeat(200);
+        assert!(!is_binary(&latin), "Latin-1 text reads lossy, not binary");
+        let log = b"\x1b[31mERROR\x1b[0m something failed\n\x1b[32mOK\x1b[0m\n".repeat(300);
+        assert!(!is_binary(&log), "escape codes are text");
+        let mut cut = "\u{e9}".repeat(SNIFF).into_bytes();
+        cut.truncate(SNIFF);
+        assert!(
+            !is_binary(&cut),
+            "the window cutting a character is no fault"
+        );
+        let mostly_control: Vec<u8> = (0..SNIFF)
+            .map(|i| if i % 2 == 0 { 1 } else { b'a' })
+            .collect();
+        assert!(is_binary(&mostly_control), "half control characters");
     }
 
     fn temp_file(name: &str, content: &str) -> PathBuf {

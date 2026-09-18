@@ -241,7 +241,7 @@ fn draw_run(
     }
     buffer.set_text(
         &mut fonts.font_system,
-        text,
+        &crate::style::fonts::shapable(text),
         &attrs,
         Shaping::Advanced,
         None,

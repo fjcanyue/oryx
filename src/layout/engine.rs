@@ -3825,9 +3825,14 @@ fn shape_segment_chunk(
 ) -> f32 {
     let mut buffer = Buffer::new(&mut fonts.font_system, Metrics::new(base.size, line_height));
     buffer.set_size(&mut fonts.font_system, Some(content_width), None);
+    let texts: Vec<std::borrow::Cow<str>> = segment
+        .iter()
+        .map(|&si| crate::style::fonts::shapable(spans[si].text(source)))
+        .collect();
     let rich: Vec<(&str, Attrs)> = segment
         .iter()
-        .map(|&si| {
+        .zip(&texts)
+        .map(|(&si, text)| {
             let st = &styles[si];
             let mut attrs = Attrs::new()
                 .family(Family::Name(&st.family))
@@ -3839,7 +3844,7 @@ fn shape_segment_chunk(
             if (st.size - base.size).abs() > f32::EPSILON {
                 attrs = attrs.metrics(Metrics::new(st.size, line_height));
             }
-            (spans[si].text(source), attrs)
+            (&**text, attrs)
         })
         .collect();
     let default_attrs = Attrs::new().family(Family::Name(&cfg.body_family));
@@ -6307,6 +6312,8 @@ fn shape_code_chunk(
     let bold_weight = fonts.weight_for(face, Weight::BOLD);
     let mut buffer = Buffer::new(&mut fonts.font_system, Metrics::new(size, line_height));
     buffer.set_size(&mut fonts.font_system, Some(wrap_width), None);
+    let shaped_text = crate::style::fonts::shapable(text);
+    let text = &*shaped_text;
     let rich: Vec<(&str, Attrs)> = segments
         .iter()
         .enumerate()
