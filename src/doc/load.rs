@@ -110,9 +110,18 @@ pub fn detect(path: &Path) -> FileKind {
 /// such bytes rare, a heavily accented Latin-1 file at 17 percent, so
 /// the line is drawn at 30.
 fn is_binary(bytes: &[u8]) -> bool {
+    refusal(bytes).is_some()
+}
+
+/// Why a file's head is refused, in the words that end the message. A
+/// zero byte is no text in any encoding. A head of unreadable bytes
+/// without one may be text in an encoding older than UTF-8 (Cyrillic
+/// in CP1251 reads 83 percent unreadable, Japanese in Shift-JIS 55),
+/// which Oryx does not read: the message says what is true of both.
+fn refusal(bytes: &[u8]) -> Option<&'static str> {
     let head = &bytes[..bytes.len().min(SNIFF)];
     if head.contains(&0) {
-        return true;
+        return Some("is not a text file");
     }
     let controls = |text: &[u8]| {
         text.iter()
@@ -142,7 +151,7 @@ fn is_binary(bytes: &[u8]) -> bool {
             }
         }
     }
-    unreadable * 10 > head.len() * 3
+    (unreadable * 10 > head.len() * 3).then_some("is not UTF-8 text")
 }
 
 /// Whether a file on disk holds text, read from its first bytes. A file
@@ -306,8 +315,8 @@ pub fn open(path: &Path, deadline: Option<Instant>) -> anyhow::Result<Opened> {
             bom: false,
         });
     }
-    if is_binary(&bytes) {
-        anyhow::bail!("{} is not a text file", path.display());
+    if let Some(why) = refusal(&bytes) {
+        anyhow::bail!("{} {why}", path.display());
     }
     let text = String::from_utf8_lossy(&bytes);
     let lossy = matches!(text, std::borrow::Cow::Owned(_));
@@ -1513,6 +1522,22 @@ mod tests {
         let d = open(&path, None).unwrap().document;
         std::fs::remove_file(&path).unwrap();
         assert!(matches!(&d.blocks[0].kind, BlockKind::CodeBlock { .. }));
+    }
+
+    #[test]
+    fn a_text_in_an_old_encoding_is_refused_as_not_utf8() {
+        // Russian prose in CP1251: every letter is a high byte, no zero
+        // byte anywhere. It is text, in an encoding Oryx does not read.
+        let line = b"\xc2\xf1\xe5 \xf1\xf7\xe0\xf1\xf2\xeb\xe8\xe2\xfb\xe5 \xf1\xe5\xec\xfc\xe8.\n";
+        let path =
+            std::env::temp_dir().join(format!("oryx-load-{}-cp1251.txt", std::process::id()));
+        std::fs::write(&path, line.repeat(40)).unwrap();
+        let Err(err) = open(&path, None) else {
+            panic!("a CP1251 file opened")
+        };
+        let err = err.to_string();
+        std::fs::remove_file(&path).unwrap();
+        assert!(err.ends_with("cp1251.txt is not UTF-8 text"), "{err}");
     }
 
     #[test]
