@@ -63,6 +63,13 @@ pub fn toggle(mode: Mode, kind: FileKind, lossy: bool) -> Result<Mode, Refusal> 
     }
 }
 
+/// Whether a file just read opens in the editor instead of on the page:
+/// it has nothing to read, empty or whitespace only, and the door would
+/// open on it.
+pub fn opens_in_editor(kind: FileKind, lossy: bool, text: &str) -> bool {
+    text.trim().is_empty() && toggle(Mode::Read, kind, lossy) == Ok(Mode::Edit)
+}
+
 /// The document the editor works on, or None when the kind already
 /// shows its own bytes. A code or text file reads and edits the same
 /// characters, so nothing is swapped; markdown renders to something
@@ -421,6 +428,32 @@ mod tests {
             toggle(Mode::Read, FileKind::Markdown, true),
             Err(Refusal::Lossy),
             "a lossy markdown refuses as lossy, not as markdown"
+        );
+    }
+
+    #[test]
+    fn a_file_with_nothing_in_it_opens_in_the_editor() {
+        assert!(opens_in_editor(FileKind::Markdown, false, ""));
+        assert!(opens_in_editor(FileKind::Code("rust"), false, ""));
+        assert!(opens_in_editor(FileKind::Text, false, ""));
+        assert!(opens_in_editor(FileKind::Unknown, false, ""));
+        assert!(
+            opens_in_editor(FileKind::Markdown, false, " \n\t\n\n"),
+            "spaces and line breaks are nothing to read"
+        );
+    }
+
+    #[test]
+    fn a_file_with_text_or_behind_the_door_opens_for_reading() {
+        assert!(!opens_in_editor(FileKind::Markdown, false, "a"));
+        assert!(!opens_in_editor(FileKind::Text, false, "\n\na\n"));
+        assert!(
+            !opens_in_editor(FileKind::Epub, false, ""),
+            "a book is never edited"
+        );
+        assert!(
+            !opens_in_editor(FileKind::Text, true, ""),
+            "a lossy read is never edited"
         );
     }
 

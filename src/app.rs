@@ -2594,7 +2594,11 @@ impl App {
             return;
         }
         self.open_file(&target, true);
-        self.toggle_edit();
+        // An empty file lands in the editor by `open_file`'s own rule; a
+        // flip here would take it back out.
+        if self.mode != edit::Mode::Edit {
+            self.toggle_edit();
+        }
     }
 
     /// True while the open file is the untitled note.
@@ -5590,7 +5594,11 @@ impl App {
         // the in-place kinds keep the scroll, which is right for a
         // same-file crossing and wrong here, the reopened file having
         // arrived with the scroll at zero, so they get the same seat.
-        if self.resume_edit.remove(&path) && opened {
+        // A file with nothing to read takes the same road: its page
+        // would be blank, and the editor is what it was opened for.
+        let resumed = self.resume_edit.remove(&path);
+        let blank = edit::opens_in_editor(load::detect(&path), self.lossy, &self.document.source);
+        if opened && (resumed || blank) {
             self.enter_edit();
             if self.edit_park.is_none() {
                 if let Some(offset) = self.caret.map(|c| c.offset) {
@@ -7411,6 +7419,14 @@ impl ApplicationHandler for App {
         // The panel comes back the way it was left, at its saved width.
         if self.config.sidebar_open {
             self.open_sidebar(true);
+        }
+        // The launch file was read before there was a window and never
+        // went through `open_file`; its rule for a file with nothing to
+        // read applies here, after the sidebar, which would keep the keys.
+        if let Some(path) = self.path.clone() {
+            if edit::opens_in_editor(load::detect(&path), self.lossy, &self.document.source) {
+                self.enter_edit();
+            }
         }
         // The window of a recovery takes its note over. Any other first
         // window asks about the notes an earlier Oryx left behind; a
