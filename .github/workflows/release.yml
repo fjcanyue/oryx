@@ -118,14 +118,15 @@ jobs:
           cp -r themes examples dist/oryx/
           cp LICENSE packaging/install.ps1 dist/oryx/
 
-      # The staged directory uploads as one artifact: GitHub zips it on
-      # download, so extracting that once yields oryx/ ready to use —
-      # no inner archive, no second copy of the exe.
+      # dist holds the one staged oryx/ tree, so the artifact carries
+      # the folder itself: GitHub zips it on download and one extraction
+      # yields oryx/ ready to use, and the release job finds the same
+      # layout when it repacks.
       - name: Upload
         uses: actions/upload-artifact@v4
         with:
           name: oryx-${{ steps.version.outputs.version }}-windows-x86_64
-          path: dist/oryx
+          path: dist
           if-no-files-found: error
 
   release:
