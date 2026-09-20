@@ -35,6 +35,12 @@ pub enum Action {
     SetLineNumbers(bool),
     /// Show or hide the corner word count, and persist the choice.
     SetWordCount(bool),
+    /// Save the open file when the window loses focus, or stop doing
+    /// so, and persist the choice.
+    SetSaveOnFocusLoss(bool),
+    /// Save the open file after a pause of this many seconds since the
+    /// last edit, 0 for never, and persist the choice.
+    SetSaveAfterPause(u32),
 }
 
 /// What the app should do after an overlay handled an event.

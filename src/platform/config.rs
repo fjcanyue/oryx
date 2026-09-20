@@ -56,6 +56,14 @@ pub struct Config {
     /// Whether the corner of the page shows the file's word count; off
     /// by default, an on/off row in the settings dialog.
     pub word_count: bool,
+    /// Whether the open file is saved when the window loses focus; off
+    /// by default, since it writes without asking. An on/off row in the
+    /// settings dialog.
+    pub save_on_focus_loss: bool,
+    /// The open file is saved after a pause of this many seconds since
+    /// the last edit; 0, the default, never. A row in the settings
+    /// dialog, up to a minute.
+    pub save_after_pause: u32,
     /// Where the welcome page's tips stand in their rotation: the index
     /// of the next tip to show. Advances each time the page shows one,
     /// at a launch with no file or on the link under the tip.
@@ -123,6 +131,8 @@ impl Default for Config {
             ui_scale: 1.0,
             line_numbers: false,
             word_count: false,
+            save_on_focus_loss: false,
+            save_after_pause: 0,
             tip: 0,
             export: None,
             window: None,
@@ -275,6 +285,7 @@ impl Config {
         self.body_size = held(self.body_size, defaults.body_size, SIZE_MIN, SIZE_MAX);
         self.code_size = held(self.code_size, defaults.code_size, SIZE_MIN, SIZE_MAX);
         self.ui_scale = held(self.ui_scale, defaults.ui_scale, UI_SCALE_MIN, UI_SCALE_MAX);
+        self.save_after_pause = self.save_after_pause.min(crate::edit::autosave::PAUSE_MAX);
         self.sidebar_width = held(
             self.sidebar_width,
             defaults.sidebar_width,
@@ -444,6 +455,8 @@ mod tests {
             ui_scale: 1.15,
             line_numbers: true,
             word_count: true,
+            save_on_focus_loss: true,
+            save_after_pause: 5,
             tip: 7,
             export: None,
             window: None,
@@ -764,6 +777,28 @@ mod tests {
         let loaded = load_from(&path);
         std::fs::remove_file(&path).unwrap();
         assert!(!loaded.word_count);
+    }
+
+    #[test]
+    fn autosave_starts_off_and_an_older_config_keeps_it_so() {
+        let defaults = Config::default();
+        assert!(!defaults.save_on_focus_loss);
+        assert_eq!(defaults.save_after_pause, 0);
+        let path = temp_path("no-autosave-keys.toml");
+        std::fs::write(&path, "theme = \"nord\"\n").unwrap();
+        let loaded = load_from(&path);
+        std::fs::remove_file(&path).unwrap();
+        assert!(!loaded.save_on_focus_loss);
+        assert_eq!(loaded.save_after_pause, 0);
+    }
+
+    #[test]
+    fn a_hand_edited_pause_is_held_to_a_minute() {
+        let path = temp_path("long-pause.toml");
+        std::fs::write(&path, "save_after_pause = 3600\n").unwrap();
+        let loaded = load_from(&path);
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(loaded.save_after_pause, crate::edit::autosave::PAUSE_MAX);
     }
 
     #[test]

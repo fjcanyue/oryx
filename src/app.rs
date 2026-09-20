@@ -12,6 +12,7 @@ use oryx::doc::model::{BlockKind, Document};
 use oryx::doc::stream::{self, ParseWorker};
 use oryx::edit::{
     self,
+    autosave::{self, Verdict},
     caret::{self, Caret, CaretBox, Motion},
     splice::{self, Ledger},
     undo::{Kind, Undo},
@@ -345,6 +346,7 @@ pub fn run(
         note_from: None,
         pending_row: None,
         disk_seen: None,
+        disk_conflict: false,
         disk_check_at: Instant::now(),
         disk_misses: 0,
         file_deleted: false,
@@ -355,6 +357,8 @@ pub fn run(
         caret_snap: false,
         blink_visible: true,
         blink_flip: Instant::now(),
+        focused: true,
+        pause_save: autosave::Pause::default(),
         count_line: None,
         count_key: None,
         count_at: None,
@@ -684,6 +688,13 @@ fn disk_verdict(seen: DiskState, now: Option<DiskState>, misses: u8, deleted: bo
         Some(state) if state == seen => DiskVerdict::Same,
         Some(_) => DiskVerdict::Changed,
     }
+}
+
+/// Whether the editor's caret is painted: in the editor, on the lit
+/// half of its blink, and only while the window has the focus, the way
+/// a native text box behaves.
+fn caret_shown(editing: bool, blink_lit: bool, focused: bool) -> bool {
+    editing && blink_lit && focused
 }
 
 /// The loop's next wake, rebuilt at every pass: each timer still
@@ -1061,6 +1072,10 @@ struct App {
     /// The open file's on-disk identity at last read or write, for the
     /// external-change check.
     disk_seen: Option<(std::time::SystemTime, u64)>,
+    /// The file changed on disk under unsaved edits and the reader was
+    /// told. Autosave holds while this stands; a write or a read of our
+    /// own clears it.
+    disk_conflict: bool,
     /// The earliest next disk check; the check runs on focus and on
     /// interaction frames, never on a timer, so idle stays idle.
     disk_check_at: Instant,
@@ -1091,6 +1106,11 @@ struct App {
     /// every caret action restarts the visible half.
     blink_visible: bool,
     blink_flip: Instant,
+    /// Whether the window has the keyboard focus. In the background the
+    /// caret is not painted and its blink timer does not run.
+    focused: bool,
+    /// The pause save's deadline, armed by every edit.
+    pause_save: autosave::Pause,
     /// The transient corner notice, while one holds or fades.
     notice: Option<Notice>,
     /// Reused notice canvas, mirroring the overlay canvas mechanics.
@@ -1867,6 +1887,7 @@ impl App {
         if let Some(ledger) = self.ledger.as_mut() {
             ledger.edit(range.clone(), text);
         }
+        self.arm_pause_save();
         if let Some(hist) = self.undo.as_mut() {
             hist.record(
                 range.clone(),
@@ -1955,6 +1976,7 @@ impl App {
         if !visible {
             self.pending_offset = Some(caret);
         }
+        self.arm_pause_save();
         self.refresh_title();
     }
 
@@ -2075,6 +2097,7 @@ impl App {
         if self.config.word_count {
             self.count_at = Some(Instant::now() + wordcount::REST);
         }
+        self.arm_pause_save();
         // The match set holds positions of the text that just changed;
         // the next frame recomputes it against the edit.
         if let Some(state) = self.search.as_mut() {
@@ -2273,18 +2296,8 @@ impl App {
         }
         let back = self.file_deleted;
         let lines = ledger.touched_lines();
-        let bytes = ledger.emit();
-        match save::write_atomic(&path, &bytes) {
+        match self.write_edits(&path) {
             Ok(()) => {
-                if let Some(ledger) = self.ledger.as_mut() {
-                    ledger.commit();
-                }
-                if let Some(undo) = self.undo.as_mut() {
-                    undo.mark_saved();
-                }
-                self.refresh_parked_page();
-                self.note_disk_state();
-                self.refresh_title();
                 let receipt = if back {
                     "Saved, the file is back".to_string()
                 } else if lines == 1 {
@@ -2300,6 +2313,95 @@ impl App {
                 false
             }
         }
+    }
+
+    /// The write every save shares: the ledger's emission lands
+    /// atomically, the baseline is re-fixed on the written bytes, the
+    /// save point marked, the disk identity recorded and the title's
+    /// dot cleared. The caller tells the reader.
+    fn write_edits(&mut self, path: &Path) -> std::io::Result<()> {
+        let Some(ledger) = self.ledger.as_ref() else {
+            return Ok(());
+        };
+        save::write_atomic(path, &ledger.emit())?;
+        if let Some(ledger) = self.ledger.as_mut() {
+            ledger.commit();
+        }
+        if let Some(undo) = self.undo.as_mut() {
+            undo.mark_saved();
+        }
+        self.refresh_parked_page();
+        self.note_disk_state();
+        self.refresh_title();
+        Ok(())
+    }
+
+    /// An edit landed: the pause save waits anew, when the setting is on.
+    fn arm_pause_save(&mut self) {
+        self.pause_save
+            .edited(Instant::now(), self.config.save_after_pause);
+    }
+
+    /// An automatic save, at a focus loss or after a pause. It writes
+    /// without a receipt, the title's dot clearing being the sign, and
+    /// only while the file on disk is the one last read or written: a
+    /// change made elsewhere is never overwritten without the reader's
+    /// own Ctrl+S. The note has no place of its own and is left alone.
+    fn autosave(&mut self) {
+        if self.autosave_waits() {
+            return;
+        }
+        let Some(path) = self.path.clone() else {
+            return;
+        };
+        let now = std::fs::metadata(&path)
+            .ok()
+            .and_then(|meta| Some((meta.modified().ok()?, meta.len())));
+        let facts = autosave::Facts {
+            unsaved: self.edits_unsaved(),
+            note: self.on_note(),
+            deleted: self.file_deleted,
+            conflict: self.disk_conflict,
+            seen: self.disk_seen,
+            now,
+        };
+        match autosave::verdict(facts) {
+            Verdict::Nothing => {}
+            Verdict::Hold => {
+                // A deleted file has its own notice and its own question
+                // at the quit; a change found here first is told once.
+                if !self.disk_conflict && !self.file_deleted && now.is_some() {
+                    self.disk_seen = now;
+                    self.tell_disk_conflict();
+                }
+            }
+            Verdict::Write => {
+                if let Err(err) = self.write_edits(&path) {
+                    self.show_notice(&format!("Autosave failed: {err}"));
+                }
+            }
+        }
+    }
+
+    /// Two moments when an automatic save stands back. The help page
+    /// stands in the document's place, the open file stashed behind it.
+    /// The unsaved-changes question is on screen: the edits are the
+    /// reader's to save or discard, and a write behind the question
+    /// would turn Discard into a save.
+    fn autosave_waits(&self) -> bool {
+        self.help_stash.is_some() || self.confirm.is_some()
+    }
+
+    /// The file changed on disk under unsaved edits: the reader is told,
+    /// and autosave, when one of its settings is on, holds from here.
+    fn tell_disk_conflict(&mut self) {
+        self.disk_conflict = true;
+        let autosaving = self.config.save_on_focus_loss || self.config.save_after_pause > 0;
+        self.show_notice(if autosaving {
+            "The file changed on disk, autosave waits for your Ctrl+S"
+        } else {
+            "The file changed on disk"
+        });
     }
 
     /// Ctrl+Shift+S: the current text written to a chosen path, which
@@ -2472,9 +2574,13 @@ impl App {
 
     /// Records the open file's on-disk identity after a read or a
     /// write of our own, the reference the change check compares to.
+    /// Nothing is unsaved at either moment, so the pause save has
+    /// nothing left to wait for.
     fn note_disk_state(&mut self) {
         self.disk_misses = 0;
         self.file_deleted = false;
+        self.disk_conflict = false;
+        self.pause_save.clear();
         self.disk_seen = self.path.as_deref().and_then(|path| {
             let meta = std::fs::metadata(path).ok()?;
             Some((meta.modified().ok()?, meta.len()))
@@ -2517,7 +2623,7 @@ impl App {
                 self.file_deleted = false;
                 self.disk_seen = state;
                 if self.edits_unsaved() {
-                    self.show_notice("The file changed on disk");
+                    self.tell_disk_conflict();
                 } else {
                     self.reload_now();
                 }
@@ -4663,6 +4769,8 @@ impl App {
                     ui_scale: self.config.ui_scale,
                     line_numbers: self.config.line_numbers,
                     word_count: self.config.word_count,
+                    save_on_focus_loss: self.config.save_on_focus_loss,
+                    save_after_pause: self.config.save_after_pause,
                 },
             )));
             self.request_redraw();
@@ -5893,6 +6001,19 @@ impl App {
                 self.count_at = None;
                 self.count_asked += 1;
             }
+            OverlayResult::Apply(Action::SetSaveOnFocusLoss(on)) => {
+                self.config.save_on_focus_loss = on;
+                self.view_dirty = true;
+            }
+            OverlayResult::Apply(Action::SetSaveAfterPause(seconds)) => {
+                self.config.save_after_pause = seconds;
+                self.view_dirty = true;
+                // Edits already waiting count from this moment; at zero
+                // the standing deadline goes.
+                if seconds == 0 || self.edits_unsaved() {
+                    self.arm_pause_save();
+                }
+            }
         }
         self.request_redraw();
     }
@@ -6600,7 +6721,11 @@ impl App {
                 }
             }
         }
-        if self.mode == edit::Mode::Edit && self.blink_visible {
+        if caret_shown(
+            self.mode == edit::Mode::Edit,
+            self.blink_visible,
+            self.focused,
+        ) {
             if let Some(c) = self.caret {
                 if let Some(b) = c.geometry(lay, &self.document, &mut self.fonts) {
                     draw_caret(
@@ -6871,7 +6996,7 @@ impl ApplicationHandler for App {
                 wake.by(at);
             }
         }
-        if self.mode == edit::Mode::Edit && self.caret.is_some() {
+        if self.mode == edit::Mode::Edit && self.caret.is_some() && self.focused {
             let now = Instant::now();
             if now >= self.blink_flip {
                 self.blink_visible = !self.blink_visible;
@@ -6900,6 +7025,15 @@ impl ApplicationHandler for App {
                 self.count_at = None;
                 self.recount();
             } else {
+                wake.by(at);
+            }
+        }
+        // The pause save. While it stands back, its deadline is kept
+        // without a wake and taken at the first pass after.
+        if !self.autosave_waits() {
+            if self.pause_save.take_due(Instant::now()) {
+                self.autosave();
+            } else if let Some(at) = self.pause_save.wake() {
                 wake.by(at);
             }
         }
@@ -7013,10 +7147,21 @@ impl ApplicationHandler for App {
                 }
             }
             WindowEvent::Focused(true) => {
+                self.focused = true;
+                self.wake_caret();
+                self.request_redraw();
                 // Coming back to the window is when an external change
                 // is most likely to have landed.
                 self.disk_check_at = Instant::now();
                 self.check_disk();
+            }
+            WindowEvent::Focused(false) => {
+                // The caret goes with the focus, as in a native text box.
+                self.focused = false;
+                self.request_redraw();
+                if self.config.save_on_focus_loss {
+                    self.autosave();
+                }
             }
             WindowEvent::ModifiersChanged(m) => self.modifiers = m.state(),
             WindowEvent::KeyboardInput {
@@ -7850,6 +7995,16 @@ mod tests {
             }
             assert_eq!(wake.control_flow(), ControlFlow::WaitUntil(near));
         }
+    }
+
+    /// The caret shows on the lit half of its blink in the editor, and
+    /// never while the window is in the background.
+    #[test]
+    fn the_caret_hides_while_the_window_is_in_the_background() {
+        assert!(super::caret_shown(true, true, true));
+        assert!(!super::caret_shown(true, true, false), "no focus");
+        assert!(!super::caret_shown(true, false, true), "the dark half");
+        assert!(!super::caret_shown(false, true, true), "reading");
     }
 
     /// The disk check's verdict on the open file: a file missing once

@@ -74,6 +74,12 @@
 - The count reads the text as the page shows it: markdown marks, link addresses, HTML tags and frontmatter are not counted. A line ending with two spaces counts as a line, a plain line break inside a paragraph does not. Reading time is 240 words a minute.
 - A code file shows its lines and characters only. Books and comics show nothing.
 
+### Autosave
+
+- Two new rows in the settings (`Ctrl+,`) save your file without `Ctrl+S`. `save on focus loss` writes it when you switch to another window. `save after a pause` writes it a number of seconds after your last keystroke, from 1 to 60. Both are off by default. A burst of typing costs one write, and nothing runs while Oryx is idle.
+- An automatic save does not write over someone else's change: if the file changed or was deleted on disk, Oryx says so and waits for your `Ctrl+S`. It also waits while the unsaved-changes question is on screen. A note (`Ctrl+M`) has no file yet and is not autosaved.
+- The caret is hidden while the Oryx window is in the background, as in other editors.
+
 ### Welcome page
 
 - The welcome page shows a tip, a different one at each launch, from a list that covers every feature of Oryx. The tips take turns between the areas, files, moving around, search, editing, themes, export, markdown, books, so ten launches show ten different kinds of things. A "more tips" link under it shows another. Nothing to close and nothing to switch off: the tips only live on the page you see when no file is open.
