@@ -6,7 +6,7 @@
 
 use std::sync::Arc;
 
-use crate::style::theme::{hex_string, Rgba};
+use crate::style::theme::{hex_string, Rgba, Theme};
 
 /// Oryx's Mermaid error. The renderer's own error type never crosses
 /// this module; `Parse` and `Render` carry its message, which reading
@@ -94,6 +94,21 @@ impl Default for MermaidTheme {
 }
 
 impl MermaidTheme {
+    /// The reading theme's palette as diagram roles: the page behind,
+    /// the body text, the code panel and its border, the rule line, and
+    /// the link accent. An adapter, not Theme fields: Mermaid owns
+    /// nothing in the core palette.
+    pub fn from_oryx(theme: &Theme) -> Self {
+        MermaidTheme {
+            background: theme.surface.background,
+            foreground: theme.text.body,
+            primary: theme.blocks.code_bg,
+            border: theme.blocks.code_border,
+            line: theme.surface.foreground,
+            accent: theme.text.link,
+        }
+    }
+
     /// The renderer's theme: its classic palette with this theme's
     /// roles laid over it, everything the six roles miss left as the
     /// renderer intends.
@@ -341,5 +356,108 @@ mod tests {
         let out = render("flowchart LR\n    A --> B", &theme).expect("renders");
         let svg = std::str::from_utf8(&out.svg).unwrap();
         assert!(svg.contains("#ABCDEF"), "the line role paints");
+    }
+
+    /// A reading theme's roles land one-to-one in the diagram palette.
+    #[test]
+    fn the_reading_theme_maps_to_the_diagram_roles() {
+        let theme = Theme::default_dark();
+        let mapped = MermaidTheme::from_oryx(&theme);
+        assert_eq!(mapped.background, theme.surface.background);
+        assert_eq!(mapped.foreground, theme.text.body);
+        assert_eq!(mapped.primary, theme.blocks.code_bg);
+        assert_eq!(mapped.border, theme.blocks.code_border);
+        assert_eq!(mapped.line, theme.surface.foreground);
+        assert_eq!(mapped.accent, theme.text.link);
+    }
+
+    /// A light palette good enough to read, the readable counterpart
+    /// to the compiled-in dark one.
+    fn light_theme() -> Theme {
+        let mut theme = Theme::default_dark();
+        theme.surface.background = Rgba {
+            r: 0xFF,
+            g: 0xFF,
+            b: 0xFF,
+            a: 255,
+        };
+        theme.surface.foreground = Rgba {
+            r: 0x18,
+            g: 0x18,
+            b: 0x1D,
+            a: 255,
+        };
+        theme.text.body = Rgba {
+            r: 0x18,
+            g: 0x18,
+            b: 0x1D,
+            a: 255,
+        };
+        theme.text.link = Rgba {
+            r: 0x0B,
+            g: 0x5C,
+            b: 0xB8,
+            a: 255,
+        };
+        theme.blocks.code_bg = Rgba {
+            r: 0xF3,
+            g: 0xF4,
+            b: 0xF8,
+            a: 255,
+        };
+        theme.blocks.code_border = Rgba {
+            r: 0xC5,
+            g: 0xC9,
+            b: 0xD4,
+            a: 255,
+        };
+        theme
+    }
+
+    /// Both palettes paint and hold reading contrast: the node text
+    /// stands off its fill, the lines are visible against the ground.
+    #[test]
+    fn light_and_dark_diagrams_paint_readable_roles() {
+        for theme in [light_theme(), Theme::default_dark()] {
+            let palette = MermaidTheme::from_oryx(&theme);
+            let out = render("flowchart LR\n    A --> B", &palette)
+                .unwrap_or_else(|err| panic!("renders under the theme: {err}"));
+            let svg = std::str::from_utf8(&out.svg).unwrap();
+            assert!(
+                svg.contains(&hex_string(palette.line)),
+                "the line role paints"
+            );
+            assert!(
+                svg.contains(&hex_string(palette.primary)),
+                "the node fill paints"
+            );
+            assert!(
+                svg.contains(&hex_string(palette.foreground)),
+                "the node text paints"
+            );
+            assert!(
+                crate::style::theme::contrast(palette.foreground, palette.primary) >= 3.0,
+                "node text keeps contrast against its fill"
+            );
+            assert!(
+                crate::style::theme::contrast(palette.line, palette.background) >= 3.0,
+                "lines keep contrast against the ground"
+            );
+        }
+    }
+
+    /// Same source, different theme, different key: the switch can
+    /// never serve the old palette.
+    #[test]
+    fn a_theme_change_misses_the_cache() {
+        let source = "flowchart LR\n    A --> B";
+        let dark = cache_key(source, &MermaidTheme::from_oryx(&Theme::default_dark()));
+        let light = cache_key(source, &MermaidTheme::from_oryx(&light_theme()));
+        assert_ne!(dark, light);
+        assert_eq!(
+            dark,
+            cache_key(source, &MermaidTheme::from_oryx(&Theme::default_dark())),
+            "the same theme keys stably"
+        );
     }
 }

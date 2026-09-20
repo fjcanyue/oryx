@@ -4465,9 +4465,9 @@ fn layout_mermaid(
     avail: f32,
     out: &mut LayoutDoc,
 ) -> f32 {
-    // The reading-theme mapping lands with the theme phase; the key
-    // still hashes the palette, so the switch misses by construction.
-    let palette = mermaid::MermaidTheme::default();
+    // The reading theme picks the palette, and the palette salts the
+    // cache key: a theme switch misses by construction.
+    let palette = mermaid::MermaidTheme::from_oryx(theme);
     let uri = mermaid::cache_key(text, &palette).uri();
     if media.generated(&uri).is_none() {
         match mermaid::render(text, &palette) {
@@ -4552,7 +4552,15 @@ fn layout_mermaid_error(
         } else {
             format!("Mermaid diagram error — {caption}")
         };
-        [Span::plain(caption), Span::plain(format!(": {error}"))]
+        // A renderer message naming a long expected-token list must not
+        // grow the panel without bound.
+        let message = {
+            let text = error.to_string();
+            let cut = text.char_indices().nth(300).map_or(text.len(), |(i, _)| i);
+            let (head, _) = text.split_at(cut);
+            head.to_string()
+        };
+        [Span::plain(caption), Span::plain(format!(": {message}"))]
     };
     let base = BlockStyle {
         size: cfg.body_size * cfg.zoom,
@@ -4581,7 +4589,7 @@ fn layout_mermaid_error(
         [
             DecoRect::fill(x0, y0, avail, box_h, theme.blocks.frontmatter_bg)
                 .rounded(radius, radius),
-            DecoRect::fill(x0, y0, avail, box_h, theme.blocks.code_border)
+            DecoRect::fill(x0, y0, avail, box_h, theme.alerts.warning)
                 .rounded(radius, radius)
                 .stroked((1.0 * cfg.zoom).max(1.0)),
         ],

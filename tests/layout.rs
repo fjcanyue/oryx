@@ -4428,3 +4428,50 @@ fn the_same_diagram_registers_once_across_passes() {
         "the registration survived the pass"
     );
 }
+
+/// A theme switch re-keys the diagram: the same source under the
+/// second theme places under a different mermaid:// key and the old
+/// palette never serves.
+#[test]
+fn a_theme_switch_rekeys_the_placed_diagram() {
+    let doc = markdown::parse("```mermaid\nflowchart LR\n  A --> B\n```");
+    let mut fonts = fonts();
+    let mut media = MediaCache::new(PathBuf::from("."));
+    let dark = layout(
+        &doc,
+        &Theme::default_dark(),
+        &mut fonts,
+        &mut media,
+        &cfg(),
+        800.0,
+    );
+    let dark_key = dark.images[0].src.clone();
+
+    let mut light = Theme::default_dark();
+    light.surface.background = oryx::style::theme::Rgba {
+        r: 0xFF,
+        g: 0xFF,
+        b: 0xFF,
+        a: 255,
+    };
+    light.surface.foreground = oryx::style::theme::Rgba {
+        r: 0x18,
+        g: 0x18,
+        b: 0x1D,
+        a: 255,
+    };
+    light.text.body = light.surface.foreground;
+    light.blocks.code_bg = oryx::style::theme::Rgba {
+        r: 0xF3,
+        g: 0xF4,
+        b: 0xF8,
+        a: 255,
+    };
+    let relaid = layout(&doc, &light, &mut fonts, &mut media, &cfg(), 800.0);
+    let light_key = relaid.images[0].src.clone();
+    assert_ne!(dark_key, light_key, "the switch re-keys the diagram");
+    assert!(
+        media.generated(&dark_key).is_some() && media.generated(&light_key).is_some(),
+        "both palettes stand registered"
+    );
+}
