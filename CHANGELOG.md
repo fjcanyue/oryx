@@ -13,6 +13,7 @@
 - Empty lines added at the end of a file now get their rows. Before, each Enter at the end of a long file added a line the page did not show: the caret left the screen and the wheel could not reach it. The file's final line break still opens no empty row.
 - The page no longer moves by a pixel on every keystroke at a fractional display scale, such as 125%. Each frame now paints the page at a whole pixel, and the caret sits on the text it belongs to.
 - A file with nothing in it now opens in the editor, ready to type, from the command line, the sidebar or the open dialog. Before, it opened as a blank page and needed `Ctrl+E` first. A file with only spaces and empty lines counts as empty.
+- `Tab` in a new markdown file now inserts four spaces, which nest under every list marker. Before, it inserted a tab character. A file that already indents with tabs or with two spaces keeps its own, and a new code or text file still gets a tab.
 - `Up` on the first line now goes to the start of the line, and `Down` on the last line to its end, as other editors do. Before, the caret stayed where it was. With Shift, the selection follows.
 - Oryx no longer keeps a processor core busy after you leave the editor. Before, going back to reading with Escape left the caret's timer running with nothing to do, until the next notice in the corner had come and gone.
 

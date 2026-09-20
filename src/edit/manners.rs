@@ -161,14 +161,18 @@ impl IndentUnit {
 }
 
 /// The file's dominant indent: a tab where tab-led lines dominate, the
-/// dominant space step where space-led lines do, a tab where the file
-/// offers no evidence. The step is the most common leading-width
+/// dominant space step where space-led lines do. A file that offers no
+/// evidence, every new one, answers by its kind: four spaces in
+/// markdown, where a hard tab is flagged by the linters and four
+/// columns nest under every list marker (a line under `1. ` needs
+/// three), a tab elsewhere, which Go and Makefiles require.
+/// The step is the most common leading-width
 /// difference between a line and the nearest less-indented line above,
 /// kept inside 2..=8; ties go to the smaller step. The scan caps at
 /// the first 64KB, which carries any real file's indentation habits:
 /// the full pass read 9.5ms on the 8MB fixture, too slow for a held
 /// key, and the capped one is free at human rate.
-pub fn indent_unit(source: &str) -> IndentUnit {
+pub fn indent_unit(source: &str, markdown: bool) -> IndentUnit {
     let mut cap = source.len().min(64 * 1024);
     while !source.is_char_boundary(cap) {
         cap -= 1;
@@ -198,6 +202,9 @@ pub fn indent_unit(source: &str) -> IndentUnit {
             Some(_) => stack.clear(),
             None => {}
         }
+    }
+    if tabs == 0 && spaces == 0 && markdown {
+        return IndentUnit::Spaces(4);
     }
     if spaces == 0 || tabs >= spaces {
         return IndentUnit::Tab;
@@ -1670,31 +1677,76 @@ mod tests {
     #[test]
     fn the_unit_follows_the_dominant_indentation() {
         assert_eq!(
-            indent_unit("all:\n\tcc -o all main.c\n\tstrip all\n"),
+            indent_unit("all:\n\tcc -o all main.c\n\tstrip all\n", false),
             IndentUnit::Tab,
             "tab-led lines dominate a Makefile"
         );
         assert_eq!(
-            indent_unit("- a\n  - b\n  - c\n"),
+            indent_unit("- a\n  - b\n  - c\n", false),
             IndentUnit::Spaces(2),
             "two-space nesting reads as a two-space step"
         );
         assert_eq!(
-            indent_unit("fn main() {\n    if x {\n        y();\n    }\n}\n"),
+            indent_unit("fn main() {\n    if x {\n        y();\n    }\n}\n", false),
             IndentUnit::Spaces(4),
             "four-space blocks read as a four-space step"
         );
         assert_eq!(
-            indent_unit("\ta\n\tb\n  c\n"),
+            indent_unit("\ta\n\tb\n  c\n", false),
             IndentUnit::Tab,
             "tabs outnumber spaces"
         );
         assert_eq!(
-            indent_unit("plain\nlines\n"),
+            indent_unit("plain\nlines\n", false),
             IndentUnit::Tab,
             "no evidence answers a tab"
         );
-        assert_eq!(indent_unit(""), IndentUnit::Tab);
+        assert_eq!(indent_unit("", false), IndentUnit::Tab);
+    }
+
+    #[test]
+    fn a_markdown_file_without_evidence_indents_with_four_spaces() {
+        assert_eq!(indent_unit("", true), IndentUnit::Spaces(4), "a new file");
+        assert_eq!(
+            indent_unit("# Title\n\nA paragraph.\n\n- a\n- b\n", true),
+            IndentUnit::Spaces(4),
+            "text at the margin is no evidence"
+        );
+    }
+
+    #[test]
+    fn a_markdown_file_keeps_the_indent_it_already_has() {
+        assert_eq!(
+            indent_unit("- a\n  - b\n  - c\n", true),
+            IndentUnit::Spaces(2),
+            "two-space nesting stays two"
+        );
+        assert_eq!(
+            indent_unit("- a\n\t- b\n\t- c\n", true),
+            IndentUnit::Tab,
+            "a file nested with tabs stays on tabs"
+        );
+    }
+
+    #[test]
+    fn four_spaces_nest_under_a_numbered_item() {
+        let (text, _) = reindent("1. b", &indent_unit("1. a\n1. b\n", true), false);
+        assert_eq!(text, "    1. b");
+        let depths = |source: String| -> Vec<u8> {
+            crate::doc::markdown::parse(source)
+                .blocks
+                .iter()
+                .filter_map(|b| match b.kind {
+                    crate::doc::model::BlockKind::ListItem { depth, .. } => Some(depth),
+                    _ => None,
+                })
+                .collect()
+        };
+        let nested = depths(format!("1. a\n{text}\n"));
+        assert_eq!(nested.len(), 2);
+        assert!(nested[1] > nested[0], "four spaces nest the item");
+        let flat = depths("1. a\n  1. b\n".to_string());
+        assert_eq!(flat[0], flat[1], "two would not, which is why four");
     }
 
     #[test]

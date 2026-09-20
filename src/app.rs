@@ -3166,7 +3166,7 @@ impl App {
                     return;
                 }
             }
-            let unit = edit::manners::indent_unit(&self.document.source);
+            let unit = edit::manners::indent_unit(&self.document.source, self.markdown_source());
             self.type_over(&unit.text(), Kind::Insert);
             return;
         }
@@ -3177,7 +3177,7 @@ impl App {
     /// touches, or the caret's line alone, re-indented as one splice
     /// and one undo unit.
     fn indent_lines(&mut self, outdent: bool) {
-        let unit = edit::manners::indent_unit(&self.document.source);
+        let unit = edit::manners::indent_unit(&self.document.source, self.markdown_source());
         self.rewrite_lines(|region| {
             let (text, deltas) = edit::manners::reindent(region, &unit, outdent);
             (text, deltas.into_iter().map(|d| (0, d)).collect())
