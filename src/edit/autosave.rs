@@ -12,6 +12,18 @@ pub const PAUSES: [u32; 8] = [0, 5, 15, 30, 60, 300, 600, 900];
 /// The longest pause, which a hand-written config value is held to.
 pub const PAUSE_MAX: u32 = PAUSES[PAUSES.len() - 1];
 
+/// The rest after the last edit before the untitled note's text is
+/// copied to its file: between Vim's swap file (4 s) and Notepad++'s
+/// backup (7 s).
+pub const NOTE_REST: Duration = Duration::from_secs(5);
+
+/// The rest for a note of `bytes`: `NOTE_REST`, and never less than a
+/// second per megabyte, so a huge paste is not rewritten whole every
+/// few seconds. A typed note never reaches the second term.
+pub fn copy_rest(bytes: usize) -> Duration {
+    NOTE_REST.max(Duration::from_secs((bytes >> 20) as u64))
+}
+
 /// What an automatic save does at its moment.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Verdict {
@@ -63,6 +75,11 @@ impl Pause {
     /// An edit landed at `now`; `seconds` is the setting, 0 for off.
     pub fn edited(&mut self, now: Instant, seconds: u32) {
         self.at = (seconds > 0).then(|| now + Duration::from_secs(u64::from(seconds)));
+    }
+
+    /// An edit landed at `now` and the write waits for `rest`.
+    pub fn rest(&mut self, now: Instant, rest: Duration) {
+        self.at = Some(now + rest);
     }
 
     /// When the loop should wake for the save, if at all.
@@ -241,6 +258,26 @@ mod tests {
         pause.edited(t0, 5);
         pause.edited(t0 + Duration::from_secs(1), 0);
         assert_eq!(pause.wake(), None);
+    }
+
+    #[test]
+    fn a_typed_note_rests_five_seconds_and_a_huge_one_a_second_per_megabyte() {
+        assert_eq!(copy_rest(0), Duration::from_secs(5));
+        assert_eq!(copy_rest(4096), Duration::from_secs(5));
+        assert_eq!(copy_rest(5 << 20), Duration::from_secs(5));
+        assert_eq!(copy_rest(8 << 20), Duration::from_secs(8));
+        assert_eq!(copy_rest(100 << 20), Duration::from_secs(100));
+    }
+
+    #[test]
+    fn a_rest_arms_the_pause_like_an_edit() {
+        let t0 = Instant::now();
+        let mut pause = Pause::default();
+        pause.rest(t0, NOTE_REST);
+        pause.rest(t0 + Duration::from_secs(1), NOTE_REST);
+        assert_eq!(pause.wake(), Some(t0 + Duration::from_secs(6)));
+        assert!(!pause.take_due(t0 + Duration::from_secs(5)));
+        assert!(pause.take_due(t0 + Duration::from_secs(6)));
     }
 
     #[test]

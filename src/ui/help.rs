@@ -159,6 +159,11 @@ pub const TIPS: &[Tip] = &[
     Tip {
         kind: TipKind::Tip,
         area: Area::Files,
+        text: r#"Did your machine go down in the middle of a note? Oryx keeps a copy of the note while you type, and the next time you start it, it asks whether you want the note back. `R` recovers it, `D` discards it, and `Escape` leaves it for the next time."#,
+    },
+    Tip {
+        kind: TipKind::Tip,
+        area: Area::Files,
         text: r#"`Ctrl+S` saves your work. Oryx only writes the lines you changed, and each line keeps its own ending, so a file with Windows line endings stays that way."#,
     },
     Tip {

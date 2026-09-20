@@ -98,6 +98,9 @@ enum Cli {
         /// Where to open, from a running copy that opens a second
         /// window beside itself; private, absent from the usage.
         beside: Option<(i32, i32)>,
+        /// The folder of a leftover note to take over, from a running
+        /// copy that recovers it in a second window; private too.
+        recover: Option<PathBuf>,
     },
     Version,
     Register,
@@ -111,6 +114,7 @@ fn parse_args(args: impl Iterator<Item = OsString>) -> Cli {
     let mut path: Option<PathBuf> = None;
     let mut theme: Option<String> = None;
     let mut beside: Option<(i32, i32)> = None;
+    let mut recover: Option<PathBuf> = None;
     let mut args = args;
     while let Some(arg) = args.next() {
         match arg.to_str() {
@@ -135,6 +139,10 @@ fn parse_args(args: impl Iterator<Item = OsString>) -> Cli {
                     None => return Cli::Refused("--beside takes a position as X,Y".to_string()),
                 }
             }
+            Some("--recover") => match args.next() {
+                Some(folder) => recover = Some(PathBuf::from(folder)),
+                None => return Cli::Refused("--recover takes a folder".to_string()),
+            },
             Some(flag) if flag.starts_with("--") => {
                 return Cli::Refused(format!("unknown option {flag}"));
             }
@@ -145,6 +153,7 @@ fn parse_args(args: impl Iterator<Item = OsString>) -> Cli {
         path,
         theme,
         beside,
+        recover,
     }
 }
 
@@ -176,7 +185,12 @@ fn main() -> ExitCode {
             path,
             theme,
             beside,
-        } => match app::run(launch(path), theme, beside) {
+            recover,
+        } => match app::run(
+            recover.map_or_else(|| launch(path), app::Launch::Recover),
+            theme,
+            beside,
+        ) {
             Ok(()) => ExitCode::SUCCESS,
             Err(error) => {
                 eprintln!("oryx: {error}");
@@ -285,6 +299,7 @@ mod tests {
                 path: Some(PathBuf::from("notes.md")),
                 theme: Some("dracula".to_string()),
                 beside: None,
+                recover: None,
             }
         );
         assert_eq!(
@@ -293,6 +308,7 @@ mod tests {
                 path: None,
                 theme: None,
                 beside: None,
+                recover: None,
             }
         );
         assert_eq!(
@@ -301,6 +317,7 @@ mod tests {
                 path: Some(PathBuf::from("./--odd.md")),
                 theme: None,
                 beside: None,
+                recover: None,
             },
             "a path form opens a file whose name starts with dashes"
         );
@@ -309,6 +326,28 @@ mod tests {
     /// The private flag a running copy passes to the second window it
     /// opens: where to place it, a step down and right of itself.
     #[test]
+    fn the_recover_flag_carries_a_folder() {
+        assert_eq!(
+            parse_args(args(&[
+                "--beside",
+                "40,60",
+                "--recover",
+                "/state/notes/7-1"
+            ])),
+            Cli::Run {
+                path: None,
+                theme: None,
+                beside: Some((40, 60)),
+                recover: Some(PathBuf::from("/state/notes/7-1")),
+            }
+        );
+        assert_eq!(
+            parse_args(args(&["--recover"])),
+            Cli::Refused("--recover takes a folder".to_string())
+        );
+    }
+
+    #[test]
     fn the_beside_flag_carries_a_position() {
         assert_eq!(
             parse_args(args(&["--beside", "40,60", "notes.md"])),
@@ -316,6 +355,7 @@ mod tests {
                 path: Some(PathBuf::from("notes.md")),
                 theme: None,
                 beside: Some((40, 60)),
+                recover: None,
             }
         );
         assert_eq!(
@@ -324,6 +364,7 @@ mod tests {
                 path: None,
                 theme: None,
                 beside: Some((-10, 7)),
+                recover: None,
             },
             "a monitor left of the main one has negative x"
         );

@@ -1,4 +1,5 @@
 pub mod config;
+pub mod notes;
 pub mod register;
 pub mod resource;
 pub mod save;

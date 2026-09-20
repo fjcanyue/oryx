@@ -31,6 +31,7 @@ use oryx::paint;
 use oryx::paint::painter::Painter;
 use oryx::paint::scroll::{self, BandCache};
 use oryx::platform::config::{self, Config, WindowState};
+use oryx::platform::notes;
 use oryx::platform::save;
 #[cfg(target_os = "linux")]
 use oryx::platform::wayland_drop;
@@ -120,6 +121,9 @@ pub enum Launch {
     /// line.
     FileAt(PathBuf, goto::Target),
     Folder(PathBuf),
+    /// No file: the leftover note in this folder is taken over, the
+    /// second window a recovery starts.
+    Recover(PathBuf),
 }
 
 pub fn run(
@@ -127,11 +131,16 @@ pub fn run(
     theme_name: Option<String>,
     beside: Option<(i32, i32)>,
 ) -> anyhow::Result<()> {
+    let recover_at_start = match &launch {
+        Launch::Recover(folder) => Some(folder.clone()),
+        _ => None,
+    };
     let (path, folder, launch_target) = match launch {
         Launch::Empty => (None, None, None),
         Launch::File(path) => (Some(path), None, None),
         Launch::FileAt(path, target) => (Some(path), None, Some(target)),
         Launch::Folder(dir) => (None, Some(dir.canonicalize().unwrap_or(dir)), None),
+        Launch::Recover(_) => (None, None, None),
     };
     // One form of the path for the whole session. Everything keyed on
     // it, the edit marks, the resume note, the disk identity, has to
@@ -359,6 +368,11 @@ pub fn run(
         blink_flip: Instant::now(),
         focused: true,
         pause_save: autosave::Pause::default(),
+        note_seat: None,
+        note_copy: autosave::Pause::default(),
+        note_copy_failed: false,
+        leftovers: Vec::new(),
+        recover_at_start,
         count_line: None,
         count_key: None,
         count_at: None,
@@ -389,6 +403,11 @@ pub fn run(
     // Without a display no window can explain the ending, so the
     // terminal gets it in plain words, from the frame that failed or
     // from winit, which leaves its loop with the error's number.
+    // A loop that ended without the quit had no display to ask its save
+    // question on: the note's last words go to its file, where the next
+    // launch offers them back. After a quit the note is gone and nothing
+    // waits.
+    app.flush_note_copy();
     if let Some(reason) = app.display_lost.take() {
         anyhow::bail!("lost the connection to the display: {reason}");
     }
@@ -774,10 +793,28 @@ fn window_title(book: Option<&str>, path: Option<&Path>, dirty: bool, editing: b
     }
 }
 
-/// The untitled note's file: `untitled.md` in the state folder where
-/// the platform has one, else in the cache folder beside the images.
-fn note_path(state: Option<&Path>, cache: &Path) -> PathBuf {
-    state.unwrap_or(cache).join("untitled.md")
+/// Where the note folders live on this machine, when the platform
+/// names a home for Oryx at all.
+fn notes_root() -> Option<PathBuf> {
+    let dirs = directories::ProjectDirs::from("", "", "oryx")?;
+    Some(notes::root(dirs.state_dir(), dirs.data_local_dir()))
+}
+
+/// The line under the recovery question's title.
+const RECOVER_LINE: &str = "A note from your last session was not saved.";
+
+/// The arguments of the second window that takes a leftover note over:
+/// the position through `--beside` when the first knows its own, then
+/// the note's folder through the private `--recover`.
+fn recover_args(folder: &Path, at: Option<(i32, i32)>) -> Vec<std::ffi::OsString> {
+    let mut args = Vec::new();
+    if let Some((x, y)) = at {
+        args.push("--beside".into());
+        args.push(format!("{x},{y}").into());
+    }
+    args.push("--recover".into());
+    args.push(folder.as_os_str().to_owned());
+    args
 }
 
 /// Where the Save As dialog opens: the open file's folder; on the
@@ -1111,6 +1148,20 @@ struct App {
     focused: bool,
     /// The pause save's deadline, armed by every edit.
     pause_save: autosave::Pause,
+    /// This Oryx's note folder, claimed at the first note and held to
+    /// the quit; its lock tells a later launch that this note is alive.
+    note_seat: Option<notes::Seat>,
+    /// The deadline of the note's safety copy, armed by every edit of
+    /// the note. The copy is a net under the save question, never a
+    /// save: the unsaved mark and the question stay as they are.
+    note_copy: autosave::Pause,
+    /// A failed copy was told once for this note.
+    note_copy_failed: bool,
+    /// Notes left by an Oryx that ended without its save question, the
+    /// newest first, their locks held while the question stands.
+    leftovers: Vec<notes::Leftover>,
+    /// The leftover folder a recovery's second window was started on.
+    recover_at_start: Option<PathBuf>,
     /// The transient corner notice, while one holds or fades.
     notice: Option<Notice>,
     /// Reused notice canvas, mirroring the overlay canvas mechanics.
@@ -2336,10 +2387,15 @@ impl App {
         Ok(())
     }
 
-    /// An edit landed: the pause save waits anew, when the setting is on.
+    /// An edit landed: the pause save waits anew, when the setting is
+    /// on, and so does the note's copy, on the note.
     fn arm_pause_save(&mut self) {
-        self.pause_save
-            .edited(Instant::now(), self.config.save_after_pause);
+        let now = Instant::now();
+        self.pause_save.edited(now, self.config.save_after_pause);
+        if self.on_note() {
+            let rest = autosave::copy_rest(self.document.source.len());
+            self.note_copy.rest(now, rest);
+        }
     }
 
     /// An automatic save, at a focus loss or after a pause. It writes
@@ -2514,24 +2570,37 @@ impl App {
         }
     }
 
-    /// The note is a real empty file in Oryx's own folder, so every
-    /// rule that hangs off the open file holds; the sidebar stays where
-    /// it is, the browse folder is not moved, and the file goes when
-    /// the note is saved elsewhere, discarded or the app quits. The
-    /// save dialog remembers the folder of the file open before.
+    /// The note is a real empty file in a folder of this Oryx's own, so
+    /// every rule that hangs off the open file holds; the sidebar stays
+    /// where it is, the browse folder is not moved, and the file goes
+    /// when the note is saved elsewhere, discarded or the app quits.
+    /// While the note is typed, its text is copied to that file, the net
+    /// under an ending that skips the save question. The save dialog
+    /// remembers the folder of the file open before.
     fn open_note(&mut self) {
-        let Some(dirs) = directories::ProjectDirs::from("", "", "oryx") else {
+        let Some(root) = notes_root() else {
             self.show_notice("No folder for a note");
             return;
         };
-        let path = note_path(dirs.state_dir(), dirs.cache_dir());
-        let dir = path.parent().map(Path::to_path_buf).unwrap_or_default();
-        let created = std::fs::create_dir_all(&dir).and_then(|_| save::write_atomic(&path, b""));
-        if let Err(err) = created {
+        let seat = match self.note_seat.take() {
+            Some(seat) => Ok(seat),
+            None => notes::Seat::claim(&root),
+        };
+        let path = match seat {
+            Ok(seat) => {
+                let path = seat.note();
+                self.note_seat = Some(seat);
+                path
+            }
+            Err(err) => {
+                self.show_notice(&format!("Could not create the note: {err}"));
+                return;
+            }
+        };
+        if let Err(err) = save::write_atomic(&path, b"") {
             self.show_notice(&format!("Could not create the note: {err}"));
             return;
         }
-        let path = dir.canonicalize().unwrap_or(dir).join("untitled.md");
         if !self.on_note() {
             self.note_from = self
                 .path
@@ -2558,6 +2627,8 @@ impl App {
             return;
         };
         let _ = std::fs::remove_file(&path);
+        self.note_copy.clear();
+        self.note_copy_failed = false;
         self.note_from = None;
         self.edit_marks.remove(&path);
         self.read_marks.remove(&path);
@@ -2565,11 +2636,134 @@ impl App {
         self.resume_edit.remove(&path);
     }
 
-    /// The way out: the reading position kept, the note's file gone.
+    /// The way out: the reading position kept, the note's file and its
+    /// folder gone, so the next launch finds nothing to offer.
     fn quit(&mut self, event_loop: &ActiveEventLoop) {
         self.remember_position();
         self.remove_note();
+        if let Some(seat) = self.note_seat.take() {
+            seat.release();
+        }
         event_loop.exit();
+    }
+
+    /// The note's text copied to the note's own file, where a later
+    /// launch finds it if this Oryx ends without its save question. A
+    /// parallel net and never a save: the ledger, the save point and
+    /// the title's dot stay untouched. The disk identity follows the
+    /// write, or the change check would read our own copy as someone
+    /// else's. True when the text is on disk.
+    fn copy_note(&mut self) -> bool {
+        self.note_copy.clear();
+        if !self.on_note() {
+            return false;
+        }
+        let (Some(path), Some(ledger)) = (self.note_file.clone(), self.ledger.as_ref()) else {
+            return false;
+        };
+        match save::write_atomic(&path, &ledger.emit()) {
+            Ok(()) => {
+                self.disk_misses = 0;
+                self.disk_seen = std::fs::metadata(&path)
+                    .ok()
+                    .and_then(|meta| Some((meta.modified().ok()?, meta.len())));
+                true
+            }
+            Err(err) => {
+                if !self.note_copy_failed {
+                    self.note_copy_failed = true;
+                    self.show_notice(&format!("Could not keep a copy of the note: {err}"));
+                }
+                false
+            }
+        }
+    }
+
+    /// The copy taken now when one is waiting: the focus leaves, or the
+    /// display is lost.
+    fn flush_note_copy(&mut self) {
+        if self.note_copy.wake().is_some() && self.help_stash.is_none() {
+            self.copy_note();
+        }
+    }
+
+    /// A launch looks for notes an earlier Oryx left behind and asks
+    /// about the newest; the others follow, one question each.
+    fn offer_leftovers(&mut self) {
+        let Some(root) = notes_root() else {
+            return;
+        };
+        self.leftovers = notes::leftovers(&root);
+        self.ask_next_leftover();
+    }
+
+    fn ask_next_leftover(&mut self) {
+        self.confirm = (!self.leftovers.is_empty())
+            .then(|| confirm::Confirm::new(confirm::Pending::Recover, RECOVER_LINE.to_string()));
+        self.request_redraw();
+    }
+
+    /// An answer to the recovery question. "Not now" lets every
+    /// leftover go back to disk untouched, its lock freed, for the next
+    /// launch to ask again.
+    fn recover_decide(&mut self, decision: confirm::Decision) {
+        if decision == confirm::Decision::Hold {
+            return;
+        }
+        if decision == confirm::Decision::Cancel || self.leftovers.is_empty() {
+            self.leftovers.clear();
+            self.confirm = None;
+            self.request_redraw();
+            return;
+        }
+        let leftover = self.leftovers.remove(0);
+        match decision {
+            confirm::Decision::Discard => leftover.discard(),
+            // A window with no file takes the note; a launch on a file
+            // keeps its file and the note opens beside it.
+            _ if self.path.is_none() => self.recover_here(leftover),
+            _ => self.recover_beside(leftover),
+        }
+        self.ask_next_leftover();
+    }
+
+    /// The leftover's text in a fresh note of this Oryx, put in as one
+    /// edit: unsaved, the dot on, the question at the quit. The
+    /// leftover's folder goes only once the new note's own copy is on
+    /// disk, so no moment holds the text in memory alone.
+    fn recover_here(&mut self, leftover: notes::Leftover) {
+        self.open_note();
+        if !self.on_note() || self.mode != edit::Mode::Edit {
+            return;
+        }
+        let text = load::without_returns(leftover.text());
+        self.type_edit(0..0, &text, Kind::Structural);
+        if self.copy_note() {
+            leftover.discard();
+        }
+        self.show_notice("Note recovered");
+    }
+
+    /// The leftover handed to a second window, which takes its folder
+    /// over by name; the lock is freed first, since the taking needs it.
+    fn recover_beside(&mut self, leftover: notes::Leftover) {
+        let folder = leftover.folder().to_path_buf();
+        drop(leftover);
+        let at = self
+            .gfx
+            .as_ref()
+            .and_then(|g| g.window.outer_position().ok())
+            .map(|p| beside_step((p.x, p.y)));
+        let Some(exe) = own_executable() else {
+            self.show_notice("Cannot open a second window: no program path");
+            return;
+        };
+        if let Err(err) = std::process::Command::new(exe)
+            .args(recover_args(&folder, at))
+            .spawn()
+        {
+            self.show_notice(&format!("Cannot open a second window: {err}"));
+        }
     }
 
     /// Records the open file's on-disk identity after a read or a
@@ -2739,6 +2933,8 @@ impl App {
             confirm::Pending::Open(path, reroot) => self.open_file(&path, reroot),
             confirm::Pending::New => self.new_file(),
             confirm::Pending::Note => self.open_note(),
+            // Answered through `recover_decide`, never resolved here.
+            confirm::Pending::Recover => {}
         }
         self.request_redraw();
     }
@@ -2759,6 +2955,14 @@ impl App {
 
     /// Acts on a decision taken on the modal, by key or by click.
     fn confirm_decide(&mut self, decision: confirm::Decision, event_loop: &ActiveEventLoop) {
+        if self
+            .confirm
+            .as_ref()
+            .is_some_and(confirm::Confirm::is_recovery)
+        {
+            self.recover_decide(decision);
+            return;
+        }
         match decision {
             confirm::Decision::Save => {
                 if self.save() {
@@ -7037,6 +7241,14 @@ impl ApplicationHandler for App {
                 wake.by(at);
             }
         }
+        // The note's copy; behind the help page its deadline is kept.
+        if self.help_stash.is_none() {
+            if self.note_copy.take_due(Instant::now()) {
+                self.copy_note();
+            } else if let Some(at) = self.note_copy.wake() {
+                wake.by(at);
+            }
+        }
         self.maybe_speculate();
         self.step_fling(&mut wake);
         event_loop.set_control_flow(wake.control_flow());
@@ -7137,6 +7349,18 @@ impl ApplicationHandler for App {
         if self.config.sidebar_open {
             self.open_sidebar(true);
         }
+        // The window of a recovery takes its note over. Any other first
+        // window asks about the notes an earlier Oryx left behind; a
+        // second window of a running Oryx (`--beside`) is no new
+        // session and asks nothing.
+        if let Some(folder) = self.recover_at_start.take() {
+            match notes::adopt(&folder) {
+                Some(leftover) => self.recover_here(leftover),
+                None => self.show_notice("The note could not be recovered"),
+            }
+        } else if self.beside.is_none() {
+            self.offer_leftovers();
+        }
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
@@ -7159,6 +7383,7 @@ impl ApplicationHandler for App {
                 // The caret goes with the focus, as in a native text box.
                 self.focused = false;
                 self.request_redraw();
+                self.flush_note_copy();
                 if self.config.save_on_focus_loss {
                     self.autosave();
                 }
@@ -7839,18 +8064,19 @@ mod tests {
         assert_eq!(super::window_title(None, None, false, false), "oryx");
     }
 
-    /// The untitled note is a real file in Oryx's own folder: the
-    /// state folder where the platform has one, else the cache folder.
+    /// The second window of a recovery is told where to open and which
+    /// note folder to take over.
     #[test]
-    fn the_note_lives_in_the_state_folder_or_the_cache() {
+    fn a_recovery_window_gets_its_position_and_the_notes_folder() {
         use std::path::Path;
+        let folder = Path::new("/state/oryx/notes/7-1-0");
         assert_eq!(
-            super::note_path(Some(Path::new("/s")), Path::new("/c")),
-            Path::new("/s/untitled.md")
+            super::recover_args(folder, Some((40, 60))),
+            ["--beside", "40,60", "--recover", "/state/oryx/notes/7-1-0"]
         );
         assert_eq!(
-            super::note_path(None, Path::new("/c")),
-            Path::new("/c/untitled.md")
+            super::recover_args(folder, None),
+            ["--recover", "/state/oryx/notes/7-1-0"]
         );
     }
 

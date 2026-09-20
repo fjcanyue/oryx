@@ -80,6 +80,11 @@
 - An automatic save does not write over someone else's change: if the file changed or was deleted on disk, Oryx says so and waits for your `Ctrl+S`. It also waits while the unsaved-changes question is on screen. A note (`Ctrl+M`) has no file yet and is not autosaved.
 - The caret is hidden while the Oryx window is in the background, as in other editors.
 
+### Notes
+
+- A note (`Ctrl+M`) now survives a crash, a power cut or a lost display. Oryx copies the note's text to a file of its own five seconds after you stop typing, and when the focus leaves the window. The copy is not a save: the unsaved dot stays, and Oryx still asks before closing.
+- If Oryx ended without asking, the next launch says "A note from your last session was not saved." `R` or Enter recovers the note, `D` discards it, and Escape leaves it for the next launch. The note comes back unsaved, in this window, or in a second window when Oryx was started on a file.
+
 ### Welcome page
 
 - The welcome page shows a tip, a different one at each launch, from a list that covers every feature of Oryx. The tips take turns between the areas, files, moving around, search, editing, themes, export, markdown, books, so ten launches show ten different kinds of things. A "more tips" link under it shows another. Nothing to close and nothing to switch off: the tips only live on the page you see when no file is open.

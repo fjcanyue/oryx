@@ -5,6 +5,11 @@
 //! discards and Escape keeps editing wherever the focus is; a click
 //! runs an answer and a click outside keeps editing. Every other key is
 //! spent, since a modal owns the keyboard.
+//!
+//! A launch that finds a note an earlier Oryx left behind asks through
+//! the same modal under other words (`Pending::Recover`): R recovers,
+//! D discards, and Escape or a click outside is "not now", which keeps
+//! the note for the next launch.
 
 use winit::keyboard::{Key, NamedKey};
 
@@ -26,6 +31,11 @@ pub enum Pending {
     New,
     /// A fresh untitled note over the open file's unsaved edits.
     Note,
+    /// Not a guard: the question a launch asks when an earlier Oryx
+    /// left a note behind. The same three rows under other words: the
+    /// first answer (`Decision::Save`, key R) recovers the note, Discard
+    /// deletes it, and Cancel is "not now", which destroys nothing.
+    Recover,
 }
 
 /// The user's decision on the modal.
@@ -41,12 +51,18 @@ pub enum Decision {
     Hold,
 }
 
-/// Resolves one direct key against the modal, whatever the focus:
-/// S saves, D discards, Escape keeps editing.
+/// Resolves one direct key against the unsaved-changes question,
+/// whatever the focus: S saves, D discards, Escape keeps editing.
 pub fn decide(key: &Key) -> Decision {
+    decide_with(key, "s")
+}
+
+/// The same with the first answer's letter named: S, or R on the
+/// recovery question.
+fn decide_with(key: &Key, first: &str) -> Decision {
     match key {
         Key::Named(NamedKey::Escape) => Decision::Cancel,
-        Key::Character(c) if c.eq_ignore_ascii_case("s") => Decision::Save,
+        Key::Character(c) if c.eq_ignore_ascii_case(first) => Decision::Save,
         Key::Character(c) if c.eq_ignore_ascii_case("d") => Decision::Discard,
         _ => Decision::Hold,
     }
@@ -71,14 +87,11 @@ const ROW_INSET: f32 = 6.0;
 
 type Rect = (f32, f32, f32, f32);
 
-/// The three answers in row order: the key's name and its decision.
-const ANSWERS: [(&str, Decision); 3] = [
-    ("S", Decision::Save),
-    ("D", Decision::Discard),
-    ("Esc", Decision::Cancel),
-];
+/// The three answers in row order.
+const ANSWERS: [Decision; 3] = [Decision::Save, Decision::Discard, Decision::Cancel];
 
-/// The modal's state: what it guards, the file it names, the focused
+/// The modal's state: what it guards, the file it names (or the
+/// recovery question's line), the focused
 /// answer, the answer under the mouse, and the rectangles of the last
 /// draw for the mouse.
 pub struct Confirm {
@@ -134,9 +147,38 @@ impl Confirm {
         self.keys
     }
 
+    /// Whether this is the launch's recovery question.
+    pub fn is_recovery(&self) -> bool {
+        self.pending == Pending::Recover
+    }
+
+    /// The header's title.
+    pub fn title(&self) -> &'static str {
+        if self.is_recovery() {
+            "Unsaved note"
+        } else {
+            "Unsaved changes"
+        }
+    }
+
+    /// The three keycaps in row order; the first answer's key is R on
+    /// the recovery question, S everywhere else.
+    pub fn key_names(&self) -> [&'static str; 3] {
+        [self.first_key(), "D", "Esc"]
+    }
+
+    fn first_key(&self) -> &'static str {
+        if self.is_recovery() {
+            "R"
+        } else {
+            "S"
+        }
+    }
+
     /// The three labels: the first names what follows the save.
     pub fn labels(&self) -> [&'static str; 3] {
         let save = match self.pending {
+            Pending::Recover => return ["Recover the note", "Discard it", "Not now"],
             Pending::Quit => "Save and quit",
             Pending::Reload | Pending::Refetch => "Save and reload",
             Pending::Open(..) => "Save and open",
@@ -158,8 +200,8 @@ impl Confirm {
                 self.focus = self.focus.saturating_sub(1);
                 Decision::Hold
             }
-            Key::Named(NamedKey::Enter) | Key::Named(NamedKey::Space) => ANSWERS[self.focus].1,
-            _ => decide(key),
+            Key::Named(NamedKey::Enter) | Key::Named(NamedKey::Space) => ANSWERS[self.focus],
+            _ => decide_with(key, self.first_key()),
         }
     }
 
@@ -176,7 +218,7 @@ impl Confirm {
     /// rest of the panel holds, outside the panel keeps editing.
     pub fn click(&mut self, x: f32, y: f32) -> Decision {
         if let Some(index) = self.rows.iter().position(|r| inside(*r, x, y)) {
-            return ANSWERS[index].1;
+            return ANSWERS[index];
         }
         if inside(self.panel, x, y) {
             Decision::Hold
@@ -204,7 +246,7 @@ impl Confirm {
         painter.text(
             x + PAD + 20.0,
             y + PAD,
-            "Unsaved changes",
+            self.title(),
             BODY_FAMILY,
             TITLE_SIZE,
             700,
@@ -215,16 +257,23 @@ impl Confirm {
                 x + PAD + 20.0,
                 y + PAD + 25.0,
                 &self.name,
-                CODE_FAMILY,
+                // A file's name reads in the code face; the recovery
+                // question's line is a sentence.
+                if self.is_recovery() {
+                    BODY_FAMILY
+                } else {
+                    CODE_FAMILY
+                },
                 NAME_SIZE,
                 400,
                 dim(ui.overlay_fg),
             );
         }
         let labels = self.labels();
+        let key_names = self.key_names();
         let row_x = x + PAD - ROW_INSET;
         let row_w = w - 2.0 * PAD + 2.0 * ROW_INSET;
-        for (index, (key, _)) in ANSWERS.iter().enumerate() {
+        for (index, key) in key_names.iter().enumerate() {
             let ry = y + PAD + HEADER_H + index as f32 * (ROW_H + ROW_GAP);
             self.rows[index] = (row_x, ry, row_w, ROW_H);
             let focused = index == self.focus;
@@ -326,6 +375,38 @@ mod tests {
             "shift makes no difference"
         );
         assert_eq!(decide(&Key::Named(NamedKey::Escape)), Decision::Cancel);
+    }
+
+    #[test]
+    fn the_recovery_question_has_its_own_words_and_keys() {
+        let line = "A note from your last session was not saved.";
+        let mut c = Confirm::new(Pending::Recover, line.to_string());
+        assert!(c.is_recovery());
+        assert!(!confirm().is_recovery());
+        assert_eq!(c.title(), "Unsaved note");
+        assert_eq!(confirm().title(), "Unsaved changes");
+        assert_eq!(c.labels(), ["Recover the note", "Discard it", "Not now"]);
+        assert_eq!(c.key_names(), ["R", "D", "Esc"]);
+        assert_eq!(confirm().key_names(), ["S", "D", "Esc"]);
+        assert_eq!(
+            c.key(&Key::Named(NamedKey::Enter)),
+            Decision::Save,
+            "the focus starts on Recover"
+        );
+        assert_eq!(c.key(&Key::Character("r".into())), Decision::Save);
+        assert_eq!(c.key(&Key::Character("R".into())), Decision::Save);
+        assert_eq!(c.key(&Key::Character("d".into())), Decision::Discard);
+        assert_eq!(c.key(&Key::Named(NamedKey::Escape)), Decision::Cancel);
+        assert_eq!(
+            c.key(&Key::Character("s".into())),
+            Decision::Hold,
+            "S belongs to the save question"
+        );
+        assert_eq!(
+            confirm().key(&Key::Character("r".into())),
+            Decision::Hold,
+            "and R to this one"
+        );
     }
 
     #[test]
