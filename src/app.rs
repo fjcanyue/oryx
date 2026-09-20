@@ -686,6 +686,23 @@ fn disk_verdict(seen: DiskState, now: Option<DiskState>, misses: u8, deleted: bo
     }
 }
 
+/// The loop's next wake, rebuilt at every pass: each timer still
+/// running asks for its deadline and the soonest wins. A timer that
+/// stopped asks for nothing, so no lapsed deadline stays behind to spin
+/// the loop, and no timer's wake replaces a nearer one.
+#[derive(Debug, Default)]
+struct Wake(Option<Instant>);
+
+impl Wake {
+    fn by(&mut self, at: Instant) {
+        self.0 = Some(self.0.map_or(at, |soonest| soonest.min(at)));
+    }
+
+    fn control_flow(&self) -> ControlFlow {
+        self.0.map_or(ControlFlow::Wait, ControlFlow::WaitUntil)
+    }
+}
+
 /// The arguments a second copy is started with: the position to open at
 /// through the private `--beside` flag when the first knows its own,
 /// then the file.
@@ -4305,7 +4322,7 @@ impl App {
 
     /// Advances a running fling and keeps the loop ticking while it
     /// lasts. Friction or the document's edge retires it.
-    fn step_fling(&mut self, event_loop: &ActiveEventLoop) {
+    fn step_fling(&mut self, wake: &mut Wake) {
         let Some((velocity, at)) = self.fling else {
             return;
         };
@@ -4322,7 +4339,7 @@ impl App {
             }
             self.fling = Some((next, now));
         }
-        event_loop.set_control_flow(ControlFlow::WaitUntil(now + FLING_TICK));
+        wake.by(now + FLING_TICK);
     }
 
     /// Hands pending highlight work to the worker. An empty list still
@@ -6819,28 +6836,30 @@ impl App {
 impl ApplicationHandler for App {
     /// A relayout deferred by a live resize waits for the size to hold
     /// still, and the timer is the only thing that wakes an idle loop.
+    /// The wake is rebuilt at every pass from the timers still running:
+    /// one that stopped, the caret's blink on leaving the editor, leaves
+    /// nothing behind.
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         if self.display_lost.is_some() {
             event_loop.exit();
             return;
         }
+        let mut wake = Wake::default();
         if !self.pending_recolor.is_empty() {
             let due = self.last_recolor + RECOLOR_WAVE;
             if Instant::now() >= due {
                 self.flush_recolor();
-                event_loop.set_control_flow(ControlFlow::Wait);
             } else {
-                event_loop.set_control_flow(ControlFlow::WaitUntil(due));
+                wake.by(due);
             }
         }
         if let Some(at) = self.settle_at {
             if Instant::now() < at {
-                event_loop.set_control_flow(ControlFlow::WaitUntil(at));
+                wake.by(at);
             } else {
                 self.settle_at = None;
                 self.layout = None;
                 self.pass = None;
-                event_loop.set_control_flow(ControlFlow::Wait);
                 self.request_redraw();
             }
         }
@@ -6849,7 +6868,7 @@ impl ApplicationHandler for App {
                 self.rehighlight_at = None;
                 self.rehighlight_edited();
             } else {
-                event_loop.set_control_flow(ControlFlow::WaitUntil(at));
+                wake.by(at);
             }
         }
         if self.mode == edit::Mode::Edit && self.caret.is_some() {
@@ -6859,47 +6878,34 @@ impl ApplicationHandler for App {
                 self.blink_flip = now + CARET_BLINK;
                 self.request_redraw();
             }
-            event_loop.set_control_flow(ControlFlow::WaitUntil(self.blink_flip));
+            wake.by(self.blink_flip);
         }
         if let Some(notice) = self.notice.as_ref() {
             let now = Instant::now();
             match notice.alpha(now) {
                 None => {
                     self.notice = None;
-                    event_loop.set_control_flow(ControlFlow::Wait);
                     self.request_redraw();
                 }
                 Some(alpha) => {
-                    event_loop.set_control_flow(ControlFlow::WaitUntil(notice.wake(now)));
+                    wake.by(notice.wake(now));
                     if alpha < 1.0 {
                         self.request_redraw();
                     }
                 }
             }
         }
-        // The count's rest keeps whichever wake above comes sooner, and
-        // a count that ran leaves no lapsed deadline standing, which
-        // would spin the loop.
         if let Some(at) = self.count_at {
-            let now = Instant::now();
-            if now >= at {
+            if Instant::now() >= at {
                 self.count_at = None;
                 self.recount();
-                if matches!(event_loop.control_flow(), ControlFlow::WaitUntil(t) if t <= now) {
-                    event_loop.set_control_flow(ControlFlow::Wait);
-                }
             } else {
-                let sooner = match event_loop.control_flow() {
-                    ControlFlow::WaitUntil(other) if other > now && other < at => other,
-                    _ => at,
-                };
-                event_loop.set_control_flow(ControlFlow::WaitUntil(sooner));
+                wake.by(at);
             }
         }
         self.maybe_speculate();
-        // Last, so its near tick wins the wake; an early wake costs the
-        // timers above nothing.
-        self.step_fling(event_loop);
+        self.step_fling(&mut wake);
+        event_loop.set_control_flow(wake.control_flow());
     }
 
     /// A background fetch, parse delivery or highlight chunk landed: fold
@@ -7825,6 +7831,25 @@ mod tests {
         assert_eq!(super::ICON_64.len(), 64 * 64 * 4);
         let ico: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/oryx.ico"));
         assert_eq!(&ico[..4], &[0, 0, 1, 0], "ICO header magic");
+    }
+
+    /// The loop wakes for the soonest timer, whatever order they ask
+    /// in, and a pass where none runs sleeps until the next event: a
+    /// stopped timer must not leave a wake behind.
+    #[test]
+    fn the_loop_wakes_for_the_soonest_timer_and_sleeps_without_one() {
+        use winit::event_loop::ControlFlow;
+        let now = std::time::Instant::now();
+        let near = now + std::time::Duration::from_millis(500);
+        let far = now + std::time::Duration::from_secs(2);
+        assert_eq!(super::Wake::default().control_flow(), ControlFlow::Wait);
+        for order in [[near, far], [far, near]] {
+            let mut wake = super::Wake::default();
+            for at in order {
+                wake.by(at);
+            }
+            assert_eq!(wake.control_flow(), ControlFlow::WaitUntil(near));
+        }
     }
 
     /// The disk check's verdict on the open file: a file missing once
