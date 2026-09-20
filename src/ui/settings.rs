@@ -43,7 +43,7 @@ const ROWS: [&str; 9] = [
 const LINE_NUMBERS_ROW: usize = 5;
 const WORD_COUNT_ROW: usize = 6;
 const SAVE_FOCUS_ROW: usize = 7;
-/// The pause row counts seconds, off at zero.
+/// The pause row steps through `autosave::PAUSES`.
 const SAVE_PAUSE_ROW: usize = 8;
 
 /// Font size bounds for both families.
@@ -718,7 +718,7 @@ mod tests {
     }
 
     #[test]
-    fn the_pause_row_steps_by_a_second_from_off() {
+    fn the_pause_row_steps_through_its_choices_from_off() {
         let mut s = settings();
         for _ in 0..20 {
             press(&mut s, NamedKey::ArrowDown);
@@ -737,7 +737,7 @@ mod tests {
             };
             seen.push(seconds);
         }
-        assert_eq!(seen, [0, 1, 2, 1], "Left at off stays off");
+        assert_eq!(seen, [0, 5, 15, 5], "Left at off stays off");
         assert!(
             matches!(press(&mut s, NamedKey::Enter), OverlayResult::Open),
             "a number has nothing to flip"

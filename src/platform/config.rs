@@ -62,7 +62,8 @@ pub struct Config {
     pub save_on_focus_loss: bool,
     /// The open file is saved after a pause of this many seconds since
     /// the last edit; 0, the default, never. A row in the settings
-    /// dialog, up to a minute.
+    /// dialog offers a few choices up to a quarter of an hour; a value
+    /// written by hand is honored as it stands, up to the same limit.
     pub save_after_pause: u32,
     /// Where the welcome page's tips stand in their rotation: the index
     /// of the next tip to show. Advances each time the page shows one,
@@ -793,12 +794,17 @@ mod tests {
     }
 
     #[test]
-    fn a_hand_edited_pause_is_held_to_a_minute() {
+    fn a_hand_edited_pause_is_held_to_the_longest_choice() {
         let path = temp_path("long-pause.toml");
         std::fs::write(&path, "save_after_pause = 3600\n").unwrap();
         let loaded = load_from(&path);
         std::fs::remove_file(&path).unwrap();
-        assert_eq!(loaded.save_after_pause, crate::edit::autosave::PAUSE_MAX);
+        assert_eq!(loaded.save_after_pause, 900);
+        let path = temp_path("odd-pause.toml");
+        std::fs::write(&path, "save_after_pause = 7\n").unwrap();
+        let loaded = load_from(&path);
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(loaded.save_after_pause, 7, "kept as written");
     }
 
     #[test]

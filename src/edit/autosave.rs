@@ -5,8 +5,12 @@
 
 use std::time::{Duration, Instant, SystemTime};
 
-/// The longest pause the settings row offers, in seconds.
-pub const PAUSE_MAX: u32 = 60;
+/// The pauses the settings row offers, in seconds: off, then from five
+/// seconds to a quarter of an hour.
+pub const PAUSES: [u32; 8] = [0, 5, 15, 30, 60, 300, 600, 900];
+
+/// The longest pause, which a hand-written config value is held to.
+pub const PAUSE_MAX: u32 = PAUSES[PAUSES.len() - 1];
 
 /// What an automatic save does at its moment.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -80,18 +84,28 @@ impl Pause {
     }
 }
 
-/// The settings row's value: "off" at 0, else the seconds in words.
+/// The settings row's value: "off" at 0, whole minutes in minutes, any
+/// other number in seconds.
 pub fn pause_label(seconds: u32) -> String {
     match seconds {
         0 => "off".to_string(),
         1 => "1 second".to_string(),
+        60 => "1 minute".to_string(),
+        n if n % 60 == 0 => format!("{} minutes", n / 60),
         n => format!("{n} seconds"),
     }
 }
 
-/// One step of the settings row, held to `0..=PAUSE_MAX`.
+/// One step of the settings row: the next choice above or below the
+/// value, which a hand-written config may have set between two of them.
+/// The ends hold.
 pub fn step_pause(seconds: u32, delta: i32) -> u32 {
-    seconds.saturating_add_signed(delta).min(PAUSE_MAX)
+    let next = if delta > 0 {
+        PAUSES.iter().copied().find(|&p| p > seconds)
+    } else {
+        PAUSES.iter().rev().copied().find(|&p| p < seconds)
+    };
+    next.unwrap_or(seconds.min(PAUSE_MAX))
 }
 
 #[cfg(test)]
@@ -230,18 +244,34 @@ mod tests {
     }
 
     #[test]
-    fn the_row_steps_by_a_second_between_off_and_a_minute() {
-        assert_eq!(step_pause(0, 1), 1);
+    fn the_row_steps_through_the_choices_and_stops_at_both_ends() {
+        let mut seen = vec![0];
+        for _ in 0..9 {
+            seen.push(step_pause(*seen.last().unwrap(), 1));
+        }
+        assert_eq!(seen, [0, 5, 15, 30, 60, 300, 600, 900, 900, 900]);
+        assert_eq!(step_pause(900, -1), 600);
+        assert_eq!(step_pause(5, -1), 0);
         assert_eq!(step_pause(0, -1), 0);
-        assert_eq!(step_pause(59, 1), PAUSE_MAX);
-        assert_eq!(step_pause(PAUSE_MAX, 1), PAUSE_MAX);
-        assert_eq!(step_pause(3, -1), 2);
     }
 
     #[test]
-    fn the_row_reads_off_or_the_seconds() {
+    fn a_hand_written_pause_steps_to_the_choices_around_it() {
+        // The config file may hold any number of seconds up to the
+        // longest choice, and the save honors it as written.
+        assert_eq!(step_pause(2, 1), 5);
+        assert_eq!(step_pause(2, -1), 0);
+        assert_eq!(step_pause(90, 1), 300);
+        assert_eq!(step_pause(90, -1), 60);
+    }
+
+    #[test]
+    fn the_row_reads_off_seconds_or_minutes() {
         assert_eq!(pause_label(0), "off");
-        assert_eq!(pause_label(1), "1 second");
         assert_eq!(pause_label(5), "5 seconds");
+        assert_eq!(pause_label(60), "1 minute");
+        assert_eq!(pause_label(900), "15 minutes");
+        assert_eq!(pause_label(1), "1 second");
+        assert_eq!(pause_label(90), "90 seconds", "not a whole minute");
     }
 }

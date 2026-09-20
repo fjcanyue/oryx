@@ -479,7 +479,12 @@ pub const TIPS: &[Tip] = &[
     Tip {
         kind: TipKind::Tip,
         area: Area::Editing,
-        text: r#"Do you forget to save? Turn on autosave in the settings (`Ctrl+,`), and Oryx saves your file when you switch to another window, or a few seconds after you stop typing, whichever you choose. If another program changed the file in the meantime, Oryx keeps your text and waits for your `Ctrl+S` instead of writing over it."#,
+        text: r#"Do you forget to save? Turn on autosave in the settings (`Ctrl+,`), and Oryx saves your file when you switch to another window, or once you have stopped typing for a while, from 5 seconds to 15 minutes, whichever you choose."#,
+    },
+    Tip {
+        kind: TipKind::Note,
+        area: Area::Editing,
+        text: r#"Autosave does not write over someone else's change. If another program changed your file while you were editing it, Oryx keeps your text, tells you, and waits for your `Ctrl+S`."#,
     },
     Tip {
         kind: TipKind::Note,

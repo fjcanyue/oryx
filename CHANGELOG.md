@@ -76,7 +76,7 @@
 
 ### Autosave
 
-- Two new rows in the settings (`Ctrl+,`) save your file without `Ctrl+S`. `save on focus loss` writes it when you switch to another window. `save after a pause` writes it a number of seconds after your last keystroke, from 1 to 60. Both are off by default. A burst of typing costs one write, and nothing runs while Oryx is idle.
+- Two new rows in the settings (`Ctrl+,`) save your file without `Ctrl+S`. `save on focus loss` writes it when you switch to another window. `save after a pause` writes it once you have stopped typing for the time you choose: 5, 15 or 30 seconds, or 1, 5, 10 or 15 minutes. Both are off by default. A burst of typing costs one write, and nothing runs while Oryx is idle.
 - An automatic save does not write over someone else's change: if the file changed or was deleted on disk, Oryx says so and waits for your `Ctrl+S`. It also waits while the unsaved-changes question is on screen. A note (`Ctrl+M`) has no file yet and is not autosaved.
 - The caret is hidden while the Oryx window is in the background, as in other editors.
 
