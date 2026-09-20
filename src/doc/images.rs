@@ -291,6 +291,68 @@ impl DecodePool {
     }
 }
 
+/// A small render pool behind one queue, mirroring the decode pool.
+/// Dropping it closes the queue; workers drain what remains and exit
+/// on their own. A result lands under its own content-addressed key,
+/// so a superseded document's result cannot overwrite a newer one's.
+struct MermaidPool {
+    sender: std::sync::mpsc::Sender<(String, String, crate::doc::mermaid::MermaidTheme)>,
+}
+
+impl MermaidPool {
+    fn spawn(arrivals: Arrivals, waker: Option<Waker>) -> MermaidPool {
+        let (sender, receiver) =
+            std::sync::mpsc::channel::<(String, String, crate::doc::mermaid::MermaidTheme)>();
+        let receiver = Arc::new(Mutex::new(receiver));
+        // Diagram renders are heavier than decodes; a couple of
+        // workers keep a page of diagrams moving without hogging cores.
+        let workers = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(4)
+            .clamp(1, 4);
+        for _ in 0..workers {
+            let receiver = Arc::clone(&receiver);
+            let arrivals = Arc::clone(&arrivals);
+            let waker = waker.clone();
+            std::thread::spawn(move || loop {
+                let job = receiver.lock().expect("render queue").recv();
+                match job {
+                    Ok((uri, source, theme)) => {
+                        let outcome = crate::doc::mermaid::render(&source, &theme)
+                            .map_err(|err| err.to_string());
+                        arrivals
+                            .lock()
+                            .expect("arrivals lock")
+                            .push(Arrival::Mermaid(uri, outcome));
+                        if let Some(wake) = &waker {
+                            wake();
+                        }
+                    }
+                    Err(_) => break,
+                }
+            });
+        }
+        MermaidPool { sender }
+    }
+
+    fn send(&self, job: (String, String, crate::doc::mermaid::MermaidTheme)) {
+        let _ = self.sender.send(job);
+    }
+}
+
+/// Where a diagram stands, as layout asks before it places anything.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MermaidState {
+    /// The svg is registered; place it.
+    Registered,
+    /// A render is in flight; show the plain placeholder.
+    Pending,
+    /// The render failed; the message feeds the error panel.
+    Failed(String),
+    /// Nothing yet; queue the render.
+    Missing,
+}
+
 /// Whether bytes read as markup rather than a raster header.
 fn looks_svg(bytes: &[u8]) -> bool {
     let head = &bytes[..bytes.len().min(512)];
@@ -334,6 +396,9 @@ pub type SourceSink = Arc<dyn Fn(Vec<SourceEntry>) + Send + Sync>;
 enum Arrival {
     Pixels(String, Option<RgbaImage>),
     Sources(Vec<SourceEntry>),
+    /// A rendered diagram under its own key: the svg, or the failure
+    /// that pins the error panel.
+    Mermaid(String, Result<crate::doc::mermaid::MermaidRender, String>),
 }
 
 /// Results queued by background threads until the main thread folds
@@ -354,6 +419,15 @@ pub struct MediaCache {
     book: HashMap<String, BookImage>,
     /// Book keys with a decode in flight, so a repaint asks only once.
     decoding: std::collections::HashSet<String>,
+    /// Diagram keys with a render in flight, so a relayout asks only
+    /// once; the render answers under the same content-addressed key
+    /// the layout computed, so a stale result can only land as itself.
+    mermaid_pending: std::collections::HashSet<String>,
+    /// Diagram keys that rendered to an error, with the message the
+    /// panel shows; a source or theme change re-keys past it.
+    mermaid_failed: HashMap<String, String>,
+    /// The render pool, spawned on first use and living with the cache.
+    mermaid_pool: Option<MermaidPool>,
     /// Local images' header sizes, so layout never decodes one; None
     /// for a file whose header does not read.
     sizes: HashMap<String, Option<(u32, u32)>>,
@@ -388,6 +462,9 @@ impl MediaCache {
             generated: HashMap::new(),
             book: HashMap::new(),
             decoding: std::collections::HashSet::new(),
+            mermaid_pending: std::collections::HashSet::new(),
+            mermaid_failed: HashMap::new(),
+            mermaid_pool: None,
             sizes: HashMap::new(),
             lru: Vec::new(),
             lru_bytes: 0,
@@ -423,6 +500,47 @@ impl MediaCache {
     /// registered; layout asks before paying for a render.
     pub fn generated(&self, key: &str) -> Option<&GeneratedMedia> {
         self.generated.get(key)
+    }
+
+    /// Where a diagram stands under its key: registered, rendering,
+    /// failed, or not asked for yet.
+    pub fn mermaid_state(&self, key: &str) -> MermaidState {
+        if self.generated.contains_key(key) {
+            return MermaidState::Registered;
+        }
+        if let Some(message) = self.mermaid_failed.get(key) {
+            return MermaidState::Failed(message.clone());
+        }
+        if self.mermaid_pending.contains(key) {
+            return MermaidState::Pending;
+        }
+        MermaidState::Missing
+    }
+
+    /// Diagram renders still in flight; layout settles when this
+    /// reaches zero.
+    pub fn pending_mermaid(&self) -> usize {
+        self.mermaid_pending.len()
+    }
+
+    /// Queues a diagram render once: a key already pending or
+    /// registered asks nothing. The worker lands the result under the
+    /// same content-addressed key, so only the current document's keys
+    /// are ever read back.
+    pub fn queue_mermaid(
+        &mut self,
+        key: String,
+        source: String,
+        theme: crate::doc::mermaid::MermaidTheme,
+    ) {
+        if self.mermaid_pending.contains(&key) || self.generated.contains_key(&key) {
+            return;
+        }
+        self.mermaid_pending.insert(key.clone());
+        let pool = self.mermaid_pool.get_or_insert_with(|| {
+            MermaidPool::spawn(Arc::clone(&self.arrivals), self.waker.clone())
+        });
+        pool.send((key, source, theme));
     }
 
     /// Adopts book image sources: bytes and header dimensions per key.
@@ -514,6 +632,8 @@ impl MediaCache {
     /// book image's size was known from its header, so its pixels only
     /// repaint; a remote fetch's size lands with it, so layout reruns,
     /// unless the fetch refreshed a placed copy at the same size. A
+    /// diagram's size lands with it the same way, and its failure
+    /// swaps the placeholder for the error panel — both relayout. A
     /// sources batch registers sizes for blocks not yet laid out and
     /// asks nothing by itself.
     pub fn drain_remote(&mut self) -> Folded {
@@ -526,6 +646,22 @@ impl MediaCache {
             let (url, image) = match arrival {
                 Arrival::Sources(sources) => {
                     self.adopt(sources);
+                    continue;
+                }
+                Arrival::Mermaid(key, outcome) => {
+                    self.mermaid_pending.remove(&key);
+                    folded = folded.max(Folded::Relayout);
+                    match outcome {
+                        Ok(rendered) => self.register_generated_svg(
+                            key,
+                            rendered.svg,
+                            rendered.width.max(1.0) as u32,
+                            rendered.height.max(1.0) as u32,
+                        ),
+                        Err(message) => {
+                            self.mermaid_failed.insert(key, message);
+                        }
+                    }
                     continue;
                 }
                 Arrival::Pixels(url, image) => (url, image),

@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 use cosmic_text::{Align, Attrs, Buffer, Family, Metrics, Shaping, Style, Weight};
 
 use super::metrics;
-use crate::doc::images::MediaCache;
+use crate::doc::images::{MediaCache, MermaidState};
 use crate::doc::mermaid;
 use crate::doc::model::{
     AlertKind, Block, BlockKind, Document, Marker, Span, SpanImage, SpanScript,
@@ -4469,27 +4469,56 @@ fn layout_mermaid(
     // cache key: a theme switch misses by construction.
     let palette = mermaid::MermaidTheme::from_oryx(theme);
     let uri = mermaid::cache_key(text, &palette).uri();
-    if media.generated(&uri).is_none() {
-        match mermaid::render(text, &palette) {
-            Ok(rendered) => media.register_generated_svg(
-                uri.clone(),
-                rendered.svg,
-                rendered.width.max(1.0) as u32,
-                rendered.height.max(1.0) as u32,
-            ),
-            Err(err) => {
+    // The export's pass reads pixels synchronously, so it renders in
+    // place; the interactive path queues the render and holds the plain
+    // placeholder in the seat until the arrival relayouts.
+    if cfg.print {
+        if media.generated(&uri).is_none() {
+            match mermaid::render(text, &palette) {
+                Ok(rendered) => media.register_generated_svg(
+                    uri.clone(),
+                    rendered.svg,
+                    rendered.width.max(1.0) as u32,
+                    rendered.height.max(1.0) as u32,
+                ),
+                Err(err) => {
+                    return layout_mermaid_error(
+                        fonts,
+                        theme,
+                        cfg,
+                        source_label(text),
+                        &err.to_string(),
+                        block_index,
+                        x0,
+                        y0,
+                        avail,
+                        out,
+                    )
+                }
+            }
+        }
+    } else {
+        match media.mermaid_state(&uri) {
+            MermaidState::Registered => {}
+            MermaidState::Failed(message) => {
                 return layout_mermaid_error(
                     fonts,
                     theme,
                     cfg,
                     source_label(text),
-                    &err,
+                    &message,
                     block_index,
                     x0,
                     y0,
                     avail,
                     out,
-                )
+                );
+            }
+            state => {
+                if state == MermaidState::Missing {
+                    media.queue_mermaid(uri.clone(), text.to_string(), palette);
+                }
+                return layout_mermaid_pending(fonts, theme, cfg, block_index, x0, y0, avail, out);
             }
         }
     }
@@ -4499,7 +4528,7 @@ fn layout_mermaid(
             theme,
             cfg,
             source_label(text),
-            &mermaid::MermaidError::InvalidDimensions,
+            &mermaid::MermaidError::InvalidDimensions.to_string(),
             block_index,
             x0,
             y0,
@@ -4526,15 +4555,14 @@ fn source_label(text: &str) -> &str {
     text.lines().next().unwrap_or_default()
 }
 
-/// A failed diagram's panel: the error and its reason in a bordered
-/// box, the way an unloadable image reads. The document continues.
+/// The shared panel tail: a label shaped inside a bordered box.
 #[allow(clippy::too_many_arguments)]
-fn layout_mermaid_error(
+fn layout_mermaid_panel(
     fonts: &mut FontStore,
     theme: &Theme,
     cfg: &ViewConfig,
-    caption: &str,
-    error: &mermaid::MermaidError,
+    label: &[Span],
+    border: Rgba,
     block_index: usize,
     x0: f32,
     y0: f32,
@@ -4546,22 +4574,6 @@ fn layout_mermaid_error(
     let source = "";
     let pad = metrics::PLACEHOLDER_PAD * cfg.zoom;
     let radius = metrics::CORNER_RADIUS * cfg.zoom;
-    let label = {
-        let caption = if caption.is_empty() {
-            "Mermaid diagram error".to_string()
-        } else {
-            format!("Mermaid diagram error — {caption}")
-        };
-        // A renderer message naming a long expected-token list must not
-        // grow the panel without bound.
-        let message = {
-            let text = error.to_string();
-            let cut = text.char_indices().nth(300).map_or(text.len(), |(i, _)| i);
-            let (head, _) = text.split_at(cut);
-            head.to_string()
-        };
-        [Span::plain(caption), Span::plain(format!(": {message}"))]
-    };
     let base = BlockStyle {
         size: cfg.body_size * cfg.zoom,
         color: theme.blocks.frontmatter_fg,
@@ -4575,7 +4587,7 @@ fn layout_mermaid_error(
         theme,
         cfg,
         source,
-        &label,
+        label,
         false,
         &base,
         x0 + pad,
@@ -4589,12 +4601,89 @@ fn layout_mermaid_error(
         [
             DecoRect::fill(x0, y0, avail, box_h, theme.blocks.frontmatter_bg)
                 .rounded(radius, radius),
-            DecoRect::fill(x0, y0, avail, box_h, theme.alerts.warning)
+            DecoRect::fill(x0, y0, avail, box_h, border)
                 .rounded(radius, radius)
                 .stroked((1.0 * cfg.zoom).max(1.0)),
         ],
     );
     box_h
+}
+
+/// The plain seat a queued diagram holds until its pixels land: one
+/// quiet line, no spinner.
+#[allow(clippy::too_many_arguments)]
+fn layout_mermaid_pending(
+    fonts: &mut FontStore,
+    theme: &Theme,
+    cfg: &ViewConfig,
+    block_index: usize,
+    x0: f32,
+    y0: f32,
+    avail: f32,
+    out: &mut LayoutDoc,
+) -> f32 {
+    let label = {
+        let mut span = Span::plain("Rendering diagram…");
+        span.italic = true;
+        [span]
+    };
+    layout_mermaid_panel(
+        fonts,
+        theme,
+        cfg,
+        &label,
+        theme.blocks.code_border,
+        block_index,
+        x0,
+        y0,
+        avail,
+        out,
+    )
+}
+
+/// A failed diagram's panel: the error and its reason in a bordered
+/// box, the way an unloadable image reads. The document continues.
+#[allow(clippy::too_many_arguments)]
+fn layout_mermaid_error(
+    fonts: &mut FontStore,
+    theme: &Theme,
+    cfg: &ViewConfig,
+    caption: &str,
+    message: &str,
+    block_index: usize,
+    x0: f32,
+    y0: f32,
+    avail: f32,
+    out: &mut LayoutDoc,
+) -> f32 {
+    let caption = if caption.is_empty() {
+        "Mermaid diagram error".to_string()
+    } else {
+        format!("Mermaid diagram error — {caption}")
+    };
+    // A renderer message naming a long expected-token list must not
+    // grow the panel without bound.
+    let message = {
+        let cut = message
+            .char_indices()
+            .nth(300)
+            .map_or(message.len(), |(i, _)| i);
+        let (head, _) = message.split_at(cut);
+        head.to_string()
+    };
+    let label = [Span::plain(caption), Span::plain(format!(": {message}"))];
+    layout_mermaid_panel(
+        fonts,
+        theme,
+        cfg,
+        &label,
+        theme.alerts.warning,
+        block_index,
+        x0,
+        y0,
+        avail,
+        out,
+    )
 }
 
 /// Vertical role of one piece of a math literal.
