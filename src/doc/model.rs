@@ -274,6 +274,12 @@ pub enum BlockKind {
     MathBlock {
         tex: String,
     },
+    /// A fenced ` ```mermaid ` block: the diagram source as line ranges
+    /// over the document source the way code bodies are, so selection
+    /// and future source navigation keep their coordinates.
+    Mermaid {
+        body: CodeBody,
+    },
     Frontmatter {
         entries: Vec<(String, String)>,
     },

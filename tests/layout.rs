@@ -4277,3 +4277,23 @@ fn a_paragraph_with_thousands_of_inline_spans_keeps_every_span_in_order() {
         "every span's text reaches the runs once"
     );
 }
+
+/// The interim Mermaid panel: a bordered box in the block's seat, the
+/// label inside, and the paragraphs around it untouched.
+#[test]
+fn a_mermaid_block_lays_out_a_placeholder_panel() {
+    let (doc, l) = lay2(
+        "# Diagram\n\n```mermaid\nflowchart LR\n  A --> B\n```\n\nAfter.",
+        800.0,
+    );
+    let framed: Vec<&DecoRect> = l
+        .rects
+        .iter()
+        .filter(|r| r.stroke > 0.0 && r.width > 600.0)
+        .collect();
+    assert_eq!(framed.len(), 1, "one bordered panel, not {:#?}", l.rects);
+    assert!(framed[0].height > 20.0, "the panel holds its label");
+    find_text(&l, &doc, "Mermaid diagram");
+    find_text(&l, &doc, "After.");
+    assert!(framed[0].y > 50.0, "the panel sits below the heading");
+}

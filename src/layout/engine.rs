@@ -1916,6 +1916,7 @@ fn block_metrics(block: &Block, cfg: &ViewConfig, plain: bool) -> Option<(Option
         | BlockKind::Table { .. }
         | BlockKind::Image { .. }
         | BlockKind::MathBlock { .. }
+        | BlockKind::Mermaid { .. }
         | BlockKind::Frontmatter { .. }
         | BlockKind::ChapterBreak { .. }
         | BlockKind::PageBreak => cfg.body_size * cfg.zoom,
@@ -2282,6 +2283,19 @@ pub(crate) fn shape_kind(
             scratch,
         ),
         BlockKind::CodeBlock { .. } => 0.0,
+        // The interim panel until the renderer lands; the model already
+        // holds the diagram source, so selection reads it either way.
+        BlockKind::Mermaid { .. } => layout_mermaid_placeholder(
+            fonts,
+            theme,
+            cfg,
+            source,
+            block_index,
+            x_base,
+            0.0,
+            avail,
+            scratch,
+        ),
         // The chapter seam: one blank body line, nothing drawn; the
         // block spacing on both sides completes the larger gap.
         BlockKind::ChapterBreak { .. } => metrics::LINE_HEIGHT * base_size,
@@ -4406,6 +4420,63 @@ fn layout_image(
         cfg,
         source,
         &alt_span,
+        false,
+        &base,
+        x0 + pad,
+        y0 + pad,
+        avail - 2.0 * pad,
+        out,
+    );
+    let box_h = text_h + 2.0 * pad;
+    out.rects.splice(
+        rects_mark..rects_mark,
+        [
+            DecoRect::fill(x0, y0, avail, box_h, theme.blocks.frontmatter_bg)
+                .rounded(radius, radius),
+            DecoRect::fill(x0, y0, avail, box_h, theme.blocks.code_border)
+                .rounded(radius, radius)
+                .stroked((1.0 * cfg.zoom).max(1.0)),
+        ],
+    );
+    box_h
+}
+
+/// A Mermaid block's interim panel, until the renderer lands: a
+/// bordered box naming the diagram, the way an unloadable image reads.
+/// The rendered diagram replaces this once media carries it.
+#[allow(clippy::too_many_arguments)]
+fn layout_mermaid_placeholder(
+    fonts: &mut FontStore,
+    theme: &Theme,
+    cfg: &ViewConfig,
+    source: &str,
+    block_index: usize,
+    x0: f32,
+    y0: f32,
+    avail: f32,
+    out: &mut LayoutDoc,
+) -> f32 {
+    let pad = metrics::PLACEHOLDER_PAD * cfg.zoom;
+    let radius = metrics::CORNER_RADIUS * cfg.zoom;
+    let label = {
+        let mut span = Span::plain("Mermaid diagram");
+        span.italic = true;
+        [span]
+    };
+    let base = BlockStyle {
+        size: cfg.body_size * cfg.zoom,
+        color: theme.blocks.frontmatter_fg,
+        bold: false,
+        block_index,
+        justify: false,
+    };
+    let rects_mark = out.rects.len();
+    let text_h = shape_block(
+        fonts,
+        theme,
+        cfg,
+        source,
+        &label,
         false,
         &base,
         x0 + pad,

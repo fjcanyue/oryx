@@ -82,7 +82,7 @@ pub(crate) fn block_pieces(doc: &Document, index: usize) -> Vec<Piece<'_>> {
             }
             span_pieces(&mut out, spans, 0, source);
         }
-        BlockKind::CodeBlock { lines, .. } => {
+        BlockKind::CodeBlock { lines, .. } | BlockKind::Mermaid { body: lines } => {
             for i in 0..lines.len() {
                 if i > 0 {
                     out.push(Piece::Sep("\n"));
@@ -532,7 +532,7 @@ pub fn word_at(doc: &Document, pos: ModelPos) -> Option<Selection> {
 /// paragraph is to the block's kind, one code line or one table cell.
 pub fn paragraph_at(doc: &Document, pos: ModelPos) -> Option<Selection> {
     match &doc.blocks[pos.block].kind {
-        BlockKind::CodeBlock { lines, .. } => {
+        BlockKind::CodeBlock { lines, .. } | BlockKind::Mermaid { body: lines } => {
             if pos.span >= lines.len() {
                 return None;
             }
