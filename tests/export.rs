@@ -526,6 +526,50 @@ fn a_repeated_image_is_embedded_once() {
     assert!(count <= 2, "one source, one image and at most its mask");
 }
 
+/// A mermaid diagram rides the ordinary image path into the PDF: one
+/// image xobject, sampled wide enough to read, the document around it
+/// intact.
+#[test]
+fn a_mermaid_diagram_exports_as_an_embedded_image() {
+    let doc = markdown::parse(
+        "# Diagram\n\n```mermaid\nflowchart LR\n  A --> B\n```\n\nAfter the diagram.",
+    );
+    let pdf = Pdf::load_mem(&export_to_bytes(&doc, PageSize::A4)).unwrap();
+    assert!(
+        image_xobjects(&pdf) >= 1,
+        "the diagram embeds, not a placeholder"
+    );
+    let widths = image_sample_widths(&pdf);
+    assert!(
+        widths.iter().any(|w| *w >= 100),
+        "the sample is readable, not a thumbnail: {widths:?}"
+    );
+    let text = pdf.extract_text(&[1]).unwrap();
+    assert!(text.contains("Diagram"), "the heading stands: {text}");
+    assert!(
+        text.contains("After the diagram"),
+        "the paragraph after stands: {text}"
+    );
+}
+
+/// Math, a mermaid diagram and a raster image in one document: every
+/// piece exports, none disturbs the others.
+#[test]
+fn math_mermaid_and_image_export_together() {
+    let doc = markdown::parse(
+        "$$\nE=mc^2\n$$\n\n```mermaid\nflowchart LR\n  A --> B\n```\n\n![logo](oryx-test.png)",
+    );
+    let pdf = Pdf::load_mem(&export_to_bytes(&doc, PageSize::A4)).unwrap();
+    assert!(
+        image_xobjects(&pdf) >= 2,
+        "the diagram and the logo both embed"
+    );
+    let text = pdf.extract_text(&[1]).unwrap();
+    // The math face extracts as mathematical alphanumeric symbols, so
+    // the equation's spine is the checkable part.
+    assert!(text.contains('='), "the math stands: {text}");
+}
+
 fn image_sample_widths(pdf: &Pdf) -> Vec<i64> {
     pdf.objects
         .values()

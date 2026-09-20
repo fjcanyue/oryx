@@ -4324,6 +4324,53 @@ fn a_wide_mermaid_scales_proportionally() {
     assert!(narrow.width < wide.width, "the wide column shows it larger");
 }
 
+/// The resize behavior: the same document relaid at every window width
+/// keeps the diagram inside the column with its proportions.
+#[test]
+fn a_mermaid_refits_through_resizes() {
+    let source = "```mermaid\nflowchart LR\n  A --> B --> C\n```";
+    let mut ratio: Option<f32> = None;
+    for width in [1200.0, 800.0, 500.0] {
+        let l = lay(source, width);
+        let image = &l.images[0];
+        assert!(image.width <= width, "fits {width}");
+        assert!(image.width > 0.0 && image.height > 0.0);
+        let current = image.height / image.width;
+        if let Some(seen) = ratio {
+            assert!(
+                (seen - current).abs() < 1e-3,
+                "aspect holds through the resize"
+            );
+        }
+        ratio = Some(current);
+    }
+}
+
+/// The diagram reaches the pixels: painting the band over the placed
+/// image leaves ink that is not the surface.
+#[test]
+fn a_mermaid_diagram_reaches_the_pixels() {
+    let t = Theme::default_dark();
+    let doc = markdown::parse("```mermaid\nflowchart LR\n  A --> B\n```");
+    let mut media = MediaCache::new(PathBuf::from("."));
+    let mut f = fonts();
+    let l = layout(&doc, &t, &mut f, &mut media, &cfg(), 800.0);
+    let image = &l.images[0];
+    let band_h = (image.y + image.height).ceil().max(1.0) as u32 + 4;
+    let pixels = oryx::paint::band(&l, &doc, &t, &mut f, &mut media, &[], 0.0, 800, band_h);
+    let bg = t.surface.background;
+    let bgpx = ((bg.r as u32) << 16) | ((bg.g as u32) << 8) | bg.b as u32;
+    let mut inked = 0usize;
+    for y in 0..band_h as usize {
+        for x in image.x as usize..(image.x + image.width) as usize {
+            if pixels[y * 800 + x] != bgpx {
+                inked += 1;
+            }
+        }
+    }
+    assert!(inked > 50, "the diagram paints ink, got {inked}");
+}
+
 /// A broken diagram draws the error panel and the valid one after it
 /// still renders: one bad block never poisons the next.
 #[test]
