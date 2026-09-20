@@ -5244,8 +5244,7 @@ impl App {
             return;
         };
         if let Some(key) = self.document.book_id.clone() {
-            self.positions.remember(&key, offset, self.cfg.direction);
-            self.positions.save();
+            self.positions.file(&key, offset, self.cfg.direction);
         } else if self.mode == edit::Mode::Read {
             if let Some(path) = self.path.clone() {
                 self.read_marks.insert(path.clone(), offset);
@@ -5530,6 +5529,11 @@ impl App {
         self.sel_anchor = None;
         self.pending_recolor.clear();
         self.cfg.justify = justify_pref(&self.config, &self.document);
+        // Another window may have filed this book's place since this one
+        // read the list.
+        if self.document.book_id.is_some() {
+            self.positions.refresh();
+        }
         // The reading direction is per file: a book's from the store, a
         // plain file's from the session map, automatic for a fresh one.
         self.cfg.direction = match self.document.book_id.as_deref() {
@@ -6132,8 +6136,7 @@ impl App {
         self.cfg.direction = next;
         if let Some(key) = self.document.book_id.clone() {
             let offset = self.top_offset().unwrap_or(0);
-            self.positions.remember(&key, offset, next);
-            self.positions.save();
+            self.positions.file(&key, offset, next);
         } else if let Some(path) = self.path.clone() {
             self.direction_marks.insert(path, next);
         }

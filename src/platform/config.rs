@@ -2,9 +2,9 @@
 //! directory, and the book positions beside it. Any read problem yields
 //! defaults, never an error, and a value outside its range is held to
 //! it. Both files are written through a temporary file renamed over the
-//! old one, so a crash mid-write never leaves a half file. The settings
-//! file is shared by every window: a save puts in what this window
-//! changed and keeps the rest as the file has it.
+//! old one, so a crash mid-write never leaves a half file. Both files
+//! are shared by every window: a save puts in what this window changed,
+//! a setting or its book's place, and keeps the rest as the file has it.
 
 use std::path::{Path, PathBuf};
 
@@ -200,10 +200,48 @@ impl Positions {
     }
 
     pub fn load_from(path: &Path) -> Positions {
-        std::fs::read_to_string(path)
-            .ok()
-            .and_then(|text| toml::from_str(&text).ok())
-            .unwrap_or_default()
+        Self::read(path).unwrap_or_default()
+    }
+
+    /// The list of `path`, None for a file that is missing or does not
+    /// read.
+    fn read(path: &Path) -> Option<Positions> {
+        let text = std::fs::read_to_string(path).ok()?;
+        toml::from_str(&text).ok()
+    }
+
+    /// Takes the list as the file has it now: another window may have
+    /// filed its book since this one read it. A file that does not read
+    /// leaves the list in memory as it is.
+    pub fn refresh(&mut self) {
+        if let Some(fresh) = positions_path().and_then(|p| Self::read(&p)) {
+            *self = fresh;
+        }
+    }
+
+    /// Files a book's place and writes the list. Every window shares the
+    /// file, a book in each: the place goes into the list as the file
+    /// has it at this moment, or the window that closes last would put
+    /// back every other book's place as its own launch had read it.
+    pub fn file(&mut self, key: &str, offset: usize, direction: crate::layout::DirectionMode) {
+        match positions_path() {
+            Some(p) => self.file_to(&p, key, offset, direction),
+            None => self.remember(key, offset, direction),
+        }
+    }
+
+    pub fn file_to(
+        &mut self,
+        path: &Path,
+        key: &str,
+        offset: usize,
+        direction: crate::layout::DirectionMode,
+    ) {
+        if let Some(fresh) = Self::read(path) {
+            *self = fresh;
+        }
+        self.remember(key, offset, direction);
+        self.save_to(path);
     }
 
     pub fn save(&self) {
@@ -389,6 +427,51 @@ mod tests {
 
     fn temp_path(name: &str) -> PathBuf {
         std::env::temp_dir().join(format!("oryx-config-{}-{name}", std::process::id()))
+    }
+
+    /// Two windows, a book in each, one positions file: the window that
+    /// closes last wrote the list as its launch had read it, and the
+    /// other book's place was gone.
+    #[test]
+    fn two_windows_keep_each_other_s_place_in_a_book() {
+        use crate::layout::DirectionMode;
+        let path = temp_path("two-books.toml");
+        let _ = std::fs::remove_file(&path);
+        let mut a = Positions::load_from(&path);
+        let mut b = Positions::load_from(&path);
+        a.file_to(&path, "holmes", 1275, DirectionMode::default());
+        b.file_to(&path, "small", 40, DirectionMode::default());
+        let on_disk = Positions::load_from(&path);
+        assert_eq!(
+            on_disk.lookup("holmes"),
+            Some(1275),
+            "the first window's book"
+        );
+        assert_eq!(on_disk.lookup("small"), Some(40));
+        // The window that filed last now knows the other's place too,
+        // for a book it opens later.
+        assert_eq!(b.lookup("holmes"), Some(1275));
+        // A window files its own book again over its older place.
+        a.file_to(&path, "holmes", 3000, DirectionMode::default());
+        let on_disk = Positions::load_from(&path);
+        assert_eq!(on_disk.lookup("holmes"), Some(3000));
+        assert_eq!(on_disk.lookup("small"), Some(40));
+        assert_eq!(on_disk.book.len(), 2);
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn a_positions_file_that_does_not_read_keeps_the_places_in_memory() {
+        use crate::layout::DirectionMode;
+        let path = temp_path("broken-books.toml");
+        let mut held = Positions::default();
+        held.remember("kept", 12, DirectionMode::default());
+        std::fs::write(&path, "book = [broken").unwrap();
+        held.file_to(&path, "new", 7, DirectionMode::default());
+        let on_disk = Positions::load_from(&path);
+        assert_eq!(on_disk.lookup("kept"), Some(12));
+        assert_eq!(on_disk.lookup("new"), Some(7));
+        std::fs::remove_file(&path).unwrap();
     }
 
     /// Two windows share the file. Each wrote its whole memory, so the
