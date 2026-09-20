@@ -7,5 +7,6 @@ pub mod images;
 pub mod kindle;
 pub mod load;
 pub mod markdown;
+pub mod mermaid;
 pub mod model;
 pub mod stream;
