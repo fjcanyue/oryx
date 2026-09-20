@@ -61,6 +61,10 @@ The command vocabulary is KaTeX compatible: Greek, binary operators, relations a
 
 ![Typeset math in Oryx](screenshots/math.png)
 
+### Diagrams
+
+A fenced `mermaid` block renders as the diagram itself: flowcharts, sequence, class, state, ER, mindmap, pie, timeline, gantt and git graphs, drawn by a native Rust renderer — no browser engine, no JavaScript, no network. Diagrams follow the active theme, render off the UI thread and cache per source, so scrolling back to one costs nothing. A diagram wider than the column shrinks to fit, keeping its proportions, and PDF export includes it. An invalid diagram shows an error panel in its place and the document reads on. The renderer aims for mermaid.js compatibility but is a separate implementation, so a few of the newest syntax forms may differ. [SYNTAX.md](SYNTAX.md#diagrams) shows the syntax and [examples/sample-mermaid.md](examples/sample-mermaid.md) one of every kind.
+
 ## Books
 
 Oryx opens EPUB, FB2, MOBI and AZW3 (Kindle) books and renders them as one continuous document, in the active theme rather than the book's own styling. The book keeps its structure: chapter headings, italics and bold (including the ones its stylesheet sets), images and the cover, tables and highlighted code. The first chapters display immediately and the rest of the book loads in the background. The window title shows the book's title and its format, which helps when the same book exists in several formats. FB2 files zipped as `.fb2.zip` or `.fbz` open too.
