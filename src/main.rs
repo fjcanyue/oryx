@@ -36,6 +36,15 @@ fn launch(path: Option<PathBuf>) -> app::Launch {
     }
 }
 
+/// Why `--recover` cannot start on `folder`, when it holds no note at
+/// all: a wrong path gets a plain line in the terminal, as any other
+/// wrong argument does, instead of a window that has nothing to show.
+/// A folder another Oryx holds is the window's to report.
+fn recover_refusal(folder: &std::path::Path) -> Option<String> {
+    let note = folder.join(oryx::platform::notes::NOTE_NAME);
+    (!note.is_file()).then(|| format!("no note to recover in {}", folder.display()))
+}
+
 /// The first line of the usage, which a refused command line repeats.
 const USAGE_LINE: &str = "Usage: oryx [OPTIONS] [FILE | FOLDER]";
 
@@ -186,17 +195,29 @@ fn main() -> ExitCode {
             theme,
             beside,
             recover,
-        } => match app::run(
-            recover.map_or_else(|| launch(path), app::Launch::Recover),
-            theme,
-            beside,
-        ) {
-            Ok(()) => ExitCode::SUCCESS,
-            Err(error) => {
-                eprintln!("oryx: {error}");
-                ExitCode::FAILURE
+        } => {
+            if let Some(message) = recover.as_deref().and_then(recover_refusal) {
+                eprintln!("oryx: {message}");
+                return ExitCode::FAILURE;
             }
-        },
+            run(
+                recover.map_or_else(|| launch(path), app::Launch::Recover),
+                theme,
+                beside,
+            )
+        }
+    }
+}
+
+/// The window's whole life; an error that ends it is named in the
+/// terminal.
+fn run(launch: app::Launch, theme: Option<String>, beside: Option<(i32, i32)>) -> ExitCode {
+    match app::run(launch, theme, beside) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("oryx: {error}");
+            ExitCode::FAILURE
+        }
     }
 }
 
@@ -325,6 +346,23 @@ mod tests {
 
     /// The private flag a running copy passes to the second window it
     /// opens: where to place it, a step down and right of itself.
+    #[test]
+    fn recovering_from_a_folder_without_a_note_is_refused_in_words() {
+        let dir = std::env::temp_dir().join(format!("oryx-recover-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        assert_eq!(
+            recover_refusal(&dir),
+            Some(format!("no note to recover in {}", dir.display()))
+        );
+        assert_eq!(
+            recover_refusal(std::path::Path::new("this")),
+            Some("no note to recover in this".to_string())
+        );
+        std::fs::write(dir.join("untitled.md"), "kept").unwrap();
+        assert_eq!(recover_refusal(&dir), None);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     #[test]
     fn the_recover_flag_carries_a_folder() {
         assert_eq!(

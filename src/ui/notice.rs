@@ -32,6 +32,13 @@ impl Notice {
         &self.text
     }
 
+    /// The hold starts over at `now`. A notice raised while Oryx starts
+    /// is born before the window is on screen; restarted at the first
+    /// frame, its two seconds are seconds the reader can see.
+    pub fn restart(&mut self, now: Instant) {
+        self.born = now;
+    }
+
     /// The next instant the notice needs the loop: the fade's start
     /// while holding, else the next fade tick.
     pub fn wake(&self, now: Instant) -> Instant {
@@ -111,6 +118,20 @@ pub fn draw(painter: &mut Painter, theme: &Theme, text: &str, alpha: f32, width:
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_restarted_notice_holds_its_full_time_again() {
+        let t0 = Instant::now();
+        let mut notice = Notice::new("The note could not be recovered", t0);
+        let shown = t0 + Duration::from_millis(1500);
+        notice.restart(shown);
+        assert_eq!(notice.alpha(shown + Duration::from_millis(1900)), Some(1.0));
+        assert_eq!(notice.wake(shown), shown + HOLD);
+        assert_eq!(
+            notice.alpha(shown + HOLD + FADE + Duration::from_millis(1)),
+            None
+        );
+    }
 
     #[test]
     fn the_wake_names_the_fade_start_then_ticks() {

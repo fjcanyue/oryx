@@ -366,6 +366,7 @@ pub fn run(
         caret_snap: false,
         blink_visible: true,
         blink_flip: Instant::now(),
+        drawn_once: false,
         focused: true,
         pause_save: autosave::Pause::default(),
         note_seat: None,
@@ -1143,6 +1144,8 @@ struct App {
     /// every caret action restarts the visible half.
     blink_visible: bool,
     blink_flip: Instant,
+    /// False until the first frame is drawn.
+    drawn_once: bool,
     /// Whether the window has the keyboard focus. In the background the
     /// caret is not painted and its blink timer does not run.
     focused: bool,
@@ -6655,6 +6658,14 @@ impl App {
     }
 
     fn redraw(&mut self) {
+        // A notice raised while Oryx was starting is older than the
+        // window; its hold starts with the first frame, or it would be
+        // half spent before anyone could read it.
+        if !std::mem::replace(&mut self.drawn_once, true) {
+            if let Some(notice) = self.notice.as_mut() {
+                notice.restart(Instant::now());
+            }
+        }
         // Frames mean interaction; idle draws nothing, so the disk
         // check rides them without ever waking the loop itself.
         self.check_disk();
