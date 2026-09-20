@@ -120,6 +120,48 @@ pub struct MermaidRender {
     pub height: f32,
 }
 
+/// The cache namespace version: bump it when renderer behavior changes
+/// and every old entry misses.
+pub const CACHE_VERSION: &str = "oryx-mermaid-v1";
+
+/// A diagram's identity in the media cache: the version, the source,
+/// and the theme fingerprint hashed together. A typed key, not a bare
+/// String: same source under a different theme must not hit.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct MermaidCacheKey(String);
+
+impl MermaidCacheKey {
+    /// The media-cache address the diagram registers under.
+    pub fn uri(&self) -> String {
+        format!("mermaid://{}", self.0)
+    }
+}
+
+/// FNV-1a, the hash the fetch cache already keys by, fed the version,
+/// the theme's six roles, then the source.
+pub fn cache_key(source: &str, theme: &MermaidTheme) -> MermaidCacheKey {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    let mut feed = |bytes: &[u8]| {
+        for byte in bytes {
+            hash ^= u64::from(*byte);
+            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+    };
+    feed(CACHE_VERSION.as_bytes());
+    for color in [
+        theme.background,
+        theme.foreground,
+        theme.primary,
+        theme.border,
+        theme.line,
+        theme.accent,
+    ] {
+        feed(&[color.r, color.g, color.b, color.a]);
+    }
+    feed(source.as_bytes());
+    MermaidCacheKey(format!("{hash:016x}"))
+}
+
 /// Renders diagram source into an svg with its natural size. The
 /// source arrives trimmed by the caller or here; empty never reaches
 /// the renderer.
