@@ -126,6 +126,79 @@ pub fn tab_nests(line: &str, col: usize) -> bool {
     }
 }
 
+/// Why Tab leaves a run of markdown list items where they are.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NestRefusal {
+    /// No list item stands above to nest under.
+    NoItemAbove,
+    /// The first item is already a level below the item above it.
+    AlreadyNested,
+}
+
+impl NestRefusal {
+    pub fn message(self) -> &'static str {
+        match self {
+            NestRefusal::NoItemAbove => "No list item above to nest under",
+            NestRefusal::AlreadyNested => "Already nested under the item above",
+        }
+    }
+}
+
+/// The columns a line's leading whitespace spans, a tab reaching the
+/// next multiple of four as markdown counts it.
+fn indent_columns(indent: &str) -> usize {
+    indent.bytes().fold(0, |col, b| match b {
+        b'\t' => col + 4 - col % 4,
+        _ => col + 1,
+    })
+}
+
+/// The indentation of an unquoted list item, in columns; None for any
+/// other line.
+fn item_columns(line: &str) -> Option<usize> {
+    let (indent, quote) = marker_seat(line);
+    (quote == indent && list_marker(&line[indent..]).is_some())
+        .then(|| indent_columns(&line[..indent]))
+}
+
+/// The outliner's rule, which is markdown's too: a list item sits at
+/// most one level below the item above it. Indented any further, or
+/// with no item above, it stops being a list item: after a blank line
+/// four columns make an indented code block, and under a paragraph the
+/// line joins it as text. Answers the refusal for one more indent over
+/// the lines `start..end` when every one of them is an unquoted list
+/// item; the first decides for the run. Any other selection indents
+/// freely, four columns being how a code block is asked for.
+///
+/// The item above is the nearest one going up, across blank lines, the
+/// indented lines of an item's own text, and margin lines that reach an
+/// item without a blank line between, its lazy continuation. A margin
+/// line cut off from every item by a blank line is a paragraph of the
+/// document, and it ended the list.
+pub fn nest_refusal(source: &str, start: usize, end: usize) -> Option<NestRefusal> {
+    let mut items = source[start..end]
+        .split('\n')
+        .filter(|line| !line.trim().is_empty())
+        .map(item_columns);
+    let current = items.next()??;
+    if !items.all(|item| item.is_some()) {
+        return None;
+    }
+    let mut margin_run = false;
+    for line in source[..start].lines().rev() {
+        if line.trim().is_empty() {
+            if margin_run {
+                return Some(NestRefusal::NoItemAbove);
+            }
+        } else if let Some(above) = item_columns(line) {
+            return (current > above).then_some(NestRefusal::AlreadyNested);
+        } else if !line.starts_with([' ', '\t']) {
+            margin_run = true;
+        }
+    }
+    Some(NestRefusal::NoItemAbove)
+}
+
 /// The seat a list marker would stand on: the byte width of the line's
 /// indentation, and of the quote run with each `>`'s trailing
 /// whitespace after it.
@@ -1672,6 +1745,90 @@ mod tests {
         assert!(!tab_nests("> quoted", 2), "a bare quote never nests");
         assert!(!tab_nests("plain", 0));
         assert!(!tab_nests("    code", 4));
+    }
+
+    /// The refusal for a Tab over the whole of `region`, found in
+    /// `source` by its text.
+    fn refusal_in(source: &str, region: &str) -> Option<NestRefusal> {
+        let start = source.find(region).expect("the region is in the source");
+        nest_refusal(source, start, start + region.len())
+    }
+
+    #[test]
+    fn an_item_nests_under_the_item_above_it() {
+        assert_eq!(refusal_in("- a\n- b\n", "- b"), None);
+        assert_eq!(refusal_in("1. a\n1. b\n", "1. b"), None);
+        assert_eq!(refusal_in("- a\n\n- b\n", "- b"), None, "a loose list");
+        assert_eq!(
+            refusal_in("- a\n  more of a\n- b\n", "- b"),
+            None,
+            "the item's own text stands between"
+        );
+        assert_eq!(
+            refusal_in("- a\nlazy text of a\n- b\n", "- b"),
+            None,
+            "a lazy line still belongs to the item"
+        );
+        assert_eq!(
+            refusal_in("- a\n    - b\n- c\n", "- c"),
+            None,
+            "under a deeper item, one level below it"
+        );
+        assert_eq!(
+            refusal_in("- a\n- b\n- c\n", "- b\n- c"),
+            None,
+            "a selection"
+        );
+    }
+
+    #[test]
+    fn an_item_with_nothing_above_does_not_nest() {
+        let no = Some(NestRefusal::NoItemAbove);
+        assert_eq!(
+            refusal_in("- a\n- b\n", "- a\n- b"),
+            no,
+            "the file's first lines"
+        );
+        assert_eq!(
+            refusal_in("Why a code block:\n\n- a\n- b\n- c\n", "- a\n- b\n- c"),
+            no,
+            "the user's file of 21/09/2026: four spaces after a blank line are code"
+        );
+        assert_eq!(
+            refusal_in("A paragraph.\n- a\n", "- a"),
+            no,
+            "indented, the item would join the paragraph as text"
+        );
+        assert_eq!(
+            refusal_in("- a\n\nA paragraph.\n\n- b\n", "- b"),
+            no,
+            "a paragraph at the margin ended the list above"
+        );
+    }
+
+    #[test]
+    fn an_item_already_a_level_down_does_not_nest_again() {
+        assert_eq!(
+            refusal_in("- a\n    - b\n", "    - b"),
+            Some(NestRefusal::AlreadyNested)
+        );
+        assert_eq!(
+            refusal_in("- a\n\t- b\n", "\t- b"),
+            Some(NestRefusal::AlreadyNested),
+            "a tab is a level too"
+        );
+    }
+
+    #[test]
+    fn lines_that_are_not_all_items_indent_freely() {
+        assert_eq!(refusal_in("text\n- a\n", "text\n- a"), None);
+        assert_eq!(refusal_in("plain\n", "plain"), None);
+        assert_eq!(
+            refusal_in("> - a\n", "> - a"),
+            None,
+            "a quoted item is not this rule's"
+        );
+        assert_eq!(refusal_in("\n\n", "\n"), None, "nothing to indent");
     }
 
     #[test]

@@ -3175,8 +3175,16 @@ impl App {
 
     /// The line burst behind press_tab: the lines the selection
     /// touches, or the caret's line alone, re-indented as one splice
-    /// and one undo unit.
+    /// and one undo unit. In markdown an indent that would stop list
+    /// items being list items is refused with the reason.
     fn indent_lines(&mut self, outdent: bool) {
+        if !outdent && self.markdown_source() {
+            let (start, end) = self.line_span();
+            if let Some(refusal) = edit::manners::nest_refusal(&self.document.source, start, end) {
+                self.show_notice(refusal.message());
+                return;
+            }
+        }
         let unit = edit::manners::indent_unit(&self.document.source, self.markdown_source());
         self.rewrite_lines(|region| {
             let (text, deltas) = edit::manners::reindent(region, &unit, outdent);
