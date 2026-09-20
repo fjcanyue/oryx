@@ -17,6 +17,32 @@ pub fn enter_text(line: &str, col: usize) -> String {
     text
 }
 
+/// The bytes Shift+Enter inserts in a markdown source with the caret
+/// `col` bytes into `line`: markdown's hard break, two spaces at the
+/// line's end, less the spaces already standing before the caret, then
+/// the new line opened where the text continues. A paragraph carries
+/// its indentation, a quote its marks, and a list item the columns of
+/// its marker and task box as spaces, so the break stays inside the
+/// item and opens no new one. None when no text stands between the
+/// line's prefix and the caret: a break there would end nothing, and
+/// two spaces alone on a line are a blank line.
+pub fn hard_break(line: &str, col: usize) -> Option<String> {
+    let col = col.min(line.len());
+    let (_, quote) = marker_seat(line);
+    let marker = list_marker(&line[quote..]).map_or(0, |(len, _)| len);
+    let prefix = quote + marker;
+    if col < prefix || line[prefix..col].trim().is_empty() {
+        return None;
+    }
+    let head = &line[..col];
+    let standing = head.len() - head.trim_end_matches(' ').len();
+    let mut text = " ".repeat(2usize.saturating_sub(standing));
+    text.push('\n');
+    text.push_str(&line[..quote]);
+    text.push_str(&" ".repeat(marker));
+    Some(text)
+}
+
 /// What Enter does after a markdown marker: continue the construct on
 /// the new line, or end it when the item stands empty.
 #[derive(Debug, PartialEq, Eq)]
@@ -1110,6 +1136,65 @@ fn outdent_cut(line: &str, unit: &IndentUnit) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_hard_break_ends_the_line_with_two_spaces() {
+        assert_eq!(hard_break("one two", 7).as_deref(), Some("  \n"));
+        assert_eq!(
+            hard_break("one two", 3).as_deref(),
+            Some("  \n"),
+            "in the middle of a line"
+        );
+        assert_eq!(
+            hard_break("  indented text", 15).as_deref(),
+            Some("  \n  "),
+            "the line's own indentation carries"
+        );
+    }
+
+    #[test]
+    fn a_hard_break_adds_only_the_spaces_that_are_missing() {
+        assert_eq!(hard_break("one ", 4).as_deref(), Some(" \n"));
+        assert_eq!(hard_break("one  ", 5).as_deref(), Some("\n"));
+        assert_eq!(hard_break("one   ", 6).as_deref(), Some("\n"));
+    }
+
+    #[test]
+    fn a_hard_break_stays_inside_its_item_and_its_quote() {
+        assert_eq!(
+            hard_break("- item", 6).as_deref(),
+            Some("  \n  "),
+            "under the item's text, no marker"
+        );
+        assert_eq!(hard_break("10. item", 8).as_deref(), Some("  \n    "));
+        assert_eq!(
+            hard_break("  - [ ] task", 12).as_deref(),
+            Some("  \n        "),
+            "under the task's text, past the box"
+        );
+        assert_eq!(hard_break("> quoted", 8).as_deref(), Some("  \n> "));
+        assert_eq!(hard_break("> - item", 8).as_deref(), Some("  \n>   "));
+    }
+
+    #[test]
+    fn a_hard_break_needs_text_before_it() {
+        assert_eq!(hard_break("", 0), None);
+        assert_eq!(hard_break("text", 0), None);
+        assert_eq!(hard_break("   ", 3), None, "spaces alone are no text");
+        assert_eq!(hard_break("- ", 2), None, "an empty item");
+        assert_eq!(hard_break("- item", 1), None, "inside the marker");
+        assert_eq!(hard_break("> ", 2), None);
+    }
+
+    #[test]
+    fn a_hard_break_renders_as_a_line_break_in_the_item() {
+        let line = "- one two";
+        let text = hard_break(line, 5).expect("text stands before the caret");
+        let source = format!("{}{}{}\n", &line[..5], text, &line[5..]);
+        assert_eq!(source, "- one  \n   two\n");
+        let doc = crate::doc::markdown::parse(source);
+        assert_eq!(doc.blocks.len(), 1, "one item still");
+    }
 
     #[test]
     fn enter_carries_the_indent() {

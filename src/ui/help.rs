@@ -459,6 +459,11 @@ pub const TIPS: &[Tip] = &[
     Tip {
         kind: TipKind::Tip,
         area: Area::Editing,
+        text: r#"In a markdown file, `Shift+Enter` breaks the line without starting a new paragraph. Oryx types the two spaces markdown needs at the end of the line, and inside a list the next line stays in the same item."#,
+    },
+    Tip {
+        kind: TipKind::Tip,
+        area: Area::Editing,
         text: r#"`Tab` indents and `Shift+Tab` removes an indent, on every selected line at once. With the caret at a list marker, `Tab` nests the item under the one above."#,
     },
     Tip {
@@ -765,7 +770,8 @@ pub fn page() -> String {
          `{}` / `{}` jump by word, `{}` / `{}` jump to the ends of the file, and \
          `{}` / `{}` delete by word. Typing replaces a selection, and `{}` followed \
          by typing replaces the whole file. `Enter` keeps the line's indentation, \
-         and in a markdown file it continues lists and quotes. `Tab` indents and \
+         and in a markdown file it continues lists and quotes, while `Shift+Enter` \
+         adds a line break inside the paragraph or the item. `Tab` indents and \
          `Shift+Tab` removes an indent, over every selected line at once; at a \
          list marker, `Tab` nests the item.",
         keymap::display("Ctrl+Left"),
@@ -1040,6 +1046,7 @@ mod tests {
         "Ctrl+Backspace",
         "Ctrl+Delete",
         "Shift+Tab",
+        "Shift+Enter",
     ];
 
     #[test]

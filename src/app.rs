@@ -1853,7 +1853,7 @@ impl App {
             // Enter is a structural edit: a line split never joins a
             // typing unit.
             Key::Named(NamedKey::Enter) => {
-                self.press_enter();
+                self.press_enter(shift);
                 true
             }
             Key::Named(NamedKey::Tab) => {
@@ -3108,23 +3108,34 @@ impl App {
     /// markdown and no selection stands, else the plain indent carry.
     /// The split point is the selection start when one stands, since
     /// the replacement happens in the same splice and the caret lands
-    /// on that line. Structural either way.
-    fn press_enter(&mut self) {
+    /// on that line. Structural either way. With Shift in a markdown
+    /// source the line takes a hard break instead and the construct is
+    /// not continued; where a hard break means nothing, and in every
+    /// other kind of file, Shift+Enter is Enter.
+    fn press_enter(&mut self, shift: bool) {
         let selected = self.selection_source_range();
         let at = selected
             .clone()
             .map_or_else(|| self.caret.map_or(0, |c| c.offset), |r| r.start);
-        let (start, decision, plain) = {
+        let markdown = self.markdown_source();
+        let (start, decision, plain, hard) = {
             let source = &self.document.source;
             let start = source[..at].rfind('\n').map_or(0, |i| i + 1);
             let end = source[at..].find('\n').map_or(source.len(), |i| at + i);
             let line = &source[start..end];
             let col = at - start;
-            let decision = (selected.is_none() && self.markdown_source())
+            let decision = (selected.is_none() && markdown)
                 .then(|| edit::manners::markdown_enter(line, col))
                 .flatten();
-            (start, decision, edit::manners::enter_text(line, col))
+            let hard = (shift && markdown)
+                .then(|| edit::manners::hard_break(line, col))
+                .flatten();
+            (start, decision, edit::manners::enter_text(line, col), hard)
         };
+        if let Some(text) = hard {
+            self.type_over(&text, Kind::Structural);
+            return;
+        }
         match decision {
             Some(edit::manners::MarkdownEnter::Insert(text)) => {
                 // The items below a numbered item count on from the new
