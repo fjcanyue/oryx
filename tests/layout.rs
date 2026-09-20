@@ -4565,3 +4565,58 @@ fn a_theme_switch_rekeys_the_placed_diagram() {
         "both palettes stand registered"
     );
 }
+
+/// The sample gallery: every diagram kind in examples/sample-mermaid.md
+/// renders, exactly the one intentional invalid block shows the error
+/// panel, and nothing else disturbs the document.
+#[test]
+fn the_sample_mermaid_gallery_renders_every_kind() {
+    let source = std::fs::read_to_string("examples/sample-mermaid.md").expect("the sample exists");
+    let fences = source.matches("```mermaid").count();
+    assert!(fences >= 10, "the gallery holds every kind, got {fences}");
+    let (doc, l, media, ..) = lay_settled(&source, 800.0);
+    assert_eq!(
+        l.images.len(),
+        fences - 1,
+        "every kind but the intentional invalid one places"
+    );
+    let theme = Theme::default_dark();
+    let error_panels = l
+        .rects
+        .iter()
+        .filter(|r| r.stroke > 0.0 && r.color == theme.alerts.warning)
+        .count();
+    assert_eq!(error_panels, 1, "one error panel, for the invalid block");
+    assert_eq!(media.pending_mermaid(), 0, "nothing left in flight");
+    assert!(!doc.blocks.is_empty());
+}
+
+/// The mermaid scheme must not misroute ordinary image sources: a
+/// local file, a remote fetch and a diagram in one document each find
+/// their own path.
+#[test]
+fn a_diagram_beside_local_and_remote_images() {
+    let source = "![logo](tests/fixtures/oryx-test.png)\n\n\
+                  ```mermaid\nflowchart LR\n  A --> B\n```\n\n\
+                  ![none](tests/fixtures/missing.png)";
+    let (doc, mut media, mut fonts) = (
+        markdown::parse(source),
+        MediaCache::new(PathBuf::from(".")),
+        fonts(),
+    );
+    let theme = Theme::default_dark();
+    let _ = layout(&doc, &theme, &mut fonts, &mut media, &cfg(), 800.0);
+    settle_mermaid(&mut media);
+    let l = layout(&doc, &theme, &mut fonts, &mut media, &cfg(), 800.0);
+    assert_eq!(l.images.len(), 2, "the png and the diagram place");
+    assert!(
+        l.images.iter().any(|i| i.src.ends_with("oryx-test.png")),
+        "the file path still reads as one"
+    );
+    assert!(l.images.iter().any(|i| i.src.starts_with("mermaid://")));
+    // The missing file keeps its placeholder without touching the diagram.
+    assert!(
+        media.dimensions("tests/fixtures/missing.png").is_none(),
+        "a missing file stays missing"
+    );
+}
