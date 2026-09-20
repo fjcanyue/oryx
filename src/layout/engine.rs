@@ -9,6 +9,7 @@ use cosmic_text::{Align, Attrs, Buffer, Family, Metrics, Shaping, Style, Weight}
 
 use super::metrics;
 use crate::doc::images::MediaCache;
+use crate::doc::mermaid;
 use crate::doc::model::{
     AlertKind, Block, BlockKind, Document, Marker, Span, SpanImage, SpanScript,
 };
@@ -1879,12 +1880,16 @@ fn pool_top_up(doc: &Document, pass: &mut LayoutPass) {
     }
 }
 
-/// Whether the pool may shape this block's kind. Image bearers need the
-/// media cache the assembler owns; code blocks pool per line instead;
-/// summary rows read the fold state only the assembler's document has.
+/// Whether the pool may shape this block's kind. Image bearers and
+/// Mermaid diagrams need the media cache the assembler owns; code
+/// blocks pool per line instead; summary rows read the fold state only
+/// the assembler's document has.
 fn poolable(block: &Block) -> bool {
     match &block.kind {
-        BlockKind::Image { .. } | BlockKind::CodeBlock { .. } | BlockKind::Summary { .. } => false,
+        BlockKind::Image { .. }
+        | BlockKind::Mermaid { .. }
+        | BlockKind::CodeBlock { .. }
+        | BlockKind::Summary { .. } => false,
         BlockKind::Heading { spans, .. }
         | BlockKind::Paragraph { spans }
         | BlockKind::ListItem { spans, .. } => !spans.iter().any(|s| s.image.is_some()),
@@ -2283,19 +2288,21 @@ pub(crate) fn shape_kind(
             scratch,
         ),
         BlockKind::CodeBlock { .. } => 0.0,
-        // The interim panel until the renderer lands; the model already
-        // holds the diagram source, so selection reads it either way.
-        BlockKind::Mermaid { .. } => layout_mermaid_placeholder(
-            fonts,
-            theme,
-            cfg,
-            source,
-            block_index,
-            x_base,
-            0.0,
-            avail,
-            scratch,
-        ),
+        BlockKind::Mermaid { body } => {
+            let text = body.iter(source).collect::<Vec<_>>().join("\n");
+            layout_mermaid(
+                fonts,
+                theme,
+                cfg,
+                media,
+                &text,
+                block_index,
+                x_base,
+                0.0,
+                avail,
+                scratch,
+            )
+        }
         // The chapter seam: one blank body line, nothing drawn; the
         // block spacing on both sides completes the larger gap.
         BlockKind::ChapterBreak { .. } => metrics::LINE_HEIGHT * base_size,
@@ -4441,27 +4448,111 @@ fn layout_image(
     box_h
 }
 
-/// A Mermaid block's interim panel, until the renderer lands: a
-/// bordered box naming the diagram, the way an unloadable image reads.
-/// The rendered diagram replaces this once media carries it.
+/// Places a Mermaid diagram: the cache answers the svg, rendering and
+/// registering on miss; the image fits the available width, never
+/// growing past its natural size, aspect kept. A render failure
+/// becomes the error panel — the document around it stands.
 #[allow(clippy::too_many_arguments)]
-fn layout_mermaid_placeholder(
+fn layout_mermaid(
     fonts: &mut FontStore,
     theme: &Theme,
     cfg: &ViewConfig,
-    source: &str,
+    media: &mut MediaCache,
+    text: &str,
     block_index: usize,
     x0: f32,
     y0: f32,
     avail: f32,
     out: &mut LayoutDoc,
 ) -> f32 {
+    // The reading-theme mapping lands with the theme phase; the key
+    // still hashes the palette, so the switch misses by construction.
+    let palette = mermaid::MermaidTheme::default();
+    let uri = mermaid::cache_key(text, &palette).uri();
+    if media.generated(&uri).is_none() {
+        match mermaid::render(text, &palette) {
+            Ok(rendered) => media.register_generated_svg(
+                uri.clone(),
+                rendered.svg,
+                rendered.width.max(1.0) as u32,
+                rendered.height.max(1.0) as u32,
+            ),
+            Err(err) => {
+                return layout_mermaid_error(
+                    fonts,
+                    theme,
+                    cfg,
+                    source_label(text),
+                    &err,
+                    block_index,
+                    x0,
+                    y0,
+                    avail,
+                    out,
+                )
+            }
+        }
+    }
+    let Some((iw, ih)) = media.dimensions(&uri) else {
+        return layout_mermaid_error(
+            fonts,
+            theme,
+            cfg,
+            source_label(text),
+            &mermaid::MermaidError::InvalidDimensions,
+            block_index,
+            x0,
+            y0,
+            avail,
+            out,
+        );
+    };
+    let width = (iw as f32 * image_scale(cfg)).min(avail);
+    let height = ih as f32 * width / iw as f32;
+    out.images.push(ImagePlace {
+        src: uri,
+        x: x0,
+        y: y0,
+        width,
+        height,
+        link: None,
+    });
+    height
+}
+
+/// The first line of a diagram's source, for the error panel's caption;
+/// empty source reads as its own error.
+fn source_label(text: &str) -> &str {
+    text.lines().next().unwrap_or_default()
+}
+
+/// A failed diagram's panel: the error and its reason in a bordered
+/// box, the way an unloadable image reads. The document continues.
+#[allow(clippy::too_many_arguments)]
+fn layout_mermaid_error(
+    fonts: &mut FontStore,
+    theme: &Theme,
+    cfg: &ViewConfig,
+    caption: &str,
+    error: &mermaid::MermaidError,
+    block_index: usize,
+    x0: f32,
+    y0: f32,
+    avail: f32,
+    out: &mut LayoutDoc,
+) -> f32 {
+    // The spans own their text; the document source only answers for
+    // model spans, which these are not.
+    let source = "";
     let pad = metrics::PLACEHOLDER_PAD * cfg.zoom;
     let radius = metrics::CORNER_RADIUS * cfg.zoom;
     let label = {
-        let mut span = Span::plain("Mermaid diagram");
-        span.italic = true;
-        [span]
+        let caption = if caption.is_empty() {
+            "Mermaid diagram error".to_string()
+        } else {
+            format!("Mermaid diagram error — {caption}")
+        };
+        [Span::plain(caption), Span::plain(format!(": {error}"))]
     };
     let base = BlockStyle {
         size: cfg.body_size * cfg.zoom,

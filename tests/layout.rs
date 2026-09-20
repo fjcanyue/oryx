@@ -4278,22 +4278,106 @@ fn a_paragraph_with_thousands_of_inline_spans_keeps_every_span_in_order() {
     );
 }
 
-/// The interim Mermaid panel: a bordered box in the block's seat, the
-/// label inside, and the paragraphs around it untouched.
+/// The full chain: a mermaid block renders to an svg, registers under
+/// its mermaid:// key, and places as an ordinary image between the
+/// heading and the paragraph after it.
 #[test]
-fn a_mermaid_block_lays_out_a_placeholder_panel() {
+fn a_mermaid_block_places_an_image_between_text() {
     let (doc, l) = lay2(
         "# Diagram\n\n```mermaid\nflowchart LR\n  A --> B\n```\n\nAfter.",
         800.0,
     );
-    let framed: Vec<&DecoRect> = l
-        .rects
-        .iter()
-        .filter(|r| r.stroke > 0.0 && r.width > 600.0)
-        .collect();
-    assert_eq!(framed.len(), 1, "one bordered panel, not {:#?}", l.rects);
-    assert!(framed[0].height > 20.0, "the panel holds its label");
-    find_text(&l, &doc, "Mermaid diagram");
-    find_text(&l, &doc, "After.");
-    assert!(framed[0].y > 50.0, "the panel sits below the heading");
+    assert_eq!(l.images.len(), 1, "one placed diagram");
+    let image = &l.images[0];
+    assert!(
+        image.src.starts_with("mermaid://"),
+        "the source is the media key: {}",
+        image.src
+    );
+    assert!(image.width > 0.0 && image.width <= 800.0, "fits the column");
+    assert!(image.height > 0.0);
+    let after = find_text(&l, &doc, "After.");
+    assert!(
+        after.y > image.y + image.height,
+        "the paragraph follows the diagram"
+    );
+    let title = find_text(&l, &doc, "Diagram");
+    assert!(image.y > title.y, "the diagram follows the heading");
+}
+
+/// A diagram wider than the column shrinks to it with its aspect
+/// ratio kept; the same diagram in a wide column keeps its natural
+/// proportions too.
+#[test]
+fn a_wide_mermaid_scales_proportionally() {
+    let source = "```mermaid\nflowchart LR\n  A --> B --> C --> D --> E --> F --> G\n```";
+    let narrow = lay(source, 300.0);
+    let wide = lay(source, 2000.0);
+    let (narrow, wide) = (&narrow.images[0], &wide.images[0]);
+    assert!(narrow.width <= 300.0, "shrunk to the column");
+    let narrow_ratio = narrow.height / narrow.width;
+    let wide_ratio = wide.height / wide.width;
+    assert!(
+        (narrow_ratio - wide_ratio).abs() < 1e-3,
+        "aspect kept: {narrow_ratio} vs {wide_ratio}"
+    );
+    assert!(narrow.width < wide.width, "the wide column shows it larger");
+}
+
+/// A broken diagram draws the error panel and the valid one after it
+/// still renders: one bad block never poisons the next.
+#[test]
+fn a_broken_diagram_errors_without_poisoning_the_next() {
+    let l = lay(
+        "```mermaid\nflowchart LR\n  subgraph X\n  A --> B\n```\n\n```mermaid\nC --> D\n```",
+        800.0,
+    );
+    assert_eq!(l.images.len(), 1, "only the valid diagram places");
+    assert!(
+        l.runs.iter().any(|r| r.size == 22.0) || l.rects.iter().any(|r| r.stroke > 0.0),
+        "the error panel shows something"
+    );
+    let framed: Vec<&DecoRect> = l.rects.iter().filter(|r| r.stroke > 0.0).collect();
+    assert_eq!(framed.len(), 1, "one error panel");
+}
+
+/// The same diagram across layout passes renders once: the second pass
+/// answers from the cache and keeps its warm pixels.
+#[test]
+fn the_same_diagram_registers_once_across_passes() {
+    let doc = markdown::parse("```mermaid\nflowchart LR\n  A --> B\n```");
+    let mut fonts = fonts();
+    let mut media = MediaCache::new(PathBuf::from("."));
+    let first = layout(
+        &doc,
+        &Theme::default_dark(),
+        &mut fonts,
+        &mut media,
+        &cfg(),
+        800.0,
+    );
+    assert_eq!(first.images.len(), 1);
+    let key = first.images[0].src.clone();
+    let placed = (
+        first.images[0].width.round().max(1.0) as u32,
+        first.images[0].height.round().max(1.0) as u32,
+    );
+    assert!(
+        media.scaled(&key, placed.0, placed.1).is_some(),
+        "the pixels rasterized"
+    );
+    let second = layout(
+        &doc,
+        &Theme::default_dark(),
+        &mut fonts,
+        &mut media,
+        &cfg(),
+        800.0,
+    );
+    assert_eq!(second.images.len(), 1);
+    assert_eq!(second.images[0].src, key, "the same key answers");
+    assert!(
+        media.generated(&key).is_some(),
+        "the registration survived the pass"
+    );
 }
