@@ -1,0 +1,117 @@
+# A manual release build: Actions tab -> Run workflow -> pick the ref.
+# Mirrors the maintainer's `make release` pipeline where it can run on a
+# hosted runner:
+#   - Linux builds inside an ubuntu:22.04 container, the jammy userland
+#     the chroot build uses, so the binary keeps the project's glibc
+#     2.35 floor and links libssl 3; the container pins it whatever the
+#     runner image of the month is.
+#   - Windows cross-compiles to x86_64-pc-windows-gnu, the official
+#     release target; mingw-w64 ships the windres that embeds the exe's
+#     icon and version block.
+# The bundles stage the same payload `make release` stages: the binary,
+# themes, examples, LICENSE and the platform's install script.
+
+name: Release build
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-build-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+    container: ubuntu:22.04
+    steps:
+      - name: Prepare the container
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            git ca-certificates curl build-essential pkg-config libssl-dev
+
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Read the version
+        id: version
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Build
+        run: cargo build --release --locked
+
+      - name: Refuse a binary above the glibc floor
+        run: sh packaging/build-linux.sh --check target/release/oryx
+
+      - name: Stage the bundle
+        run: |
+          mkdir -p dist/oryx
+          cp target/release/oryx dist/oryx/
+          cp -r themes examples dist/oryx/
+          cp LICENSE packaging/install.sh dist/oryx/
+          tar -C dist -czf "dist/oryx-${{ steps.version.outputs.version }}-linux-x86_64.tar.gz" oryx
+
+      - name: Upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: oryx-${{ steps.version.outputs.version }}-linux-x86_64
+          path: dist/*.tar.gz
+          if-no-files-found: error
+
+  windows:
+    runs-on: ubuntu-latest
+    container: ubuntu:22.04
+    steps:
+      - name: Prepare the container
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            git ca-certificates curl build-essential mingw-w64 zip
+
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-gnu
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Read the version
+        id: version
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Build
+        run: cargo build --release --locked --target x86_64-pc-windows-gnu
+
+      - name: Stage the bundle
+        run: |
+          mkdir -p dist/oryx
+          cp target/x86_64-pc-windows-gnu/release/oryx.exe dist/oryx/
+          cp -r themes examples dist/oryx/
+          cp LICENSE packaging/install.ps1 dist/oryx/
+          zip -qr "dist/oryx-${{ steps.version.outputs.version }}-windows-x86_64.zip" oryx
+          # The bare exe rides along, ready to run without unpacking.
+          cp target/x86_64-pc-windows-gnu/release/oryx.exe dist/
+
+      - name: Upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: oryx-${{ steps.version.outputs.version }}-windows-x86_64
+          path: |
+            dist/oryx.exe
+            dist/*.zip
+          if-no-files-found: error
