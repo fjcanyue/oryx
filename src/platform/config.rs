@@ -1,8 +1,10 @@
 //! Persistent user configuration: `config.toml` in the user's config
 //! directory, and the book positions beside it. Any read problem yields
 //! defaults, never an error, and a value outside its range is held to
-//! it. Both files are written whole, through a temporary file renamed
-//! over the old one, so a crash mid-write never leaves a half file.
+//! it. Both files are written through a temporary file renamed over the
+//! old one, so a crash mid-write never leaves a half file. The settings
+//! file is shared by every window: a save puts in what this window
+//! changed and keeps the rest as the file has it.
 
 use std::path::{Path, PathBuf};
 
@@ -254,8 +256,33 @@ impl Positions {
     }
 }
 
+/// The settings as this Oryx last read or wrote them, the reference a
+/// save compares against. A second window shares the file, and each
+/// window writes at its exit at least (the window's size): a save puts
+/// in the settings this window changed and leaves the others as the
+/// file has them, or the last window to close would put back every
+/// setting as its own launch had read it.
+static SEEN: std::sync::Mutex<Option<toml::Table>> = std::sync::Mutex::new(None);
+
 pub fn load() -> Config {
-    path().map(|p| load_from(&p)).unwrap_or_default()
+    let (config, seen) = match path() {
+        Some(p) => load_with_baseline(&p),
+        None => (Config::default(), toml::Table::new()),
+    };
+    *SEEN.lock().unwrap_or_else(|e| e.into_inner()) = Some(seen);
+    config
+}
+
+/// The settings of `path` with the table a later `save_changes` compares
+/// against.
+pub fn load_with_baseline(path: &Path) -> (Config, toml::Table) {
+    let config = load_from(path);
+    let seen = table_of(&config);
+    (config, seen)
+}
+
+fn table_of(config: &Config) -> toml::Table {
+    toml::Table::try_from(config).expect("config serializes")
 }
 
 pub fn load_from(path: &Path) -> Config {
@@ -301,9 +328,48 @@ impl Config {
 }
 
 pub fn save(config: &Config) {
-    if let Some(p) = path() {
-        save_to(&p, config);
+    let Some(p) = path() else {
+        return;
+    };
+    let mut seen = SEEN.lock().unwrap_or_else(|e| e.into_inner());
+    let before = seen.take().unwrap_or_default();
+    *seen = Some(save_changes(&p, config, &before));
+}
+
+/// Writes the settings that moved since `seen` into the file as it is
+/// on disk now, and answers the new reference. A setting is one
+/// top-level key, the window's table and the export's each a whole: the
+/// last window to close decides the next launch's size, as expected. A
+/// file that is missing or does not read is written whole. Keys this
+/// version does not know stay in the file.
+pub fn save_changes(path: &Path, config: &Config, seen: &toml::Table) -> toml::Table {
+    let current = table_of(config);
+    let on_disk = std::fs::read_to_string(path)
+        .ok()
+        .and_then(|text| text.parse::<toml::Table>().ok());
+    let merged = match on_disk {
+        Some(mut table) => {
+            for key in seen.keys().chain(current.keys()) {
+                if seen.get(key) == current.get(key) {
+                    continue;
+                }
+                match current.get(key) {
+                    Some(value) => table.insert(key.clone(), value.clone()),
+                    None => table.remove(key),
+                };
+            }
+            table
+        }
+        None => current.clone(),
+    };
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
     }
+    let text = toml::to_string(&merged).expect("config serializes");
+    if let Err(err) = save::write_atomic(path, text.as_bytes()) {
+        eprintln!("oryx: cannot save config {}: {err}", path.display());
+    }
+    current
 }
 
 pub fn save_to(path: &Path, config: &Config) {
@@ -323,6 +389,69 @@ mod tests {
 
     fn temp_path(name: &str) -> PathBuf {
         std::env::temp_dir().join(format!("oryx-config-{}-{name}", std::process::id()))
+    }
+
+    /// Two windows share the file. Each wrote its whole memory, so the
+    /// last to close put back every setting as its launch had read it.
+    #[test]
+    fn two_windows_keep_each_other_s_settings() {
+        let path = temp_path("two-windows.toml");
+        save_to(&path, &Config::default());
+        let (mut a, mut a_seen) = load_with_baseline(&path);
+        let (mut b, mut b_seen) = load_with_baseline(&path);
+        a.show_hidden = true;
+        a.theme = "oryx-paper".to_string();
+        a_seen = save_changes(&path, &a, &a_seen);
+        // The other window closes last and writes its size, as every
+        // exit does; it never touched the two settings.
+        b.window = Some(WindowState {
+            width: 640,
+            height: 480,
+            ..WindowState::default()
+        });
+        b.tip = 7;
+        b_seen = save_changes(&path, &b, &b_seen);
+        let on_disk = load_from(&path);
+        assert!(on_disk.show_hidden, "the first window's setting stays");
+        assert_eq!(on_disk.theme, "oryx-paper");
+        assert_eq!(on_disk.tip, 7, "and the second window's own changes land");
+        assert_eq!(
+            on_disk.window.map(|w| (w.width, w.height)),
+            Some((640, 480))
+        );
+        // A setting moved and moved back is a change each time.
+        a.show_hidden = false;
+        let _ = save_changes(&path, &a, &a_seen);
+        assert!(!load_from(&path).show_hidden);
+        assert_eq!(load_from(&path).tip, 7, "the other window's tip untouched");
+        let _ = b_seen;
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn a_save_over_an_unreadable_file_writes_everything() {
+        let path = temp_path("unreadable.toml");
+        std::fs::write(&path, "theme = [broken").unwrap();
+        let (mut config, seen) = load_with_baseline(&path);
+        config.word_count = true;
+        let _ = save_changes(&path, &config, &seen);
+        let on_disk = load_from(&path);
+        assert!(on_disk.word_count);
+        assert_eq!(on_disk.theme, Config::default().theme);
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn a_save_keeps_a_key_this_version_does_not_know() {
+        let path = temp_path("newer.toml");
+        std::fs::write(&path, "from_a_newer_oryx = 3\nword_count = false\n").unwrap();
+        let (mut config, seen) = load_with_baseline(&path);
+        config.word_count = true;
+        let _ = save_changes(&path, &config, &seen);
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("from_a_newer_oryx = 3"), "{text}");
+        assert!(text.contains("word_count = true"), "{text}");
+        std::fs::remove_file(&path).unwrap();
     }
 
     #[test]
