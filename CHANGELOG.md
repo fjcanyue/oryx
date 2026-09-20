@@ -15,6 +15,7 @@
 
 ### Files
 
+- When the connection to the display is lost (a compositor that crashes or drops the window), Oryx now closes in order, saves its settings and says why in the terminal. Before, it could crash on its way out, mostly while a big file was loading.
 - Fixed a rare crash while a big markdown file with many code blocks was still loading: syntax colors arriving at the wrong moment could leave the page's bookkeeping out of step, and Oryx quit. Seen on an 8 MB file opened straight at a far line.
 - When the open file is deleted or moved away outside Oryx, a notice says so, the title shows the unsaved dot, and Oryx asks before closing, as it does for unsaved edits. `Ctrl+S` writes the text back where the file was; if its folder went too, Save As writes it elsewhere. Before, nothing said anything and the text was gone at the next quit. A file missing for an instant while another editor saves it is not mistaken for a deleted one.
 - The file Oryx was started with now reloads when it changes on disk, like any file opened later. Before, only a file opened from the sidebar or the dialog did.

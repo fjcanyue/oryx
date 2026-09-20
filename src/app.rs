@@ -364,6 +364,7 @@ pub fn run(
         gutter_measured: None,
         notice: None,
         notice_canvas: None,
+        display_lost: None,
     };
     // The launch file's identity, the reference the disk check compares
     // to; `open_file` records it for every later file. Without it the
@@ -380,8 +381,37 @@ pub fn run(
     if let Some(key) = app.document.book_id.as_deref() {
         app.cfg.direction = app.positions.direction(key);
     }
-    event_loop.run_app(&mut app)?;
+    let ended = event_loop.run_app(&mut app);
+    // Without a display no window can explain the ending, so the
+    // terminal gets it in plain words, from the frame that failed or
+    // from winit, which leaves its loop with the error's number.
+    if let Some(reason) = app.display_lost.take() {
+        anyhow::bail!("lost the connection to the display: {reason}");
+    }
+    if let Err(winit::error::EventLoopError::ExitFailure(code)) = &ended {
+        // winit answers 1 when the failure carried no number of the
+        // system's, so 1 names nothing.
+        if *code > 1 {
+            anyhow::bail!(
+                "lost the connection to the display: {}",
+                std::io::Error::from_raw_os_error(*code)
+            );
+        }
+        anyhow::bail!("lost the connection to the display");
+    }
+    ended?;
     Ok(())
+}
+
+/// The innermost cause of an error, as text: a display library wraps
+/// the system's error in layers of its own, and the terminal line wants
+/// the one a person can read ("Connection reset by peer").
+fn root_cause(err: &(dyn std::error::Error + 'static)) -> String {
+    let mut cause = err;
+    while let Some(next) = cause.source() {
+        cause = next;
+    }
+    cause.to_string()
 }
 
 /// Starts the Wayland drop thread for a window whose handles are
@@ -1048,6 +1078,12 @@ struct App {
     notice: Option<Notice>,
     /// Reused notice canvas, mirroring the overlay canvas mechanics.
     notice_canvas: Option<OverlayCanvas>,
+    /// Set when a frame could not reach the display, with the error's
+    /// text: the connection is gone (a compositor that died or refused
+    /// the client), no window can say so, and the loop leaves in order
+    /// at its next turn so the settings and positions are saved as at
+    /// any quit.
+    display_lost: Option<String>,
     /// The corner word count's text, while the setting is on and the
     /// open file is one that gets a count.
     count_line: Option<String>,
@@ -6455,10 +6491,19 @@ impl App {
         let Some(gfx) = self.gfx.as_mut() else {
             return;
         };
-        gfx.surface
-            .resize(width, height)
-            .expect("surface resize failed");
-        let mut buffer = gfx.surface.buffer_mut().expect("buffer borrow failed");
+        // A frame that cannot reach the display is the display gone,
+        // not a bug to stop on: the loop leaves at its next turn.
+        if let Err(err) = gfx.surface.resize(width, height) {
+            self.display_lost = Some(root_cause(&err));
+            return;
+        }
+        let mut buffer = match gfx.surface.buffer_mut() {
+            Ok(buffer) => buffer,
+            Err(err) => {
+                self.display_lost = Some(root_cause(&err));
+                return;
+            }
+        };
         if inset == 0 {
             let len = view.len().min(buffer.len());
             buffer[..len].copy_from_slice(&view[..len]);
@@ -6759,7 +6804,10 @@ impl App {
                 *stale = painter.dirty();
             }
         }
-        buffer.present().expect("present failed");
+        if let Err(err) = buffer.present() {
+            self.display_lost = Some(root_cause(&err));
+            return;
+        }
         // A direct frame leaves the band stale: build it in a follow-up
         // frame so the visible one stayed cheap. Skipped during drags.
         if direct.is_some() && self.pending_band_for.is_some() {
@@ -6772,6 +6820,10 @@ impl ApplicationHandler for App {
     /// A relayout deferred by a live resize waits for the size to hold
     /// still, and the timer is the only thing that wakes an idle loop.
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        if self.display_lost.is_some() {
+            event_loop.exit();
+            return;
+        }
         if !self.pending_recolor.is_empty() {
             let due = self.last_recolor + RECOLOR_WAVE;
             if Instant::now() >= due {
@@ -7416,6 +7468,27 @@ mod tests {
             super::direction_notice(DirectionMode::Ltr),
             "reading direction: left to right"
         );
+    }
+
+    #[test]
+    fn the_root_cause_is_the_innermost_error() {
+        #[derive(Debug)]
+        struct Wrapped(std::io::Error);
+        impl std::fmt::Display for Wrapped {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                write!(f, "Platform error: {}", self.0)
+            }
+        }
+        impl std::error::Error for Wrapped {
+            fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+                Some(&self.0)
+            }
+        }
+        let inner = std::io::Error::from_raw_os_error(104);
+        let text = inner.to_string();
+        assert_eq!(super::root_cause(&Wrapped(inner)), text);
+        let alone = std::io::Error::from_raw_os_error(12);
+        assert_eq!(super::root_cause(&alone), alone.to_string());
     }
 
     #[test]
