@@ -12,6 +12,7 @@
 
 - Empty lines added at the end of a file now get their rows. Before, each Enter at the end of a long file added a line the page did not show: the caret left the screen and the wheel could not reach it. The file's final line break still opens no empty row.
 - The page no longer moves by a pixel on every keystroke at a fractional display scale, such as 125%. Each frame now paints the page at a whole pixel, and the caret sits on the text it belongs to.
+- `Up` on the first line now goes to the start of the line, and `Down` on the last line to its end, as other editors do. Before, the caret stayed where it was. With Shift, the selection follows.
 - Oryx no longer keeps a processor core busy after you leave the editor. Before, going back to reading with Escape left the caret's timer running with nothing to do, until the next notice in the corner had come and gone.
 
 ### Files
@@ -28,7 +29,7 @@
 
 - A fresh install now opens with the folder sidebar showing, rooted at your home folder. Before, the sidebar was closed, and once opened it stood in the folder Oryx was started from, which on Windows can be a system folder. Close it once and it stays closed, as before. The open and export dialogs fall back to your home folder the same way.
 - A folder Oryx cannot read now shows one row saying so, under the `..` row, so you can climb back out. Before, the panel went blank.
-- A middle click on a file in the sidebar opens it in a second Oryx window, a step down and right of the first, and the file you were editing stays as it is. `Ctrl+Enter` on the highlighted row does the same from the keyboard. The two windows share the settings file; the last to write wins.
+- A middle click on a file in the sidebar opens it in a second Oryx window, a step down and right of the first, and the file you were editing stays as it is. `Ctrl+Enter` on the highlighted row does the same from the keyboard. The two windows share the settings file and the book positions, and each saves only what it changed: a setting changed in one window, or your place in a book, is still there after the other window closes.
 - Files and folders whose name starts with a dot stay out of the sidebar now, as in every file manager. `Ctrl+Shift+H` shows them, dimmed, and hides them again; the choice is remembered. The file you are reading keeps its row whatever the setting.
 - The welcome page says that the sidebar key shows and hides the panel.
 - The folder you are in reads in the accent color in the sidebar, its name and its icon: the folder of the open file, or, with no file open, the folder you last clicked. Before, the folder you had opened and the folder under the mouse looked the same. The accent fill stays on the open file.
@@ -84,6 +85,10 @@
 
 - A note (`Ctrl+M`) now survives a crash, a power cut or a lost display. Oryx copies the note's text to a file of its own five seconds after you stop typing, and when the focus leaves the window. The copy is not a save: the unsaved dot stays, and Oryx still asks before closing.
 - If Oryx ended without asking, the next launch says "A note from your last session was not saved." `R` or Enter recovers the note, `D` discards it, and Escape leaves it for the next launch. The note comes back unsaved, in this window, or in a second window when Oryx was started on a file.
+
+### Settings
+
+- In the font list of the settings, a click on the hint under the list no longer picks a font you could not see.
 
 ### Welcome page
 
