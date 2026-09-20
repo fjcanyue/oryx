@@ -557,7 +557,9 @@ impl Caret {
                                     goal: Some(x),
                                 };
                             }
-                            return self;
+                            // No line above the first: its start, the
+                            // file's, as editors do.
+                            return Caret::at(line.start);
                         }
                         let prev = &lines[li - 1];
                         let sep = doc.source.get(prev.end.min(line.start)..line.start);
@@ -581,8 +583,9 @@ impl Caret {
                                 goal: Some(x),
                             };
                         }
+                        // No line below the last: its end, the file's.
                         if li + 1 >= lines.len() {
-                            return self;
+                            return Caret::at(line.end);
                         }
                         li + 1
                     }
@@ -1072,16 +1075,35 @@ mod tests {
             step(Caret::at(end), Motion::Right, &l, &doc, &mut fonts).offset,
             end
         );
+        // No line above the first or below the last: the caret goes to
+        // the line's own edge, the file's start or end, as editors do.
+        let up = step(Caret::at(5), Motion::Up, &l, &doc, &mut fonts);
+        assert_eq!(up.offset, 0, "up on the first line reaches its start");
         assert_eq!(
-            step(Caret::at(5), Motion::Up, &l, &doc, &mut fonts).offset,
-            5,
-            "up on the first line holds still"
+            step(up, Motion::Up, &l, &doc, &mut fonts).offset,
+            0,
+            "and holds there"
         );
+        let down = step(Caret::at(end - 2), Motion::Down, &l, &doc, &mut fonts);
+        assert_eq!(down.offset, end, "down on the last line reaches its end");
         assert_eq!(
-            step(Caret::at(end - 2), Motion::Down, &l, &doc, &mut fonts).offset,
-            end - 2,
-            "down on the last line holds still"
+            step(down, Motion::Down, &l, &doc, &mut fonts).offset,
+            end,
+            "and holds there"
         );
+    }
+
+    #[test]
+    fn down_on_the_last_line_stops_before_a_final_newline() {
+        let doc = code_doc("one\ntwo\n");
+        let (l, mut fonts) = lay_of(&doc);
+        let c = step(Caret::at(5), Motion::Down, &l, &doc, &mut fonts);
+        assert_eq!(c.offset, 7, "the end of the last line, where Ctrl+End goes");
+        assert_eq!(c.offset, last_offset(&doc));
+        // A last line wrapped over several rows: a row in its middle
+        // still steps to the row below.
+        let up = step(Caret::at(1), Motion::Up, &l, &doc, &mut fonts);
+        assert_eq!(up.offset, 0);
     }
 
     #[test]
