@@ -1581,7 +1581,7 @@ impl App {
             return;
         };
         let head = self.undo.as_ref().map_or(0, Undo::head);
-        if !self.edit_park.as_ref().is_some_and(|p| p.head != head) {
+        if self.edit_park.as_ref().is_none_or(|p| p.head == head) {
             return;
         }
         let page = edit::rendered_document(kind, &self.document.source);

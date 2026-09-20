@@ -314,7 +314,7 @@ fn checker(u: f32, v: f32, w: f32, h: f32) -> u8 {
     let cell = 6.0;
     let cx = (u * w / cell) as u32;
     let cy = (v * h / cell) as u32;
-    if (cx + cy) % 2 == 0 {
+    if (cx + cy).is_multiple_of(2) {
         200
     } else {
         150

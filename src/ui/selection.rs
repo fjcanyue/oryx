@@ -761,7 +761,7 @@ pub fn match_anchor(lay: &LayoutDoc, doc: &Document, m: &Selection) -> Option<(f
         if e <= a || b <= s {
             continue;
         }
-        if best.map_or(true, |(y, _)| run.y < y) {
+        if best.is_none_or(|(y, _)| run.y < y) {
             best = Some((run.y, run.size));
         }
     }
@@ -885,7 +885,7 @@ fn piece_end_run(
             TextRef::Model { start, .. } => start,
             TextRef::Side { .. } => u32::MAX,
         };
-        if best.map_or(true, |(s, _)| start >= s) {
+        if best.is_none_or(|(s, _)| start >= s) {
             best = Some((start, index));
         }
     }

@@ -1730,10 +1730,10 @@ fn the_y_index_stays_honest_while_a_pass_grows() {
         steps += 1;
         // Index on a stride so some checks run against a stale index
         // with a real tail.
-        if steps % 11 == 0 {
+        if steps.is_multiple_of(11) {
             out.index_more();
         }
-        if steps % 5 == 0 || done {
+        if steps.is_multiple_of(5) || done {
             let (head, tail) = out.runs_in(0.0, out.height);
             for (index, _) in out.runs.iter().enumerate() {
                 assert!(
@@ -1741,7 +1741,7 @@ fn the_y_index_stays_honest_while_a_pass_grows() {
                     "run {index} missed after {steps} steps"
                 );
             }
-            if out.height > 1500.0 && steps % 11 == 0 {
+            if out.height > 1500.0 && steps.is_multiple_of(11) {
                 let (head, tail) = out.runs_in(0.0, 200.0);
                 assert!(
                     head.len() + tail.len() < out.runs.len(),

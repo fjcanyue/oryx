@@ -1234,7 +1234,7 @@ struct FillPlan {
 
 impl FillPlan {
     fn is_empty(&self) -> bool {
-        self.positions.is_empty() && self.extend.as_ref().map_or(true, |(_, l)| l.is_empty())
+        self.positions.is_empty() && self.extend.as_ref().is_none_or(|(_, l)| l.is_empty())
     }
 }
 
@@ -3499,10 +3499,7 @@ fn place_code_line(
     if let Some((scroll, viewport_h)) = pass.retain {
         let range = retain_range(scroll, viewport_h);
         let inside = top <= range.end && top + advance >= range.start;
-        let contiguous = open
-            .kept
-            .as_ref()
-            .map_or(true, |kept| kept.end == open.line);
+        let contiguous = open.kept.as_ref().is_none_or(|kept| kept.end == open.line);
         if inside && contiguous {
             match &mut open.kept {
                 Some(kept) => kept.end = open.line + 1,
