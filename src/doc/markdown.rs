@@ -743,6 +743,12 @@ impl Builder {
                     if language.as_deref() == Some("math") {
                         // GitHub's fenced math notation.
                         self.emit(BlockKind::MathBlock { tex: text });
+                    } else if language
+                        .as_deref()
+                        .is_some_and(|lang| lang.eq_ignore_ascii_case("mermaid"))
+                    {
+                        let body = self.code_body(&text);
+                        self.emit(BlockKind::Mermaid { body });
                     } else {
                         let lines = self.code_body(&text);
                         self.emit(BlockKind::CodeBlock {
@@ -3674,6 +3680,79 @@ mod tests {
             panic!("expected math block, got {:?}", d.blocks[0].kind)
         };
         assert_eq!(tex.trim(), "\\sum_i x_i");
+    }
+
+    fn mermaid_body(block: &crate::doc::model::Block) -> &crate::doc::model::CodeBody {
+        let BlockKind::Mermaid { body } = &block.kind else {
+            panic!("expected mermaid block, got {:?}", block.kind)
+        };
+        body
+    }
+
+    #[test]
+    fn mermaid_fence_is_a_mermaid_block() {
+        let d = parse("```mermaid\nflowchart LR\n  A --> B\n```");
+        assert_eq!(d.blocks.len(), 1, "one block, not code plus mermaid");
+        let body = mermaid_body(&d.blocks[0]);
+        let joined: Vec<&str> = body.iter(&d.source).collect();
+        assert_eq!(joined, ["flowchart LR", "  A --> B"]);
+        // The verbatim body slices the source, so the ranges the model
+        // keeps for selection name real bytes.
+        assert!(body.is_verbatim());
+        assert_eq!(
+            body.line_range(0).map(|r| &d.source[r]),
+            Some("flowchart LR")
+        );
+    }
+
+    #[test]
+    fn the_mermaid_language_tag_ignores_case() {
+        for fence in ["mermaid", "Mermaid", "MERMAID"] {
+            let d = parse(format!("```{fence}\nA --> B\n```"));
+            assert!(
+                matches!(d.blocks[0].kind, BlockKind::Mermaid { .. }),
+                "{fence} reads as mermaid"
+            );
+        }
+    }
+
+    #[test]
+    fn an_empty_mermaid_block_parses_without_panic() {
+        let d = parse("```mermaid\n```");
+        assert!(matches!(d.blocks[0].kind, BlockKind::Mermaid { .. }));
+        let body = mermaid_body(&d.blocks[0]);
+        assert!(body.is_empty(), "no rows in an empty diagram");
+    }
+
+    #[test]
+    fn plain_code_fences_stay_code_blocks() {
+        let d = parse("```rust\nfn main() {}\n```");
+        let BlockKind::CodeBlock { language, .. } = &d.blocks[0].kind else {
+            panic!("expected code block, got {:?}", d.blocks[0].kind)
+        };
+        assert_eq!(language.as_deref(), Some("rust"));
+        // A language the renderer shares a prefix with must not trip it.
+        let d = parse("```mermaidish\nA --> B\n```");
+        assert!(matches!(d.blocks[0].kind, BlockKind::CodeBlock { .. }));
+    }
+
+    #[test]
+    fn several_mermaid_blocks_each_keep_their_source() {
+        let d = parse("```mermaid\nA --> B\n```\n\ntext\n\n```mermaid\nC --> D\n```");
+        assert_eq!(d.blocks.len(), 3);
+        let first = mermaid_body(&d.blocks[0]);
+        let second = mermaid_body(&d.blocks[2]);
+        assert_eq!(first.iter(&d.source).collect::<Vec<_>>(), ["A --> B"]);
+        assert_eq!(second.iter(&d.source).collect::<Vec<_>>(), ["C --> D"]);
+    }
+
+    #[test]
+    fn a_mermaid_block_between_paragraphs_keeps_its_neighbors() {
+        let d = parse("before\n\n```mermaid\nA --> B\n```\n\nafter");
+        assert_eq!(d.blocks.len(), 3);
+        assert!(matches!(d.blocks[0].kind, BlockKind::Paragraph { .. }));
+        assert!(matches!(d.blocks[1].kind, BlockKind::Mermaid { .. }));
+        assert!(matches!(d.blocks[2].kind, BlockKind::Paragraph { .. }));
     }
 
     #[test]

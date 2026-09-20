@@ -4277,3 +4277,346 @@ fn a_paragraph_with_thousands_of_inline_spans_keeps_every_span_in_order() {
         "every span's text reaches the runs once"
     );
 }
+
+/// Drains render arrivals until none pend, bounded by time: the app's
+/// waker cycle compressed into a poll.
+fn settle_mermaid(media: &mut MediaCache) {
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while media.pending_mermaid() > 0 {
+        assert!(Instant::now() < deadline, "the renders never landed");
+        let _ = media.drain_remote();
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    let _ = media.drain_remote();
+}
+
+/// Lays out and settles every diagram the way the app does: the first
+/// pass queues the renders and shows the placeholders, the arrivals
+/// fold in, and the relayout places the pixels.
+fn lay_settled(source: &str, width: f32) -> (Document, LayoutDoc, MediaCache, FontStore) {
+    let doc = markdown::parse(source);
+    let mut media = MediaCache::new(PathBuf::from("."));
+    let mut fonts = fonts();
+    let theme = Theme::default_dark();
+    let _ = layout(&doc, &theme, &mut fonts, &mut media, &cfg(), width);
+    settle_mermaid(&mut media);
+    let laid = layout(&doc, &theme, &mut fonts, &mut media, &cfg(), width);
+    (doc, laid, media, fonts)
+}
+
+/// The first pass queues and shows the quiet placeholder, no image
+/// yet — the interactive path never renders on the layout thread.
+#[test]
+fn a_cold_diagram_shows_the_placeholder_and_queues_once() {
+    let doc = markdown::parse("```mermaid\nflowchart LR\n  A --> B\n```");
+    let mut fonts = fonts();
+    let mut media = MediaCache::new(PathBuf::from("."));
+    let first = layout(
+        &doc,
+        &Theme::default_dark(),
+        &mut fonts,
+        &mut media,
+        &cfg(),
+        800.0,
+    );
+    assert!(first.images.is_empty(), "nothing places before the render");
+    assert_eq!(media.pending_mermaid(), 1, "one render queued");
+    // A repaint before the arrival asks nothing new.
+    let _ = layout(
+        &doc,
+        &Theme::default_dark(),
+        &mut fonts,
+        &mut media,
+        &cfg(),
+        800.0,
+    );
+    assert_eq!(media.pending_mermaid(), 1, "the pending job deduplicates");
+    settle_mermaid(&mut media);
+    assert_eq!(media.pending_mermaid(), 0, "the arrival landed");
+    let second = layout(
+        &doc,
+        &Theme::default_dark(),
+        &mut fonts,
+        &mut media,
+        &cfg(),
+        800.0,
+    );
+    assert_eq!(second.images.len(), 1, "the relayout places the pixels");
+}
+
+/// The full chain, settled: a mermaid block renders to an svg,
+/// registers under its mermaid:// key, and places as an ordinary image
+/// between the heading and the paragraph after it.
+#[test]
+fn a_mermaid_block_places_an_image_between_text() {
+    let (doc, l, ..) = lay_settled(
+        "# Diagram\n\n```mermaid\nflowchart LR\n  A --> B\n```\n\nAfter.",
+        800.0,
+    );
+    assert_eq!(l.images.len(), 1, "one placed diagram");
+    let image = &l.images[0];
+    assert!(
+        image.src.starts_with("mermaid://"),
+        "the source is the media key: {}",
+        image.src
+    );
+    assert!(image.width > 0.0 && image.width <= 800.0, "fits the column");
+    assert!(image.height > 0.0);
+    let after = find_text(&l, &doc, "After.");
+    assert!(
+        after.y > image.y + image.height,
+        "the paragraph follows the diagram"
+    );
+    let title = find_text(&l, &doc, "Diagram");
+    assert!(image.y > title.y, "the diagram follows the heading");
+}
+
+/// A diagram wider than the column shrinks to it with its aspect
+/// ratio kept; the same diagram in a wide column keeps its natural
+/// proportions too.
+#[test]
+fn a_wide_mermaid_scales_proportionally() {
+    let source = "```mermaid\nflowchart LR\n  A --> B --> C --> D --> E --> F --> G\n```";
+    let (_, narrow, ..) = lay_settled(source, 300.0);
+    let (_, wide, ..) = lay_settled(source, 2000.0);
+    let (narrow, wide) = (&narrow.images[0], &wide.images[0]);
+    assert!(narrow.width <= 300.0, "shrunk to the column");
+    let narrow_ratio = narrow.height / narrow.width;
+    let wide_ratio = wide.height / wide.width;
+    assert!(
+        (narrow_ratio - wide_ratio).abs() < 1e-3,
+        "aspect kept: {narrow_ratio} vs {wide_ratio}"
+    );
+    assert!(narrow.width < wide.width, "the wide column shows it larger");
+}
+
+/// The resize behavior: the same document relaid at every window width
+/// keeps the diagram inside the column with its proportions.
+#[test]
+fn a_mermaid_refits_through_resizes() {
+    let source = "```mermaid\nflowchart LR\n  A --> B --> C\n```";
+    let mut ratio: Option<f32> = None;
+    for width in [1200.0, 800.0, 500.0] {
+        let (_, l, ..) = lay_settled(source, width);
+        let image = &l.images[0];
+        assert!(image.width <= width, "fits {width}");
+        assert!(image.width > 0.0 && image.height > 0.0);
+        let current = image.height / image.width;
+        if let Some(seen) = ratio {
+            assert!(
+                (seen - current).abs() < 1e-3,
+                "aspect holds through the resize"
+            );
+        }
+        ratio = Some(current);
+    }
+}
+
+/// The diagram reaches the pixels: painting the band over the placed
+/// image leaves ink that is not the surface.
+#[test]
+fn a_mermaid_diagram_reaches_the_pixels() {
+    let t = Theme::default_dark();
+    let (doc, l, mut media, mut f) = lay_settled("```mermaid\nflowchart LR\n  A --> B\n```", 800.0);
+    let image = &l.images[0];
+    let band_h = (image.y + image.height).ceil().max(1.0) as u32 + 4;
+    let pixels = oryx::paint::band(&l, &doc, &t, &mut f, &mut media, &[], 0.0, 800, band_h);
+    let bg = t.surface.background;
+    let bgpx = ((bg.r as u32) << 16) | ((bg.g as u32) << 8) | bg.b as u32;
+    let mut inked = 0usize;
+    for y in 0..band_h as usize {
+        for x in image.x as usize..(image.x + image.width) as usize {
+            if pixels[y * 800 + x] != bgpx {
+                inked += 1;
+            }
+        }
+    }
+    assert!(inked > 50, "the diagram paints ink, got {inked}");
+}
+
+/// A broken diagram draws the error panel and the valid one after it
+/// still renders: one bad block never poisons the next.
+#[test]
+fn a_broken_diagram_errors_without_poisoning_the_next() {
+    let (_, l, ..) = lay_settled(
+        "```mermaid\nflowchart LR\n  subgraph X\n  A --> B\n```\n\n```mermaid\nC --> D\n```",
+        800.0,
+    );
+    assert_eq!(l.images.len(), 1, "only the valid diagram places");
+    let framed: Vec<&DecoRect> = l.rects.iter().filter(|r| r.stroke > 0.0).collect();
+    assert_eq!(framed.len(), 1, "one error panel, not {framed:?}");
+}
+
+/// The same diagram across layout passes renders once: after the
+/// arrival, a later pass answers from the cache and queues nothing.
+#[test]
+fn the_same_diagram_registers_once_across_passes() {
+    let doc = markdown::parse("```mermaid\nflowchart LR\n  A --> B\n```");
+    let mut fonts = fonts();
+    let mut media = MediaCache::new(PathBuf::from("."));
+    let first = layout(
+        &doc,
+        &Theme::default_dark(),
+        &mut fonts,
+        &mut media,
+        &cfg(),
+        800.0,
+    );
+    assert!(first.images.is_empty(), "cold, nothing places");
+    settle_mermaid(&mut media);
+    let settled = layout(
+        &doc,
+        &Theme::default_dark(),
+        &mut fonts,
+        &mut media,
+        &cfg(),
+        800.0,
+    );
+    let key = settled.images[0].src.clone();
+    let placed = (
+        settled.images[0].width.round().max(1.0) as u32,
+        settled.images[0].height.round().max(1.0) as u32,
+    );
+    assert!(
+        media.scaled(&key, placed.0, placed.1).is_some(),
+        "the pixels rasterized"
+    );
+    let second = layout(
+        &doc,
+        &Theme::default_dark(),
+        &mut fonts,
+        &mut media,
+        &cfg(),
+        800.0,
+    );
+    assert_eq!(second.images.len(), 1);
+    assert_eq!(second.images[0].src, key, "the same key answers");
+    assert_eq!(media.pending_mermaid(), 0, "a warm diagram queues nothing");
+}
+
+/// A superseded document's late arrival cannot disturb the current
+/// one: results land under their own content-addressed keys, and the
+/// layout reads only the keys it computed.
+#[test]
+fn a_stale_render_lands_under_its_own_key() {
+    let v1 = markdown::parse("```mermaid\nflowchart LR\n  A --> B\n```");
+    let v2 = markdown::parse("```mermaid\nflowchart LR\n  A --> B --> C\n```");
+    let mut fonts = fonts();
+    let mut media = MediaCache::new(PathBuf::from("."));
+    let theme = Theme::default_dark();
+    // v1 queues, then the document reloads before the arrival lands.
+    let _ = layout(&v1, &theme, &mut fonts, &mut media, &cfg(), 800.0);
+    let _ = layout(&v2, &theme, &mut fonts, &mut media, &cfg(), 800.0);
+    settle_mermaid(&mut media);
+    let current = layout(&v2, &theme, &mut fonts, &mut media, &cfg(), 800.0);
+    assert_eq!(current.images.len(), 1);
+    let own = oryx::doc::mermaid::cache_key(
+        "flowchart LR\n  A --> B --> C",
+        &oryx::doc::mermaid::MermaidTheme::from_oryx(&theme),
+    )
+    .uri();
+    assert_eq!(
+        current.images[0].src, own,
+        "the current document reads its own key"
+    );
+}
+
+/// A theme switch re-keys the diagram: the same source under the
+/// second theme places under a different mermaid:// key and the old
+/// palette never serves.
+#[test]
+fn a_theme_switch_rekeys_the_placed_diagram() {
+    let doc = markdown::parse("```mermaid\nflowchart LR\n  A --> B\n```");
+    let mut fonts = fonts();
+    let mut media = MediaCache::new(PathBuf::from("."));
+    let theme = Theme::default_dark();
+    let _ = layout(&doc, &theme, &mut fonts, &mut media, &cfg(), 800.0);
+    settle_mermaid(&mut media);
+    let dark = layout(&doc, &theme, &mut fonts, &mut media, &cfg(), 800.0);
+    let dark_key = dark.images[0].src.clone();
+
+    let mut light = Theme::default_dark();
+    light.surface.background = oryx::style::theme::Rgba {
+        r: 0xFF,
+        g: 0xFF,
+        b: 0xFF,
+        a: 255,
+    };
+    light.surface.foreground = oryx::style::theme::Rgba {
+        r: 0x18,
+        g: 0x18,
+        b: 0x1D,
+        a: 255,
+    };
+    light.text.body = light.surface.foreground;
+    light.blocks.code_bg = oryx::style::theme::Rgba {
+        r: 0xF3,
+        g: 0xF4,
+        b: 0xF8,
+        a: 255,
+    };
+    let _ = layout(&doc, &light, &mut fonts, &mut media, &cfg(), 800.0);
+    settle_mermaid(&mut media);
+    let relaid = layout(&doc, &light, &mut fonts, &mut media, &cfg(), 800.0);
+    let light_key = relaid.images[0].src.clone();
+    assert_ne!(dark_key, light_key, "the switch re-keys the diagram");
+    assert!(
+        media.generated(&dark_key).is_some() && media.generated(&light_key).is_some(),
+        "both palettes stand registered"
+    );
+}
+
+/// The sample gallery: every diagram kind in examples/sample-mermaid.md
+/// renders, exactly the one intentional invalid block shows the error
+/// panel, and nothing else disturbs the document.
+#[test]
+fn the_sample_mermaid_gallery_renders_every_kind() {
+    let source = std::fs::read_to_string("examples/sample-mermaid.md").expect("the sample exists");
+    let fences = source.matches("```mermaid").count();
+    assert!(fences >= 10, "the gallery holds every kind, got {fences}");
+    let (doc, l, media, ..) = lay_settled(&source, 800.0);
+    assert_eq!(
+        l.images.len(),
+        fences - 1,
+        "every kind but the intentional invalid one places"
+    );
+    let theme = Theme::default_dark();
+    let error_panels = l
+        .rects
+        .iter()
+        .filter(|r| r.stroke > 0.0 && r.color == theme.alerts.warning)
+        .count();
+    assert_eq!(error_panels, 1, "one error panel, for the invalid block");
+    assert_eq!(media.pending_mermaid(), 0, "nothing left in flight");
+    assert!(!doc.blocks.is_empty());
+}
+
+/// The mermaid scheme must not misroute ordinary image sources: a
+/// local file, a remote fetch and a diagram in one document each find
+/// their own path.
+#[test]
+fn a_diagram_beside_local_and_remote_images() {
+    let source = "![logo](tests/fixtures/oryx-test.png)\n\n\
+                  ```mermaid\nflowchart LR\n  A --> B\n```\n\n\
+                  ![none](tests/fixtures/missing.png)";
+    let (doc, mut media, mut fonts) = (
+        markdown::parse(source),
+        MediaCache::new(PathBuf::from(".")),
+        fonts(),
+    );
+    let theme = Theme::default_dark();
+    let _ = layout(&doc, &theme, &mut fonts, &mut media, &cfg(), 800.0);
+    settle_mermaid(&mut media);
+    let l = layout(&doc, &theme, &mut fonts, &mut media, &cfg(), 800.0);
+    assert_eq!(l.images.len(), 2, "the png and the diagram place");
+    assert!(
+        l.images.iter().any(|i| i.src.ends_with("oryx-test.png")),
+        "the file path still reads as one"
+    );
+    assert!(l.images.iter().any(|i| i.src.starts_with("mermaid://")));
+    // The missing file keeps its placeholder without touching the diagram.
+    assert!(
+        media.dimensions("tests/fixtures/missing.png").is_none(),
+        "a missing file stays missing"
+    );
+}

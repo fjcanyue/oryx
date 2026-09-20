@@ -233,6 +233,26 @@ def tilde_fences():
 
 Fence languages cover the bundled grammar collection, from `rust` and `python` through `toml`, `kotlin`, `swift`, `typescript`, `dockerfile`, `zig`, `terraform`, `graphql` and `protobuf`. Oryx also opens source files directly and renders the whole file highlighted.
 
+## Diagrams
+
+`````markdown
+```mermaid
+flowchart LR
+    A[Start] --> B{Valid?}
+    B -->|Yes| C[Continue]
+    B -->|No| D[Stop]
+```
+````
+
+```mermaid
+flowchart LR
+    A[Start] --> B{Valid?}
+    B -->|Yes| C[Continue]
+    B -->|No| D[Stop]
+```
+
+A fenced `mermaid` block renders as the diagram itself, off the UI thread and cached per source and theme. The renderer is native Rust, not mermaid.js, so a few of the newest syntax forms may differ from the JavaScript library. Flowcharts, sequence, class, state, ER, mindmap, pie, timeline, gantt and git diagrams are recognized, along with the renderer's other kinds. A diagram too wide for the column shrinks to fit, keeping its proportions; an invalid one shows an error panel and the document reads on. See `examples/sample-mermaid.md` for one of every kind.
+
 ## Tables
 
 ```markdown

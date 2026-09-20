@@ -234,6 +234,15 @@ struct BookImage {
     dims: (u32, u32),
 }
 
+/// An image born in memory rather than read from disk: the Mermaid
+/// diagram's svg. The cache is its only home — no temp file, ever.
+#[derive(Debug, Clone)]
+pub struct GeneratedMedia {
+    pub bytes: Arc<[u8]>,
+    pub width: u32,
+    pub height: u32,
+}
+
 /// The budget for decoded originals of every kind, about twenty
 /// screenshots: enough that the visible region and zoom stay warm,
 /// small enough that a book or a page of photographs never holds every
@@ -282,6 +291,68 @@ impl DecodePool {
     }
 }
 
+/// A small render pool behind one queue, mirroring the decode pool.
+/// Dropping it closes the queue; workers drain what remains and exit
+/// on their own. A result lands under its own content-addressed key,
+/// so a superseded document's result cannot overwrite a newer one's.
+struct MermaidPool {
+    sender: std::sync::mpsc::Sender<(String, String, crate::doc::mermaid::MermaidTheme)>,
+}
+
+impl MermaidPool {
+    fn spawn(arrivals: Arrivals, waker: Option<Waker>) -> MermaidPool {
+        let (sender, receiver) =
+            std::sync::mpsc::channel::<(String, String, crate::doc::mermaid::MermaidTheme)>();
+        let receiver = Arc::new(Mutex::new(receiver));
+        // Diagram renders are heavier than decodes; a couple of
+        // workers keep a page of diagrams moving without hogging cores.
+        let workers = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(4)
+            .clamp(1, 4);
+        for _ in 0..workers {
+            let receiver = Arc::clone(&receiver);
+            let arrivals = Arc::clone(&arrivals);
+            let waker = waker.clone();
+            std::thread::spawn(move || loop {
+                let job = receiver.lock().expect("render queue").recv();
+                match job {
+                    Ok((uri, source, theme)) => {
+                        let outcome = crate::doc::mermaid::render(&source, &theme)
+                            .map_err(|err| err.to_string());
+                        arrivals
+                            .lock()
+                            .expect("arrivals lock")
+                            .push(Arrival::Mermaid(uri, outcome));
+                        if let Some(wake) = &waker {
+                            wake();
+                        }
+                    }
+                    Err(_) => break,
+                }
+            });
+        }
+        MermaidPool { sender }
+    }
+
+    fn send(&self, job: (String, String, crate::doc::mermaid::MermaidTheme)) {
+        let _ = self.sender.send(job);
+    }
+}
+
+/// Where a diagram stands, as layout asks before it places anything.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MermaidState {
+    /// The svg is registered; place it.
+    Registered,
+    /// A render is in flight; show the plain placeholder.
+    Pending,
+    /// The render failed; the message feeds the error panel.
+    Failed(String),
+    /// Nothing yet; queue the render.
+    Missing,
+}
+
 /// Whether bytes read as markup rather than a raster header.
 fn looks_svg(bytes: &[u8]) -> bool {
     let head = &bytes[..bytes.len().min(512)];
@@ -325,6 +396,9 @@ pub type SourceSink = Arc<dyn Fn(Vec<SourceEntry>) + Send + Sync>;
 enum Arrival {
     Pixels(String, Option<RgbaImage>),
     Sources(Vec<SourceEntry>),
+    /// A rendered diagram under its own key: the svg, or the failure
+    /// that pins the error panel.
+    Mermaid(String, Result<crate::doc::mermaid::MermaidRender, String>),
 }
 
 /// Results queued by background threads until the main thread folds
@@ -337,11 +411,23 @@ pub struct MediaCache {
     originals: HashMap<String, Option<RgbaImage>>,
     scaled: HashMap<(String, u32, u32), Vec<u8>>,
     remote: HashMap<String, RemoteState>,
+    /// In-memory svg media by `mermaid://` key, rasterized on demand by
+    /// the same path every image takes.
+    generated: HashMap<String, GeneratedMedia>,
     /// Book image sources by key: sizes answer from here, pixels decode
     /// on demand.
     book: HashMap<String, BookImage>,
     /// Book keys with a decode in flight, so a repaint asks only once.
     decoding: std::collections::HashSet<String>,
+    /// Diagram keys with a render in flight, so a relayout asks only
+    /// once; the render answers under the same content-addressed key
+    /// the layout computed, so a stale result can only land as itself.
+    mermaid_pending: std::collections::HashSet<String>,
+    /// Diagram keys that rendered to an error, with the message the
+    /// panel shows; a source or theme change re-keys past it.
+    mermaid_failed: HashMap<String, String>,
+    /// The render pool, spawned on first use and living with the cache.
+    mermaid_pool: Option<MermaidPool>,
     /// Local images' header sizes, so layout never decodes one; None
     /// for a file whose header does not read.
     sizes: HashMap<String, Option<(u32, u32)>>,
@@ -373,8 +459,12 @@ impl MediaCache {
             originals: HashMap::new(),
             scaled: HashMap::new(),
             remote: HashMap::new(),
+            generated: HashMap::new(),
             book: HashMap::new(),
             decoding: std::collections::HashSet::new(),
+            mermaid_pending: std::collections::HashSet::new(),
+            mermaid_failed: HashMap::new(),
+            mermaid_pool: None,
             sizes: HashMap::new(),
             lru: Vec::new(),
             lru_bytes: 0,
@@ -387,6 +477,70 @@ impl MediaCache {
 
     pub fn set_waker(&mut self, waker: Waker) {
         self.waker = Some(waker);
+    }
+
+    /// Whether a source is an in-memory diagram, never a path: the one
+    /// scheme the cache answers from its own map, never disk or network.
+    fn is_generated(src: &str) -> bool {
+        src.starts_with("mermaid://")
+    }
+
+    /// Registers an svg born in memory under its `mermaid://` key.
+    /// Re-registering the same key keeps what is there: same key, same
+    /// diagram, and warm pixels survive.
+    pub fn register_generated_svg(&mut self, key: String, svg: Arc<[u8]>, width: u32, height: u32) {
+        self.generated.entry(key).or_insert(GeneratedMedia {
+            bytes: svg,
+            width,
+            height,
+        });
+    }
+
+    /// The generated media a `mermaid://` key holds, if it was
+    /// registered; layout asks before paying for a render.
+    pub fn generated(&self, key: &str) -> Option<&GeneratedMedia> {
+        self.generated.get(key)
+    }
+
+    /// Where a diagram stands under its key: registered, rendering,
+    /// failed, or not asked for yet.
+    pub fn mermaid_state(&self, key: &str) -> MermaidState {
+        if self.generated.contains_key(key) {
+            return MermaidState::Registered;
+        }
+        if let Some(message) = self.mermaid_failed.get(key) {
+            return MermaidState::Failed(message.clone());
+        }
+        if self.mermaid_pending.contains(key) {
+            return MermaidState::Pending;
+        }
+        MermaidState::Missing
+    }
+
+    /// Diagram renders still in flight; layout settles when this
+    /// reaches zero.
+    pub fn pending_mermaid(&self) -> usize {
+        self.mermaid_pending.len()
+    }
+
+    /// Queues a diagram render once: a key already pending or
+    /// registered asks nothing. The worker lands the result under the
+    /// same content-addressed key, so only the current document's keys
+    /// are ever read back.
+    pub fn queue_mermaid(
+        &mut self,
+        key: String,
+        source: String,
+        theme: crate::doc::mermaid::MermaidTheme,
+    ) {
+        if self.mermaid_pending.contains(&key) || self.generated.contains_key(&key) {
+            return;
+        }
+        self.mermaid_pending.insert(key.clone());
+        let pool = self.mermaid_pool.get_or_insert_with(|| {
+            MermaidPool::spawn(Arc::clone(&self.arrivals), self.waker.clone())
+        });
+        pool.send((key, source, theme));
     }
 
     /// Adopts book image sources: bytes and header dimensions per key.
@@ -478,6 +632,8 @@ impl MediaCache {
     /// book image's size was known from its header, so its pixels only
     /// repaint; a remote fetch's size lands with it, so layout reruns,
     /// unless the fetch refreshed a placed copy at the same size. A
+    /// diagram's size lands with it the same way, and its failure
+    /// swaps the placeholder for the error panel — both relayout. A
     /// sources batch registers sizes for blocks not yet laid out and
     /// asks nothing by itself.
     pub fn drain_remote(&mut self) -> Folded {
@@ -490,6 +646,22 @@ impl MediaCache {
             let (url, image) = match arrival {
                 Arrival::Sources(sources) => {
                     self.adopt(sources);
+                    continue;
+                }
+                Arrival::Mermaid(key, outcome) => {
+                    self.mermaid_pending.remove(&key);
+                    folded = folded.max(Folded::Relayout);
+                    match outcome {
+                        Ok(rendered) => self.register_generated_svg(
+                            key,
+                            rendered.svg,
+                            rendered.width.max(1.0) as u32,
+                            rendered.height.max(1.0) as u32,
+                        ),
+                        Err(message) => {
+                            self.mermaid_failed.insert(key, message);
+                        }
+                    }
                     continue;
                 }
                 Arrival::Pixels(url, image) => (url, image),
@@ -614,6 +786,19 @@ impl MediaCache {
     }
 
     fn original(&mut self, src: &str) -> Option<&RgbaImage> {
+        // An in-memory diagram rasterizes from its own bytes, the same
+        // svg path a file-backed one takes; nothing reads the disk.
+        if Self::is_generated(src) {
+            if !self.originals.contains_key(src) {
+                let image = self
+                    .generated
+                    .get(src)
+                    .map(|media| load_svg(&media.bytes).map(capped));
+                self.adopt_pixels(src.to_string(), image.flatten());
+            }
+            self.touch(src);
+            return self.originals.get(src).and_then(|o| o.as_ref());
+        }
         if Self::is_remote(src) {
             return self.remote_original(src);
         }
@@ -673,6 +858,9 @@ impl MediaCache {
     /// its own, neither decoding a pixel; a remote image has no header
     /// to read ahead of its bytes, so its pixels answer.
     pub fn dimensions(&mut self, src: &str) -> Option<(u32, u32)> {
+        if let Some(media) = self.generated.get(src) {
+            return Some((media.width, media.height));
+        }
         if let Some(entry) = self.book.get(src) {
             return Some(entry.dims);
         }
@@ -1130,5 +1318,59 @@ mod tests {
         assert_eq!(scaled.len(), 40 * 20 * 4);
         assert_eq!(cache.dimensions("missing.png"), None);
         assert!(cache.scaled("missing.png", 10, 10).is_none());
+    }
+
+    /// A generated svg answers from memory alone: the document folder
+    /// never exists, so any disk read would fail the test.
+    #[test]
+    fn a_generated_svg_never_reads_the_disk() {
+        let mut media = MediaCache::new(temp_dir().join("no-such-dir"));
+        media.register_generated_svg(
+            "mermaid://ab87b30f5bc291c3".to_string(),
+            Arc::from(
+                r##"<svg xmlns="http://www.w3.org/2000/svg" width="60" height="30">
+                <rect width="60" height="30" fill="#c87137"/></svg>"##
+                    .as_bytes()
+                    .to_vec(),
+            ),
+            60,
+            30,
+        );
+        assert!(media.generated("mermaid://ab87b30f5bc291c3").is_some());
+        assert_eq!(
+            media.dimensions("mermaid://ab87b30f5bc291c3"),
+            Some((60, 30)),
+            "the size answers from the registration"
+        );
+        assert_eq!(
+            media.dimensions("mermaid://not-registered"),
+            None,
+            "an unregistered key is a missing image"
+        );
+        let scaled = media
+            .scaled("mermaid://ab87b30f5bc291c3", 30, 15)
+            .expect("the svg rasterizes through the normal path");
+        assert_eq!(scaled.len(), 30 * 15 * 4);
+    }
+
+    #[test]
+    fn re_registering_a_generated_svg_keeps_what_is_there() {
+        let mut media = MediaCache::new(temp_dir());
+        let bytes: Arc<[u8]> = Arc::from(
+            r##"<svg xmlns="http://www.w3.org/2000/svg" width="60" height="30">
+            <rect width="60" height="30" fill="#c87137"/></svg>"##
+                .as_bytes()
+                .to_vec(),
+        );
+        media.register_generated_svg("mermaid://x".to_string(), Arc::clone(&bytes), 60, 30);
+        // Warm the pixels, then the same key arrives again.
+        assert!(media.scaled("mermaid://x", 30, 15).is_some());
+        media.register_generated_svg("mermaid://x".to_string(), bytes, 120, 60);
+        assert_eq!(
+            media.dimensions("mermaid://x"),
+            Some((60, 30)),
+            "the first registration stands"
+        );
+        assert_eq!(media.generated.len(), 1);
     }
 }
