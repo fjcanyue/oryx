@@ -975,3 +975,90 @@ fn gutter_measured() {
         numbered - plain
     );
 }
+
+/// What the syntax guess costs a file without an extension, at open and
+/// at each rebuild from the text: 8 MB of short lines, and 8 MB with no
+/// line break at all, where the first line is the whole file.
+#[test]
+#[ignore = "timing probe, release mode"]
+fn sniff_measured() {
+    let lines = "some words on a line\n".repeat(8 * 1024 * 1024 / 21);
+    let one_line = "x".repeat(8 * 1024 * 1024);
+    let time = |text: &str| {
+        (0..3)
+            .map(|_| {
+                let started = Instant::now();
+                let _ = oryx::style::highlight::sniff_language("data", text);
+                started.elapsed().as_secs_f64() * 1000.0
+            })
+            .fold(f64::MAX, f64::min)
+    };
+    // The grammars load once, outside the figures.
+    let _ = oryx::style::highlight::sniff_language("data", "x\n");
+    println!(
+        "sniff: {:.2}ms on 8 MB of short lines, {:.2}ms on 8 MB with no line break",
+        time(&lines),
+        time(&one_line)
+    );
+}
+
+/// What one save in a shown folder costs the sidebar: the save's
+/// temporary file moves the folder's stamp and the next disk check reads
+/// the tree again, on the window's thread. A folder of 5,000 files with
+/// known extensions, and one of 5,000 without, where each file is opened
+/// and its head read to tell text from binary.
+#[test]
+#[ignore = "timing probe, release mode"]
+fn sidebar_rescan_measured() {
+    let root = std::env::temp_dir().join(format!("oryx-perf-side-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let time = |name: &str, suffix: &str| {
+        let dir = root.join(name);
+        std::fs::create_dir_all(&dir).unwrap();
+        for i in 0..5000 {
+            std::fs::write(dir.join(format!("file-{i:04}{suffix}")), "some text\n").unwrap();
+        }
+        let mut side = oryx::ui::sidebar::Sidebar::new(&dir);
+        (0..3)
+            .map(|round| {
+                // The kernel stamps a folder with a coarse clock.
+                std::thread::sleep(std::time::Duration::from_millis(20));
+                std::fs::write(dir.join(format!("touch-{round}.md")), "x").unwrap();
+                let started = Instant::now();
+                assert!(side.refresh_if_changed(), "the stamp moved");
+                started.elapsed().as_secs_f64() * 1000.0
+            })
+            .fold(f64::MAX, f64::min)
+    };
+    let known = time("known", ".md");
+    let unknown = time("unknown", "");
+    let _ = std::fs::remove_dir_all(&root);
+    println!("sidebar rescan of 5,000 files: {known:.2}ms with extensions, {unknown:.2}ms without");
+}
+
+/// What a select-all costs the window's thread before its count leaves
+/// for a thread of its own: the selection's plain text, built on the
+/// 8 MB markdown page and on the 8 MB code file.
+#[test]
+#[ignore = "timing probe, release mode"]
+fn selection_text_measured() {
+    use oryx::ui::selection;
+    let (_, _, page) = measure_open(&large_gen::generate(8 * 1024 * 1024), "md");
+    let (_, _, code) = measure_open(&large_gen::generate_code(8 * 1024 * 1024), "rs");
+    let time = |doc: &oryx::doc::model::Document| {
+        let all = selection::all(doc).expect("a page with text");
+        (0..3)
+            .map(|_| {
+                let started = Instant::now();
+                let text = selection::plain_text(&all, doc);
+                (started.elapsed().as_secs_f64() * 1000.0, text.len())
+            })
+            .min_by(|a, b| a.0.total_cmp(&b.0))
+            .unwrap()
+    };
+    let (page_ms, page_len) = time(&page);
+    let (code_ms, code_len) = time(&code);
+    println!(
+        "select-all text at 8 MB: markdown page {page_ms:.2}ms ({page_len} bytes), code {code_ms:.2}ms ({code_len} bytes)"
+    );
+}

@@ -110,7 +110,16 @@ pub fn reparse(
         // re-derives the same source view the door opened, colors and
         // all. `source_document` names that shape.
         FileKind::Markdown => load::code_document(Some("md"), current),
-        FileKind::Unknown => load::code_document(None, current),
+        // A path that names no language: the open read the text for
+        // one (a shebang, a modeline), and the document keeps it
+        // through its edits.
+        FileKind::Unknown => {
+            let language = match old.blocks.first().map(|b| &b.kind) {
+                Some(BlockKind::CodeBlock { language, .. }) => language.as_deref(),
+                _ => None,
+            };
+            load::code_document(language, current)
+        }
         _ => load::text_document(current),
     };
     if new.plain_file {
@@ -834,6 +843,32 @@ mod tests {
         assert!(new.plain_file);
         assert!(!new.code_file);
         assert_eq!(&*new.source, "hello world\n");
+    }
+
+    #[test]
+    fn reparse_keeps_the_language_a_file_without_an_extension_opened_with() {
+        // The path alone says unknown; the open read the shebang and
+        // named the grammar, and an edit must not lose it.
+        let old = load::code_document(Some("Python"), "#!/usr/bin/env python3\nprint(1)\n");
+        let new = reparse(
+            FileKind::Unknown,
+            "#!/usr/bin/env python3\nprint(12)\n",
+            &old,
+            1..2,
+            1..2,
+        );
+        assert!(new.code_file);
+        assert!(matches!(
+            &new.blocks[0].kind,
+            BlockKind::CodeBlock { language: Some(name), .. } if name == "Python"
+        ));
+        // A file the open could not name stays without a language.
+        let old = load::code_document(None, "some words\n");
+        let new = reparse(FileKind::Unknown, "some more words\n", &old, 0..1, 0..1);
+        assert!(matches!(
+            new.blocks[0].kind,
+            BlockKind::CodeBlock { language: None, .. }
+        ));
     }
 
     /// Drives one edit through both pipes: the in-place splice on `fast`

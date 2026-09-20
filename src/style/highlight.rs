@@ -666,6 +666,9 @@ fn resolve_syntax(token: &str) -> Option<&'static syntect::parsing::SyntaxRefere
     })
 }
 
+/// How much of a first line the first-line rules read, in bytes.
+const FIRST_LINE_READ: usize = 1024;
+
 /// The grammar for a file whose name carries no extension, from what
 /// the file says about itself, in four layers tried in order: its first
 /// line against the grammars' own first-line patterns (shebangs, an XML
@@ -678,8 +681,15 @@ fn resolve_syntax(token: &str) -> Option<&'static syntect::parsing::SyntaxRefere
 /// token.
 pub fn sniff_language(name: &str, text: &str) -> Option<&'static str> {
     let set = syntax_set();
+    // The first-line rules read a shebang or a header. A file with no
+    // line break is one line of any length, and the rules run over all
+    // they are given (105 ms at 8 MB), so they get its head alone.
     let first = text.lines().next().unwrap_or("");
-    if let Some(syntax) = set.find_syntax_by_first_line(first) {
+    let mut head = first.len().min(FIRST_LINE_READ);
+    while !first.is_char_boundary(head) {
+        head -= 1;
+    }
+    if let Some(syntax) = set.find_syntax_by_first_line(&first[..head]) {
         return Some(syntax.name.as_str());
     }
     if let Some(syntax) = modeline_token(text).and_then(|token| resolve_syntax(&token)) {
@@ -702,7 +712,9 @@ fn modeline_token(text: &str) -> Option<String> {
     let candidates = lines[..edge]
         .iter()
         .chain(lines[lines.len() - edge..].iter());
-    for line in candidates {
+    // A modeline is a short comment; a line longer than that is data,
+    // and a search through megabytes of it names nothing.
+    for line in candidates.filter(|line| line.len() <= FIRST_LINE_READ) {
         if let Some(token) = vim_modeline(line).or_else(|| emacs_modeline(line)) {
             return Some(token);
         }
@@ -1611,6 +1623,18 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// A file with no line break is one long first line: the rules read
+    /// its head, cut on a character, and a shebang there still answers.
+    #[test]
+    fn a_first_line_of_any_length_is_read_by_its_head() {
+        let long = format!("#!/bin/sh {}", "é".repeat(4 * FIRST_LINE_READ));
+        assert_eq!(
+            sniff_language("run", &long),
+            Some("Bourne Again Shell (bash)")
+        );
+        assert_eq!(sniff_language("data", &"é".repeat(FIRST_LINE_READ)), None);
     }
 
     /// A file with no extension says what it is in four ways, tried in

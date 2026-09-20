@@ -12,7 +12,7 @@
 use cosmic_text::{Attrs, Buffer, Color, Family, Metrics, Shaping};
 use tiny_skia::Pixmap;
 
-use crate::doc::model::Document;
+use crate::doc::model::{BlockKind, Document};
 use crate::layout::{code_lines_in, metrics, LayoutDoc, LineSeat};
 use crate::paint::band::blend_buffer;
 use crate::style::fonts::FontStore;
@@ -29,6 +29,17 @@ const INSET: f32 = 0.5;
 /// True for a document whose rows are the lines of its file.
 pub fn numbered(doc: &Document) -> bool {
     doc.code_file || doc.plain_file
+}
+
+/// The largest number the margin shows for `doc`: its last line's, or
+/// one more when the text ends in a line break, where the editor's caret
+/// can stand on the row after it and that row reads its own number.
+pub fn last_number(doc: &Document) -> usize {
+    let lines = match doc.blocks.first().map(|b| &b.kind) {
+        Some(BlockKind::CodeBlock { lines, .. }) => lines.len(),
+        _ => 0,
+    };
+    lines + usize::from(doc.source.ends_with('\n'))
 }
 
 /// The left margin the numbers of a file of `lines` lines need, the text
@@ -393,6 +404,17 @@ mod tests {
             ..ViewConfig::default()
         };
         assert_eq!(without.runs, lay(&doc, &cfg, &mut fonts).runs);
+    }
+
+    #[test]
+    fn the_margin_makes_room_for_the_number_of_the_row_after_the_final_newline() {
+        let text = "x\n".repeat(999);
+        let doc = load::code_document(None, &text);
+        assert_eq!(last_number(&doc), 1000, "the caret's row after line 999");
+        let doc = load::code_document(None, text.trim_end());
+        assert_eq!(last_number(&doc), 999, "no row after a last line left open");
+        let doc = load::text_document("");
+        assert_eq!(last_number(&doc), 0);
     }
 
     #[test]

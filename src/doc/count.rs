@@ -309,16 +309,24 @@ impl Html {
         let mut rest = raw.chars();
         while let Some(c) = rest.next() {
             match self {
+                // The page's rule: a `<` opens a tag before a letter or a
+                // slash, a hidden form before `!` or `?`, and is text
+                // anywhere else ("1 < 2").
                 Html::Text if c == '<' => {
-                    *self = if rest.as_str().starts_with("!--") {
-                        Html::Comment(0)
-                    } else {
-                        Html::Tag {
+                    let ahead = rest.as_str();
+                    if ahead.starts_with("!--") {
+                        *self = Html::Comment(0);
+                    } else if ahead
+                        .starts_with(|n: char| n.is_ascii_alphabetic() || "/!?".contains(n))
+                    {
+                        *self = Html::Tag {
                             name: String::new(),
                             naming: true,
                             quote: None,
-                        }
-                    };
+                        };
+                    } else {
+                        tally.push_char(c);
+                    }
                 }
                 Html::Text => tally.push_char(c),
                 Html::Tag {
@@ -440,6 +448,16 @@ mod tests {
         assert_eq!(c, counts(3, 14, 1));
         let c = markdown("<!-- a note > to self -->\n\nShown.\n");
         assert_eq!(c, counts(1, 6, 1));
+    }
+
+    #[test]
+    fn a_bare_less_than_sign_in_an_html_block_is_text() {
+        // The page draws a `<` as text unless a letter or a slash
+        // follows it, and the count reads the block the same way.
+        let plain = markdown("1 < 2 and 3 > 4\n");
+        let block = markdown("<div>\n1 < 2 and 3 > 4\n</div>\n");
+        assert_eq!(block, plain);
+        assert_eq!(plain.chars, 15);
     }
 
     #[test]

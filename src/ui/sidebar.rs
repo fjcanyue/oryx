@@ -282,7 +282,9 @@ fn recognized(path: &Path, is_dir: bool) -> bool {
 }
 
 /// What a scan lists of the dot entries: none, or all of them, and in
-/// either case the file shown in the document, which keeps its row.
+/// either case the file shown in the document, which keeps its row, and
+/// the dot folders on the way down to it, without which the row has
+/// nowhere to stand.
 #[derive(Clone, Copy)]
 struct Filter<'a> {
     show_hidden: bool,
@@ -291,7 +293,9 @@ struct Filter<'a> {
 
 impl Filter<'_> {
     fn keeps(&self, name: &str, path: &Path) -> bool {
-        self.show_hidden || !name.starts_with('.') || self.current == Some(path)
+        self.show_hidden
+            || !name.starts_with('.')
+            || self.current.is_some_and(|open| open.starts_with(path))
     }
 }
 
@@ -415,6 +419,11 @@ impl Sidebar {
             .collect();
         let selected = self.entries.get(self.selected).map(|e| e.path.clone());
         let fallback = self.selected;
+        // The hover names a row by its place in the old list; the next
+        // pointer move finds the row under it again.
+        if matches!(self.hover, Some(Hover::Row(_))) {
+            self.hover = None;
+        }
         self.entries = tree(&self.root, self.filter());
         // Parents come before their children in the list, so each
         // folder is found once its parent has been expanded again.
@@ -2054,6 +2063,34 @@ mod tests {
         side.set_show_hidden(false);
         assert_eq!(side.entries[side.selected].name, "zeta.md");
         assert!(!names(&side).contains(&".secret.md".to_string()));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn the_open_file_inside_a_dot_folder_keeps_its_row_through_a_toggle() {
+        let dir = temp_tree("hidden-inside");
+        std::fs::write(dir.join(".git/notes.md"), "x").unwrap();
+        let mut side = Sidebar::new(&dir);
+        side.set_show_hidden(true);
+        let git = side.entries.iter().position(|e| e.name == ".git").unwrap();
+        assert!(side.activate(git).is_none());
+        side.set_current(&dir.join(".git/notes.md"));
+        side.hover = Some(Hover::Row(1));
+        side.set_show_hidden(false);
+        assert!(
+            side.hover.is_none(),
+            "a hover from the old list marks no row of the new one"
+        );
+        let row = side
+            .entries
+            .iter()
+            .position(|e| e.path == dir.join(".git/notes.md"))
+            .expect("the open file keeps its row, and its folder with it");
+        assert_eq!(side.selected, row, "the selection stays on the open file");
+        assert!(
+            !names(&side).contains(&".gitignore".to_string()),
+            "the other dot entries stay out"
+        );
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

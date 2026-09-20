@@ -555,6 +555,11 @@ fn draw_strip(
 ) {
     let top = (strip.y - scroll_y) as i64;
     let shown = strip.width.min(width.saturating_sub(inset)) as usize;
+    // A sidebar at its minimum width can cover a narrow window whole;
+    // the strip's left edge is then past the row it would start on.
+    if shown == 0 {
+        return;
+    }
     for row in 0..strip.height as usize {
         let y = top + row as i64;
         if y < 0 || y >= height as i64 {
@@ -710,6 +715,22 @@ fn disk_verdict(seen: DiskState, now: Option<DiskState>, misses: u8, deleted: bo
     }
 }
 
+/// What the disk answers for a file: its identity, `None` when the file
+/// is not there, an error when the disk cannot tell (a folder that
+/// refuses the look, a share that stopped answering). An error is no
+/// news, never a deletion: the reader is not told their file is gone,
+/// and nothing is written on the strength of it.
+fn disk_state(path: &Path) -> std::io::Result<Option<DiskState>> {
+    use std::io::ErrorKind;
+    match std::fs::metadata(path) {
+        Ok(meta) => Ok(Some((meta.modified()?, meta.len()))),
+        Err(err) if matches!(err.kind(), ErrorKind::NotFound | ErrorKind::NotADirectory) => {
+            Ok(None)
+        }
+        Err(err) => Err(err),
+    }
+}
+
 /// Whether the editor's caret is painted: in the editor, on the lit
 /// half of its blink, and only while the window has the focus, the way
 /// a native text box behaves.
@@ -760,6 +781,21 @@ fn own_executable() -> Option<PathBuf> {
     std::env::var_os("APPIMAGE")
         .map(PathBuf::from)
         .or_else(|| std::env::current_exe().ok())
+}
+
+/// Starts a second Oryx and lets it go. A child that ends is kept by
+/// the system, as a process that no longer runs, until its parent asks
+/// how it ended: a thread asks, and ends with the answer. Nothing else
+/// ties the two, and the child outlives this Oryx.
+fn start_second(exe: &Path, args: Vec<std::ffi::OsString>) -> std::io::Result<()> {
+    let mut child = std::process::Command::new(exe).args(args).spawn()?;
+    // The window is open whether or not the thread starts.
+    let _ = std::thread::Builder::new()
+        .name("second-window".into())
+        .spawn(move || {
+            let _ = child.wait();
+        });
+    Ok(())
 }
 
 /// The notice for a deleted file, naming the way back: a save recreates
@@ -2030,6 +2066,7 @@ impl App {
         if !visible {
             self.pending_offset = Some(caret);
         }
+        self.count_after_edit();
         self.arm_pause_save();
         self.refresh_title();
     }
@@ -2145,12 +2182,7 @@ impl App {
             (!self.document.plain_file).then(|| Instant::now() + REHIGHLIGHT_REST);
         self.selection = None;
         self.sel_anchor = None;
-        // Two edits inside one frame can hand the second text the first
-        // one's address, which the frame's own check would read as no
-        // change; the edit schedules its count itself.
-        if self.config.word_count {
-            self.count_at = Some(Instant::now() + wordcount::REST);
-        }
+        self.count_after_edit();
         self.arm_pause_save();
         // The match set holds positions of the text that just changed;
         // the next frame recomputes it against the edit.
@@ -2181,10 +2213,7 @@ impl App {
     /// so its layout is never restarted here.
     fn sync_gutter(&mut self, avail: f32) {
         let needed = if self.numbers_shown() {
-            let lines = match self.document.blocks.first().map(|b| &b.kind) {
-                Some(BlockKind::CodeBlock { lines, .. }) => lines.len(),
-                _ => 0,
-            };
+            let lines = paint::gutter::last_number(&self.document);
             let digits = lines.max(1).ilog10() as usize + 1;
             let (family, size) = layout::line_face(&self.document, &self.cfg);
             let measured = self
@@ -2218,6 +2247,17 @@ impl App {
         }
     }
 
+    /// An edit schedules its count itself. Two edits inside one frame
+    /// can hand the second text the first one's address, which the
+    /// frame's own check would read as no change; and a count still out
+    /// read the older text, so its figures are not for this page.
+    fn count_after_edit(&mut self) {
+        if self.config.word_count {
+            self.count_asked += 1;
+            self.count_at = Some(Instant::now() + wordcount::REST);
+        }
+    }
+
     /// Schedules the corner count when what it was taken from changed:
     /// the file, its text, the selection or the surface. The same file
     /// rests first and keeps its figures meanwhile. Another file's
@@ -2243,12 +2283,13 @@ impl App {
         if unchanged {
             return;
         }
+        // A count still out read what is no longer there: the page
+        // being left, or this page's older text or selection.
+        self.count_asked += 1;
         let now = Instant::now();
         self.count_at = Some(if same_page {
             now + wordcount::REST
         } else {
-            // A count still out belongs to the page being left.
-            self.count_asked += 1;
             self.count_line = None;
             now
         });
@@ -2413,9 +2454,10 @@ impl App {
         let Some(path) = self.path.clone() else {
             return;
         };
-        let now = std::fs::metadata(&path)
-            .ok()
-            .and_then(|meta| Some((meta.modified().ok()?, meta.len())));
+        // A disk that cannot tell holds the save, as a change would.
+        let Ok(now) = disk_state(&path) else {
+            return;
+        };
         let facts = autosave::Facts {
             unsaved: self.edits_unsaved(),
             note: self.on_note(),
@@ -2666,6 +2708,8 @@ impl App {
         };
         match save::write_atomic(&path, &ledger.emit()) {
             Ok(()) => {
+                // A later failure is news again.
+                self.note_copy_failed = false;
                 self.disk_misses = 0;
                 self.disk_seen = std::fs::metadata(&path)
                     .ok()
@@ -2741,10 +2785,12 @@ impl App {
         }
         let text = load::without_returns(leftover.text());
         self.type_edit(0..0, &text, Kind::Structural);
+        // A copy that failed has told its own reason, and the leftover
+        // stays for the next launch to offer again.
         if self.copy_note() {
             leftover.discard();
+            self.show_notice("Note recovered");
         }
-        self.show_notice("Note recovered");
     }
 
     /// The leftover handed to a second window, which takes its folder
@@ -2761,10 +2807,7 @@ impl App {
             self.show_notice("Cannot open a second window: no program path");
             return;
         };
-        if let Err(err) = std::process::Command::new(exe)
-            .args(recover_args(&folder, at))
-            .spawn()
-        {
+        if let Err(err) = start_second(&exe, recover_args(&folder, at)) {
             self.show_notice(&format!("Cannot open a second window: {err}"));
         }
     }
@@ -2808,9 +2851,9 @@ impl App {
         let Some(path) = self.path.clone() else {
             return;
         };
-        let state = std::fs::metadata(&path)
-            .ok()
-            .and_then(|meta| Some((meta.modified().ok()?, meta.len())));
+        let Ok(state) = disk_state(&path) else {
+            return;
+        };
         match disk_verdict(seen, state, self.disk_misses, self.file_deleted) {
             DiskVerdict::Same => self.disk_misses = 0,
             DiskVerdict::MissingOnce => self.disk_misses += 1,
@@ -2841,10 +2884,7 @@ impl App {
             self.show_notice("Cannot open a second window: no program path");
             return;
         };
-        if let Err(err) = std::process::Command::new(exe)
-            .args(beside_args(path, at))
-            .spawn()
-        {
+        if let Err(err) = start_second(&exe, beside_args(path, at)) {
             self.show_notice(&format!("Cannot open a second window: {err}"));
         }
     }
@@ -2883,7 +2923,7 @@ impl App {
         let Some(path) = self.path.clone() else {
             return;
         };
-        if std::fs::metadata(&path).is_ok() {
+        if !matches!(disk_state(&path), Ok(None)) {
             return;
         }
         self.declare_deleted(&path);
@@ -2967,12 +3007,14 @@ impl App {
             return;
         }
         match decision {
+            // A question put aside unanswered gives the window back, or
+            // gives the place back to a recovery question it covered:
+            // the close button can raise the quit's question over one.
             confirm::Decision::Save => {
                 if self.save() {
                     self.resolve_confirm(event_loop);
                 } else {
-                    self.confirm = None;
-                    self.request_redraw();
+                    self.ask_next_leftover();
                 }
             }
             confirm::Decision::Discard => {
@@ -2982,10 +3024,7 @@ impl App {
                 self.refresh_title();
                 self.resolve_confirm(event_loop);
             }
-            confirm::Decision::Cancel => {
-                self.confirm = None;
-                self.request_redraw();
-            }
+            confirm::Decision::Cancel => self.ask_next_leftover(),
             confirm::Decision::Hold => {}
         }
     }
@@ -5572,6 +5611,13 @@ impl App {
         let Some(path) = self.path.clone() else {
             return;
         };
+        // The note's file holds a copy of the text, a net and never a
+        // save: a reload of the note returns to the empty page the note
+        // started as, not to the copy.
+        if self.on_note() {
+            self.note_copy.clear();
+            let _ = save::write_atomic(&path, b"");
+        }
         let scroll = self.scroll_y;
         self.open_file(&path, false);
         // The reload keeps its exact scroll; the revisit target would
@@ -5812,6 +5858,9 @@ impl App {
         self.close_search();
         self.sel_anchor = None;
         self.remember_position();
+        // The note's copy cannot be taken from behind the help page: a
+        // copy still waiting is taken now, before the note is set aside.
+        self.flush_note_copy();
         let mode = std::mem::replace(&mut self.mode, edit::Mode::Read);
         self.help_stash = Some(Box::new(Stash {
             path: self.path.take(),
@@ -7624,8 +7673,9 @@ impl ApplicationHandler for App {
                 ..
             } => {
                 // The file manager's gesture: a middle click on a file
-                // row opens it in a new window, this one untouched.
-                if self.mouse_muted() || self.confirm.is_some() {
+                // row opens it in a new window, this one untouched. A
+                // dialog owns the mouse as it does for the left button.
+                if self.mouse_muted() || self.confirm.is_some() || self.overlay.is_some() {
                     return;
                 }
                 if (self.cursor.x as f32) < self.inset() && self.sidebar.is_some() {
@@ -7787,6 +7837,26 @@ mod tests {
             "one row of three"
         );
         assert_eq!(frame[0..3], [7, 7, 7]);
+    }
+
+    #[test]
+    fn a_line_number_strip_is_skipped_when_the_sidebar_covers_the_window() {
+        // The sidebar keeps its minimum width on a window narrower than
+        // it; the strip's left edge then falls past the frame's width.
+        let (width, height) = (50u32, 50u32);
+        let strip = oryx::paint::gutter::Strip {
+            pixels: vec![7; 10 * 50],
+            width: 10,
+            height: 50,
+            y: 0.0,
+        };
+        let mut frame = vec![0u32; (width * height) as usize];
+        super::draw_strip(&mut frame, width, height, 160, 0.0, &strip);
+        assert!(frame.iter().all(|&p| p == 0), "nothing of it is shown");
+        // An edge inside the last columns paints what fits of each row.
+        let mut frame = vec![0u32; (width * height) as usize];
+        super::draw_strip(&mut frame, width, height, 46, 0.0, &strip);
+        assert_eq!(frame.iter().filter(|&&p| p == 7).count(), 4 * 50);
     }
 
     #[test]
@@ -8289,6 +8359,32 @@ mod tests {
             super::DiskVerdict::Back,
             "back after the mark: the mark clears and the file reloads"
         );
+    }
+
+    /// A folder that refuses the look is not a deletion: the stat's
+    /// error kind decides, and only an absent file answers `None`.
+    #[cfg(unix)]
+    #[test]
+    fn a_folder_that_refuses_the_look_is_no_deletion() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("oryx-disk-state-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("kept.txt");
+        std::fs::write(&file, "still here\n").unwrap();
+        let seen = super::disk_state(&file).unwrap();
+        assert_eq!(seen.map(|(_, len)| len), Some(11));
+        assert_eq!(super::disk_state(&dir.join("absent.txt")).unwrap(), None);
+        assert_eq!(
+            super::disk_state(&file.join("under-a-file")).unwrap(),
+            None,
+            "a path through a file is an absence too"
+        );
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let locked = super::disk_state(&file);
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(locked.is_err(), "no news, not an absence: {locked:?}");
     }
 
     #[test]

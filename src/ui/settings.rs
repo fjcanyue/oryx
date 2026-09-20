@@ -511,8 +511,14 @@ impl Overlay for Settings {
             return OverlayResult::Open;
         }
         if let Some(pick) = self.pick.as_mut() {
+            // The pad above the list and the hint below it are no rows:
+            // the rows scrolled out of sight lie under them.
+            let list_top = self.geometry.list_top;
+            if y < list_top || y >= list_top + self.geometry.list_h {
+                return OverlayResult::Open;
+            }
             let scroll = pick.scroll;
-            let index = ((y - self.geometry.list_top + scroll) / LIST_ROW_H).floor() as usize;
+            let index = ((y - list_top + scroll) / LIST_ROW_H).floor() as usize;
             if index < self.families.len() {
                 return self.choose(index);
             }
@@ -610,6 +616,47 @@ mod tests {
 
     fn press(s: &mut Settings, key: NamedKey) -> OverlayResult {
         s.key(&Key::Named(key), false, false)
+    }
+
+    #[test]
+    fn a_click_off_the_font_list_chooses_no_font() {
+        let families = (0..30).map(|i| format!("Family {i:02}")).collect();
+        let mut s = Settings::new(
+            families,
+            Values {
+                body_family: "Family 03".to_string(),
+                code_family: "Family 04".to_string(),
+                body_size: 22.0,
+                code_size: 20.0,
+                ui_scale: 1.0,
+                line_numbers: false,
+                word_count: false,
+                save_on_focus_loss: false,
+                save_after_pause: 0,
+            },
+        );
+        press(&mut s, NamedKey::Enter);
+        assert!(s.pick.is_some(), "the font list is open");
+        s.geometry = Geometry {
+            panel: (0.0, 0.0, 420.0, 400.0),
+            list_top: 51.0,
+            list_h: 300.0,
+            ..Geometry::default()
+        };
+        // The hint under the list, and the pad between the header and
+        // the first row: neither is a row of the list.
+        for y in [380.0, 47.0] {
+            assert!(
+                matches!(s.click(200.0, y), OverlayResult::Open),
+                "a click at y {y} chooses nothing"
+            );
+            assert!(s.pick.is_some(), "and the list stays open");
+        }
+        // A row of the list still answers.
+        assert!(matches!(
+            s.click(200.0, 60.0),
+            OverlayResult::Apply(Action::SetView { .. })
+        ));
     }
 
     #[test]
