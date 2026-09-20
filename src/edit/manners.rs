@@ -116,8 +116,8 @@ fn list_marker(rest: &str) -> Option<(usize, String)> {
 /// True when Tab nests the whole item rather than inserting: the line
 /// is a markdown list item, quoted or not, and the caret sits at or
 /// before its first content byte, which is where Enter's continuation
-/// leaves it. A bare quote line never nests, since four leading spaces
-/// would turn the quote into an indented code block.
+/// leaves it. A bare quote line never nests: it holds no item, and
+/// four columns after its marks would make its text a code block.
 pub fn tab_nests(line: &str, col: usize) -> bool {
     let (_, quote) = marker_seat(line);
     match list_marker(&line[quote..]) {
@@ -153,12 +153,37 @@ fn indent_columns(indent: &str) -> usize {
     })
 }
 
-/// The indentation of an unquoted list item, in columns; None for any
-/// other line.
-fn item_columns(line: &str) -> Option<usize> {
-    let (indent, quote) = marker_seat(line);
-    (quote == indent && list_marker(&line[indent..]).is_some())
-        .then(|| indent_columns(&line[..indent]))
+/// A line's quote marks: how many, and the byte where its own text
+/// starts, after each `>` and the one space that belongs to it. Up to
+/// three spaces may stand before the first mark; with four columns the
+/// line is no quote, and an unquoted line answers zero twice.
+fn quote_seat(line: &str) -> (usize, usize) {
+    let b = line.as_bytes();
+    let lead = b.iter().take_while(|c| **c == b' ').count();
+    if lead > 3 {
+        return (0, 0);
+    }
+    let (mut depth, mut i) = (0, lead);
+    while b.get(i) == Some(&b'>') {
+        depth += 1;
+        i += 1;
+        if b.get(i) == Some(&b' ') {
+            i += 1;
+        }
+    }
+    if depth == 0 {
+        (0, 0)
+    } else {
+        (depth, i)
+    }
+}
+
+/// The indentation of a list item in columns, given the line's text
+/// after its quote marks; None for any other line.
+fn item_columns(text: &str) -> Option<usize> {
+    let (indent, quote) = marker_seat(text);
+    (quote == indent && list_marker(&text[indent..]).is_some())
+        .then(|| indent_columns(&text[..indent]))
 }
 
 /// The outliner's rule, which is markdown's too: a list item sits at
@@ -166,33 +191,48 @@ fn item_columns(line: &str) -> Option<usize> {
 /// with no item above, it stops being a list item: after a blank line
 /// four columns make an indented code block, and under a paragraph the
 /// line joins it as text. Answers the refusal for one more indent over
-/// the lines `start..end` when every one of them is an unquoted list
-/// item; the first decides for the run. Any other selection indents
-/// freely, four columns being how a code block is asked for.
+/// the lines `start..end` when every one of them is a list item under
+/// the same quote marks, none included; the first decides for the run.
+/// Any other selection indents freely, four columns being how a code
+/// block is asked for.
 ///
-/// The item above is the nearest one going up, across blank lines, the
-/// indented lines of an item's own text, and margin lines that reach an
-/// item without a blank line between, its lazy continuation. A margin
-/// line cut off from every item by a blank line is a paragraph of the
-/// document, and it ended the list.
+/// The item above is the nearest one going up under the same quote
+/// marks, across blank lines, the indented lines of an item's own
+/// text, and margin lines that reach an item without a blank line
+/// between, its lazy continuation. A margin line cut off from every
+/// item by a blank line is a paragraph of the document, and it ended
+/// the list. A line under other quote marks counts as a margin line,
+/// and a blank one under fewer marks ended the quote, the list with it.
 pub fn nest_refusal(source: &str, start: usize, end: usize) -> Option<NestRefusal> {
-    let mut items = source[start..end]
+    let mut lines = source[start..end]
         .split('\n')
-        .filter(|line| !line.trim().is_empty())
-        .map(item_columns);
-    let current = items.next()??;
-    if !items.all(|item| item.is_some()) {
+        .map(|line| {
+            let (depth, seat) = quote_seat(line);
+            (depth, &line[seat..])
+        })
+        .filter(|(_, text)| !text.trim().is_empty());
+    let (depth, first) = lines.next()?;
+    let current = item_columns(first)?;
+    if !lines.all(|(d, text)| d == depth && item_columns(text).is_some()) {
         return None;
     }
     let mut margin_run = false;
     for line in source[..start].lines().rev() {
-        if line.trim().is_empty() {
+        let (d, seat) = quote_seat(line);
+        let text = &line[seat..];
+        let blank = text.trim().is_empty();
+        if d != depth {
+            if blank && d < depth {
+                return Some(NestRefusal::NoItemAbove);
+            }
+            margin_run = true;
+        } else if blank {
             if margin_run {
                 return Some(NestRefusal::NoItemAbove);
             }
-        } else if let Some(above) = item_columns(line) {
+        } else if let Some(above) = item_columns(text) {
             return (current > above).then_some(NestRefusal::AlreadyNested);
-        } else if !line.starts_with([' ', '\t']) {
+        } else if !text.starts_with([' ', '\t']) {
             margin_run = true;
         }
     }
@@ -314,6 +354,43 @@ pub fn reindent(region: &str, unit: &IndentUnit, outdent: bool) -> (String, Vec<
         deltas.push(delta);
     }
     (out, deltas)
+}
+
+/// `reindent` for a markdown source. A quoted line keeps its marks at
+/// the margin and takes or gives the indent after them: in front of
+/// the `>`, four columns would end the quote and leave `> - item` as
+/// text or code. Answers, per line, the byte column where the line
+/// changed beside the delta, `ride_rewrite`'s form.
+pub fn reindent_markdown(
+    region: &str,
+    unit: &IndentUnit,
+    outdent: bool,
+) -> (String, Vec<(usize, i64)>) {
+    let mut out = String::with_capacity(region.len() + 64);
+    let mut edits = Vec::with_capacity(8);
+    for (i, line) in region.split('\n').enumerate() {
+        if i > 0 {
+            out.push('\n');
+        }
+        let (_, seat) = quote_seat(line);
+        let (marks, text) = line.split_at(seat);
+        out.push_str(marks);
+        let delta = if outdent {
+            let cut = outdent_cut(text, unit);
+            out.push_str(&text[cut..]);
+            -(cut as i64)
+        } else if text.trim().is_empty() {
+            out.push_str(text);
+            0
+        } else {
+            let ins = unit.text();
+            out.push_str(&ins);
+            out.push_str(text);
+            ins.len() as i64
+        };
+        edits.push((seat, delta));
+    }
+    (out, edits)
 }
 
 /// A list kind the line keys set.
@@ -1820,14 +1897,77 @@ mod tests {
     }
 
     #[test]
+    fn the_rule_holds_inside_a_quote() {
+        assert_eq!(refusal_in("> - a\n> - b\n", "> - b"), None);
+        assert_eq!(
+            refusal_in("> - a\n>\n> - b\n", "> - b"),
+            None,
+            "a loose list inside the quote"
+        );
+        assert_eq!(
+            refusal_in("> - a\n", "> - a"),
+            Some(NestRefusal::NoItemAbove)
+        );
+        assert_eq!(
+            refusal_in("> - a\n\n> - b\n", "> - b"),
+            Some(NestRefusal::NoItemAbove),
+            "a bare blank line ended the quote above"
+        );
+        assert_eq!(
+            refusal_in("- a\n> - b\n", "> - b"),
+            Some(NestRefusal::NoItemAbove),
+            "an item outside the quote is not above it"
+        );
+        assert_eq!(
+            refusal_in("> - a\n>     - b\n", ">     - b"),
+            Some(NestRefusal::AlreadyNested)
+        );
+    }
+
+    #[test]
+    fn a_quoted_line_takes_its_indent_after_the_quote_marks() {
+        let four = IndentUnit::Spaces(4);
+        let (text, edits) = reindent_markdown("> - b", &four, false);
+        assert_eq!((text.as_str(), edits), (">     - b", vec![(2, 4)]));
+        let (text, edits) = reindent_markdown("> > - b", &four, false);
+        assert_eq!((text.as_str(), edits), ("> >     - b", vec![(4, 4)]));
+        let (text, edits) = reindent_markdown("- b\n\n> c\n>", &four, false);
+        assert_eq!(
+            text, "    - b\n\n>     c\n>",
+            "blank lines stay, quoted or not"
+        );
+        assert_eq!(edits, vec![(0, 4), (0, 0), (2, 4), (1, 0)]);
+
+        let depths: Vec<u8> = crate::doc::markdown::parse("> - a\n>     - b\n")
+            .blocks
+            .iter()
+            .filter_map(|b| match b.kind {
+                crate::doc::model::BlockKind::ListItem { depth, .. } => Some(depth),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(depths.len(), 2);
+        assert!(depths[1] > depths[0], "the item nests inside the quote");
+    }
+
+    #[test]
+    fn a_quoted_line_gives_its_indent_back_and_keeps_its_own_space() {
+        let four = IndentUnit::Spaces(4);
+        let (text, edits) = reindent_markdown(">     - b", &four, true);
+        assert_eq!((text.as_str(), edits), ("> - b", vec![(2, -4)]));
+        let (text, edits) = reindent_markdown("> - b", &four, true);
+        assert_eq!((text.as_str(), edits), ("> - b", vec![(2, 0)]));
+        let (text, _) = reindent_markdown("    > - b", &four, true);
+        assert_eq!(
+            text, "> - b",
+            "four columns before the mark are no quote: cut at the margin"
+        );
+    }
+
+    #[test]
     fn lines_that_are_not_all_items_indent_freely() {
         assert_eq!(refusal_in("text\n- a\n", "text\n- a"), None);
         assert_eq!(refusal_in("plain\n", "plain"), None);
-        assert_eq!(
-            refusal_in("> - a\n", "> - a"),
-            None,
-            "a quoted item is not this rule's"
-        );
         assert_eq!(refusal_in("\n\n", "\n"), None, "nothing to indent");
     }
 

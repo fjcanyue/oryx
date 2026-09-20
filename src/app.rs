@@ -3185,8 +3185,12 @@ impl App {
                 return;
             }
         }
-        let unit = edit::manners::indent_unit(&self.document.source, self.markdown_source());
+        let markdown = self.markdown_source();
+        let unit = edit::manners::indent_unit(&self.document.source, markdown);
         self.rewrite_lines(|region| {
+            if markdown {
+                return edit::manners::reindent_markdown(region, &unit, outdent);
+            }
             let (text, deltas) = edit::manners::reindent(region, &unit, outdent);
             (text, deltas.into_iter().map(|d| (0, d)).collect())
         });

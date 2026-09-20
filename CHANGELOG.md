@@ -15,6 +15,7 @@
 - A file with nothing in it now opens in the editor, ready to type, from the command line, the sidebar or the open dialog. Before, it opened as a blank page and needed `Ctrl+E` first. A file with only spaces and empty lines counts as empty.
 - `Tab` in a new markdown file now inserts four spaces, which nest under every list marker. Before, it inserted a tab character. A file that already indents with tabs or with two spaces keeps its own, and a new code or text file still gets a tab.
 - In a markdown file, `Tab` no longer turns a list into a code block. A list item nests under the item above it, one level at a time. With no item above, or when the item is already nested, `Tab` leaves the list as it is and a notice says why. Before, `Tab` on a first-level list put four spaces in front of it, which markdown reads as code.
+- `Tab` on a list item inside a quote (`> - item`) now nests it inside the quote, and `Shift+Tab` brings it back. Before, the spaces went in front of the `>`, and markdown read the line as plain text of the item above.
 - `Up` on the first line now goes to the start of the line, and `Down` on the last line to its end, as other editors do. Before, the caret stayed where it was. With Shift, the selection follows.
 - Oryx no longer keeps a processor core busy after you leave the editor. Before, going back to reading with Escape left the caret's timer running with nothing to do, until the next notice in the corner had come and gone.
 
