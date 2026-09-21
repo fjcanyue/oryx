@@ -4526,6 +4526,32 @@ impl App {
         }
     }
 
+    /// A press with Shift held: the selection keeps its start and its
+    /// end moves to the cursor, from the editor's caret when nothing is
+    /// selected. The anchor stays grabbed until the release, so a drag
+    /// goes on extending, and in the editor the caret follows the end.
+    /// The press joins no click chain: a fast second Shift+click must
+    /// not select a word. False while reading with nothing selected,
+    /// where the press is a plain click.
+    fn shift_press(&mut self) -> bool {
+        let caret = (self.mode == edit::Mode::Edit)
+            .then(|| {
+                self.caret
+                    .and_then(|c| caret::model_pos(&self.document, c.offset))
+            })
+            .flatten();
+        let Some(anchor) = selection::shift_anchor(self.selection, caret) else {
+            return false;
+        };
+        self.last_click = None;
+        self.sel_anchor = Some(anchor);
+        self.extend_selection();
+        if self.mode == edit::Mode::Edit {
+            self.caret_to_selection_edge();
+        }
+        true
+    }
+
     /// Ends a selection drag. A drag that never left its starting caret is
     /// a click and follows the link under the cursor instead.
     fn end_selection(&mut self) {
@@ -4579,7 +4605,8 @@ impl App {
             } else {
                 self.move_ownership(PaneAct::ClickDocument);
                 self.scrollbar_press();
-                if self.drag.is_none() {
+                if self.drag.is_none() && self.modifiers.shift_key() && self.shift_press() {
+                } else if self.drag.is_none() {
                     if self.mode == edit::Mode::Edit {
                         match self.register_click() {
                             2 => {

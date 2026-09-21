@@ -369,6 +369,11 @@ pub const TIPS: &[Tip] = &[
     Tip {
         kind: TipKind::Tip,
         area: Area::Selecting,
+        text: r#"Hold `Shift` and click to extend a selection to that point. In the editor it selects from the caret to the click, which is handy for a long stretch of text: click where it starts, scroll, and `Shift`+click where it ends."#,
+    },
+    Tip {
+        kind: TipKind::Tip,
+        area: Area::Selecting,
         text: r#"`Ctrl+C` copies your selection as plain text. `Ctrl+Shift+C` copies the markdown behind it, exactly as it was written."#,
     },
     Tip {
@@ -814,7 +819,8 @@ pub fn page() -> String {
     out.push_str("\n### Mouse and touch\n\n");
     let _ = writeln!(
         out,
-        "A double click selects the word, a triple click the paragraph or the code line. \
+        "A double click selects the word, a triple click the paragraph or the code line, \
+         and a click with `Shift` held extends the selection to where you click. \
          The wheel scrolls, and with `{}` held it zooms; dragging the scrollbar or its \
          track jumps. A file dropped onto the window opens, and a dropped folder opens \
          the sidebar on it. On a touch screen, swiping scrolls with momentum, tapping \

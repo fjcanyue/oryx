@@ -418,6 +418,17 @@ fn word_class(c: char) -> u8 {
     }
 }
 
+/// Where a Shift+click extends from: the standing selection's start,
+/// the end its drag began at, or with nothing selected the editor's
+/// caret. None while reading with nothing selected, where a Shift+click
+/// is a plain click.
+pub fn shift_anchor(selection: Option<Selection>, caret: Option<ModelPos>) -> Option<ModelPos> {
+    selection
+        .filter(|s| !s.is_empty())
+        .map(|s| s.start)
+        .or(caret)
+}
+
 /// How many clicks a press reaches: two within the double-click window
 /// and slop, three likewise, and a fourth starts a fresh chain.
 pub fn click_chain(prev: Option<(u8, f32, f32)>, within: bool, x: f32, y: f32) -> u8 {
@@ -1586,6 +1597,39 @@ mod tests {
             plain_text(&sel, &table),
             "one two",
             "a table answers the cell"
+        );
+    }
+
+    #[test]
+    fn a_shift_click_extends_from_the_selection_or_the_caret() {
+        let at = |byte: usize| ModelPos {
+            block: 0,
+            span: 0,
+            byte,
+        };
+        let standing = Selection {
+            start: at(9),
+            end: at(3),
+        };
+        assert_eq!(
+            shift_anchor(Some(standing), Some(at(3))),
+            Some(at(9)),
+            "the selection's own start, where its drag began, whichever way it ran"
+        );
+        let empty = Selection {
+            start: at(5),
+            end: at(5),
+        };
+        assert_eq!(
+            shift_anchor(Some(empty), Some(at(7))),
+            Some(at(7)),
+            "an empty selection is none: the editor's caret"
+        );
+        assert_eq!(shift_anchor(None, Some(at(7))), Some(at(7)));
+        assert_eq!(
+            shift_anchor(None, None),
+            None,
+            "reading with nothing selected: a plain click"
         );
     }
 
