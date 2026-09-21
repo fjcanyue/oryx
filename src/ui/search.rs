@@ -6,6 +6,7 @@ use std::borrow::Cow;
 use std::ops::Range;
 
 use crate::doc::model::Document;
+use crate::edit::caret::word_char;
 use crate::paint::painter::Painter;
 use crate::style::fonts::CODE_FAMILY;
 use crate::style::theme::{Rgba, Theme};
@@ -568,6 +569,26 @@ pub fn matches(doc: &Document, query: &str) -> Vec<Selection> {
         .collect()
 }
 
+/// Every whole-word occurrence of `word`, exact case, in document
+/// order: a match counts when the characters on both sides of it are
+/// not word characters, so `count` is found in `count + 1` and not in
+/// `recount` or `count_all`.
+pub fn word_matches(doc: &Document, word: &str) -> Vec<Selection> {
+    if word.is_empty() {
+        return Vec::new();
+    }
+    let hay = Haystack::build(doc);
+    find_exact(&hay.text, word)
+        .into_iter()
+        .filter(|range| {
+            let before = hay.text[..range.start].chars().next_back();
+            let after = hay.text[range.end..].chars().next();
+            !before.is_some_and(word_char) && !after.is_some_and(word_char)
+        })
+        .filter_map(|range| hay.selection(range))
+        .collect()
+}
+
 /// Every regex match in document order, or `None` when the pattern does
 /// not compile or exceeds the engine's backtracking limit, which the bar
 /// reports as an invalid pattern. `^` and `$` match at line starts and
@@ -761,6 +782,25 @@ mod tests {
         );
         assert!(!doc.block_visible(1), "the paragraph is folded away");
         assert_eq!(matches(&doc, "needle").len(), 1);
+    }
+
+    #[test]
+    fn word_matches_are_whole_words_in_exact_case() {
+        let doc = markdown::parse("cat catalog Cat cat_ (cat) concat cat.\n\n- a cat\n\n`cat`");
+        let found = word_matches(&doc, "cat");
+        let bytes: Vec<(usize, usize)> = found
+            .iter()
+            .map(|m| (m.start.block, m.start.byte))
+            .collect();
+        assert_eq!(found.len(), 5, "{bytes:?}");
+        assert_eq!(bytes[..3], [(0, 0), (0, 22), (0, 34)]);
+        assert!(word_matches(&doc, "").is_empty());
+    }
+
+    #[test]
+    fn word_matches_read_letters_of_any_script_as_word_characters() {
+        let doc = markdown::parse("été répété été, l'été");
+        assert_eq!(word_matches(&doc, "été").len(), 3);
     }
 
     #[test]

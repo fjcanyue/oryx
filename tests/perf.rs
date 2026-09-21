@@ -1062,3 +1062,32 @@ fn selection_text_measured() {
         "select-all text at 8 MB: markdown page {page_ms:.2}ms ({page_len} bytes), code {code_ms:.2}ms ({code_len} bytes)"
     );
 }
+
+/// The cost of a double click's occurrence highlight, which runs on the
+/// window's thread: every whole-word match of a common word on the 8 MB
+/// markdown page and on the 8 MB code file, beside a plain search for
+/// the same word.
+#[test]
+#[ignore = "timing probe, release mode"]
+fn occurrences_measured() {
+    use oryx::ui::search;
+    let (_, _, page) = measure_open(&large_gen::generate(8 * 1024 * 1024), "md");
+    let (_, _, code) = measure_open(&large_gen::generate_code(8 * 1024 * 1024), "rs");
+    let best = |run: &dyn Fn() -> usize| {
+        (0..3)
+            .map(|_| {
+                let started = Instant::now();
+                let found = run();
+                (started.elapsed().as_secs_f64() * 1000.0, found)
+            })
+            .min_by(|a, b| a.0.total_cmp(&b.0))
+            .unwrap()
+    };
+    for (name, doc, word) in [("markdown page", &page, "the"), ("code", &code, "let")] {
+        let (word_ms, words) = best(&|| search::word_matches(doc, word).len());
+        let (plain_ms, plain) = best(&|| search::matches(doc, word).len());
+        println!(
+            "occurrences of {word:?} at 8 MB, {name}: whole words {word_ms:.2}ms ({words}), a plain search {plain_ms:.2}ms ({plain})"
+        );
+    }
+}

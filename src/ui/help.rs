@@ -369,6 +369,11 @@ pub const TIPS: &[Tip] = &[
     Tip {
         kind: TipKind::Tip,
         area: Area::Selecting,
+        text: r#"Double click a word and Oryx lights up every other place the same word appears, so you can see where a name or a term is used. Click anywhere else and the marks go away."#,
+    },
+    Tip {
+        kind: TipKind::Tip,
+        area: Area::Selecting,
         text: r#"Hold `Shift` and click to extend a selection to that point. In the editor it selects from the caret to the click, which is handy for a long stretch of text: click where it starts, scroll, and `Shift`+click where it ends."#,
     },
     Tip {

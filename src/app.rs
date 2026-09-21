@@ -43,6 +43,7 @@ use oryx::ui::export::{ExportDialog, ExportProgress};
 use oryx::ui::goto::{self, GotoState};
 use oryx::ui::help;
 use oryx::ui::notice::{self, Notice};
+use oryx::ui::occurrences::{self, Occurrences};
 use oryx::ui::outline::{entry_offset, OutlineTree};
 use oryx::ui::overlay::{Action, Overlay, OverlayResult};
 use oryx::ui::scrollbar;
@@ -327,6 +328,7 @@ pub fn run(
         outline,
         sidebar_canvas: None,
         search: None,
+        occurrences: None,
         goto: None,
         pending_goto: launch_target,
         search_canvas: None,
@@ -571,6 +573,32 @@ fn draw_strip(
         let src = row * strip.width as usize;
         frame[dst..dst + shown].copy_from_slice(&strip.pixels[src..src + shown]);
     }
+}
+
+/// The rectangles of the matches whose top lies between `lo` and `hi`,
+/// each with its match's index. Bounding the geometry to a window around
+/// the view keeps thousands of matches cheap, and one shaped buffer per
+/// run serves every match the run holds.
+fn window_rects(
+    lay: &LayoutDoc,
+    doc: &Document,
+    fonts: &mut FontStore,
+    matches: &[Selection],
+    lo: f32,
+    hi: f32,
+) -> Vec<(usize, (f32, f32, f32, f32))> {
+    let mut rects = Vec::new();
+    let mut shaped = selection::ShapeCache::default();
+    let tops = selection::match_tops(lay, doc, matches);
+    for (index, m) in matches.iter().enumerate() {
+        if tops[index] < lo || tops[index] > hi {
+            continue;
+        }
+        for rect in selection::rects_window(m, lay, doc, fonts, &mut shaped, lo, hi) {
+            rects.push((index, rect));
+        }
+    }
+    rects
 }
 
 /// A place in the source the view shows once the layout reaches it.
@@ -1081,6 +1109,9 @@ struct App {
     sidebar_canvas: Option<OverlayCanvas>,
     /// Find session while the search bar is open.
     search: Option<SearchState>,
+    /// The other places a double-clicked word stands at, lit while the
+    /// word stays selected and the search bar is closed.
+    occurrences: Option<Occurrences>,
     /// The go to line field while it is open; never beside the search
     /// bar, since both stand in the same corner and take the keys.
     goto: Option<GotoState>,
@@ -1641,6 +1672,7 @@ impl App {
         self.pending_row = None;
         self.selection = None;
         self.sel_anchor = None;
+        self.occurrences = None;
         // Every comic opens in the strip; the state never follows a
         // document swap.
         self.cfg.comic = ComicFit::Width;
@@ -4375,29 +4407,55 @@ impl App {
         if state.stale {
             return;
         }
-        let mut rects = Vec::new();
-        // One shaped buffer per run for the whole pass, however many
-        // matches the run holds; geometry only inside the band window.
-        let mut shaped = selection::ShapeCache::default();
-        let tops = selection::match_tops(lay, &self.document, &state.matches);
-        for (index, m) in state.matches.iter().enumerate() {
-            if tops[index] < lo || tops[index] > hi {
-                continue;
-            }
-            for rect in selection::rects_window(
-                m,
-                lay,
-                &self.document,
-                &mut self.fonts,
-                &mut shaped,
-                lo,
-                hi,
-            ) {
-                rects.push((index, rect));
-            }
-        }
-        state.rects = rects;
+        state.rects = window_rects(lay, &self.document, &mut self.fonts, &state.matches, lo, hi);
         state.rects_scroll = scroll;
+    }
+
+    /// Keeps the lit occurrences true to the frame about to paint. The
+    /// set leaves with the selection it was found for, whatever ended
+    /// it, and while the search bar is open, so two sets of matches
+    /// never tint the same text. Its rectangles are rebuilt when the
+    /// layout moved under them or the view scrolled past their window.
+    fn sync_occurrences(&mut self) {
+        let Some(found) = self.occurrences.as_ref() else {
+            return;
+        };
+        if self.search.is_some() || self.selection != Some(found.word) {
+            self.occurrences = None;
+            self.band = None;
+            return;
+        }
+        let vh = self.viewport_h();
+        let scroll = self.scroll_y;
+        let moved = found.stale;
+        if !moved && (scroll - found.rects_scroll).abs() <= vh {
+            return;
+        }
+        let (lo, hi) = (scroll - 2.0 * vh, scroll + 3.0 * vh);
+        let (Some(lay), Some(found)) = (self.layout.as_ref(), self.occurrences.as_mut()) else {
+            return;
+        };
+        found.rects = window_rects(lay, &self.document, &mut self.fonts, &found.matches, lo, hi)
+            .into_iter()
+            .map(|(_, rect)| rect)
+            .collect();
+        found.rects_scroll = scroll;
+        found.stale = false;
+        // A band painted before the layout moved holds the old places.
+        // A scroll past the window needs no repaint of its own: the band
+        // covers the same five views the rectangles did.
+        if moved {
+            self.band = None;
+        }
+    }
+
+    /// The layout moved under the lit occurrences: a recolor, a new
+    /// width, a finished pass. The matches anchor on the model and
+    /// stand; the next frame rebuilds their rectangles.
+    fn occurrences_moved(&mut self) {
+        if let Some(found) = self.occurrences.as_mut() {
+            found.stale = true;
+        }
     }
 
     /// Centers the current match vertically when it sits off screen. A
@@ -4518,6 +4576,11 @@ impl App {
         };
         if let Some(sel) = sel {
             self.selection = Some(sel);
+            self.occurrences = if paragraph {
+                None
+            } else {
+                occurrences::find(&self.document, sel)
+            };
             self.band = None;
             self.request_redraw();
         }
@@ -4992,9 +5055,13 @@ impl App {
         if spliced {
             // Append-only growth: placed positions and the painted band
             // stay valid and the selection keeps its runs. Search grows
-            // stale to pick up the tail.
+            // stale to pick up the tail, and a lit word is looked for
+            // again in the longer text.
             if let Some(state) = self.search.as_mut() {
                 state.stale = true;
+            }
+            if let Some(found) = self.occurrences.take() {
+                self.occurrences = occurrences::find(&self.document, found.word);
             }
         } else {
             self.layout = None;
@@ -5097,6 +5164,7 @@ impl App {
                 if let Some(state) = self.search.as_mut() {
                     state.stale = true;
                 }
+                self.occurrences_moved();
                 self.band = None;
                 self.pending_band_for = None;
             }
@@ -6695,6 +6763,7 @@ impl App {
         if let Some(state) = self.search.as_mut() {
             state.stale = true;
         }
+        self.occurrences_moved();
         true
     }
 
@@ -6746,6 +6815,7 @@ impl App {
             if let Some(state) = self.search.as_mut() {
                 state.stale = true;
             }
+            self.occurrences_moved();
         } else {
             self.request_redraw();
         }
@@ -6964,6 +7034,7 @@ impl App {
         if drifted {
             self.refresh_search_rects();
         }
+        self.sync_occurrences();
         // The page paints at one whole pixel per frame, read once here
         // by the direct paint, the band, its slice and the caret: a
         // keystroke's direct frame and the band frame after it would
@@ -6987,6 +7058,15 @@ impl App {
                 };
                 highlight.push(DecoRect::fill(x, y, w, h, color));
             }
+        }
+        if let Some(found) = self.occurrences.as_ref() {
+            let color = self.theme.ui.search_match_bg;
+            highlight.extend(
+                found
+                    .rects
+                    .iter()
+                    .map(|&(x, y, w, h)| DecoRect::fill(x, y, w, h, color)),
+            );
         }
 
         let numbers = self.numbers_color();
