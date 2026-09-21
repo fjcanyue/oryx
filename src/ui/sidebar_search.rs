@@ -193,6 +193,18 @@ impl SidebarSearchState {
         }
     }
 
+    /// Empties the standing answer for a fresh question: the hits and
+    /// rows go, the folds stay for the files that stay. Without this,
+    /// a new query's batches append below the old query's lines and
+    /// the list reads as never having updated.
+    pub fn begin_query(&mut self) {
+        self.files.clear();
+        self.content.clear();
+        self.rows.clear();
+        self.selected = 0;
+        self.scroll = 0.0;
+    }
+
     /// The results' full height, headers included where there are any.
     pub fn content_h(&self) -> f32 {
         match self.view {
@@ -964,6 +976,37 @@ mod tests {
         state.toggle_file("a.rs");
         assert_eq!(state.selected, 0, "the vanished row's own header");
         assert!(state.selected_line().is_none());
+    }
+
+    /// The reported defect, at the state level: a fresh question must
+    /// not append under the old one's lines.
+    #[test]
+    fn a_fresh_question_empties_the_standing_answer_but_keeps_folds() {
+        let mut state = SidebarSearchState::new();
+        state.open(FilesView::ContentSearch);
+        state.content = vec![line("a.rs", 1, "old"), line("b.rs", 2, "old")];
+        state.refresh_rows();
+        state.toggle_file("a.rs");
+        state.selected = 1;
+        state.begin_query();
+        assert!(state.content.is_empty());
+        assert!(state.rows.is_empty());
+        assert_eq!(state.selected, 0);
+        assert!(
+            state.collapsed.contains("a.rs"),
+            "the fold outlives the answer"
+        );
+        // The next answer folds a.rs from its first line.
+        state.content = vec![line("a.rs", 7, "new"), line("c.rs", 8, "new")];
+        state.refresh_rows();
+        assert_eq!(
+            state.rows,
+            vec![
+                ContentRow::Header(0),
+                ContentRow::Header(1),
+                ContentRow::Hit(1)
+            ]
+        );
     }
 
     #[test]

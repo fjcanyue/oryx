@@ -3570,7 +3570,7 @@ impl App {
             self.push_query(text);
             return;
         }
-        if self.sidebar_owns_keys() && self.mode == edit::Mode::Read {
+        if self.sidebar_owns_keys() {
             let changed = self.sidebar.as_mut().is_some_and(|side| {
                 side.search.active() && side.search.query_field_mut().insert(text) == Edit::Changed
             });
@@ -3595,7 +3595,6 @@ impl App {
         let wanted = self.search.is_some()
             || self.mode == edit::Mode::Edit
             || (self.sidebar_owns_keys()
-                && self.mode == edit::Mode::Read
                 && self
                     .sidebar
                     .as_ref()
@@ -4457,6 +4456,7 @@ impl App {
         match view {
             FilesView::FileSearch => {
                 let query = side.search.file_query.text().to_string();
+                side.search.begin_query();
                 side.search.status = SearchStatus::Searching;
                 self.workspace
                     .search_files(&query, workspace_search::MAX_FILE_RESULTS);
@@ -4464,6 +4464,7 @@ impl App {
             FilesView::ContentSearch => {
                 let query = side.search.content_query.text().to_string();
                 let regex = side.search.regex;
+                side.search.begin_query();
                 side.search.status = SearchStatus::Searching;
                 let buffer = self.dirty_buffer_override();
                 self.workspace.search_content(
@@ -4617,12 +4618,14 @@ impl App {
 
     /// The Files tab's search views' keys: the field takes the typing,
     /// the arrows and Enter drive the results, Esc returns to the
-    /// tree. Only while the panel owns the keyboard: a search view
+    /// tree. Only while the panel owns the keyboard — a search view
     /// still showing must not eat the editor's typing once a click or
-    /// an opened match took the keys back. Reports whether the key was
-    /// claimed so the ladder stops.
+    /// an opened match took the keys back; clicking the field hands
+    /// the keys over, in either mode, the way the find bar's field
+    /// works inside the editor. Reports whether the key was claimed so
+    /// the ladder stops.
     fn sidebar_search_key(&mut self, key: &Key, ctrl: bool, shift: bool, alt: bool) -> bool {
-        if !self.sidebar_owns_keys() || self.mode != edit::Mode::Read {
+        if !self.sidebar_owns_keys() {
             return false;
         }
         /// What a press asked for, computed under the panel's borrow.
@@ -4788,6 +4791,9 @@ impl App {
         };
         if field {
             self.drag = Some(Drag::SidebarSearchField);
+            // The press on the field is a request for its keyboard,
+            // whatever mode the document sits in.
+            self.move_ownership(PaneAct::ClickSidebar);
             self.request_redraw();
         }
         field
