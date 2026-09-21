@@ -1972,6 +1972,9 @@ impl App {
                 self.pending_row = None;
                 self.pending_offset = None;
                 self.scroll_y = scroll;
+                // A file the app itself created or named is one the
+                // standing index has never walked.
+                self.workspace.refresh();
                 self.show_notice("Saved");
                 true
             }
@@ -1998,6 +2001,7 @@ impl App {
             return;
         }
         self.open_file(&target, true);
+        self.workspace.refresh();
         self.toggle_edit();
     }
 
@@ -4992,6 +4996,10 @@ impl App {
             }
             side.set_current(&path);
         }
+        // The reroot above does not pass through `sidebar_at`, and the
+        // remember-dir below can skip a repeat folder; the search
+        // worker follows the root whatever path moved it.
+        self.sync_search_root();
         if let Some(gfx) = self.gfx.as_ref() {
             gfx.window.set_title(&window_title(
                 self.document.title.as_deref(),

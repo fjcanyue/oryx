@@ -741,6 +741,52 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
+    /// A content query fired and immediately superseded: whatever the
+    /// abandoned run parked before the newer query stood is gone with
+    /// the newer query's answer, and nothing the worker said under the
+    /// old token lands after the new one stood — the UI's token check
+    /// drops exactly these.
+    #[test]
+    fn a_superseded_content_query_never_lands_after_its_replacement() {
+        let dir = fresh("overtake");
+        std::fs::create_dir_all(dir.join("many")).unwrap();
+        for n in 0..300 {
+            std::fs::write(dir.join(format!("many/f{n:03}.txt")), "hit\n").unwrap();
+        }
+        std::fs::write(dir.join("needle.txt"), "the needle rests here\n").unwrap();
+        let mut probe = Probe::new();
+        probe.search.sync_root(&dir);
+        probe.await_event(|e| matches!(e, SearchEvent::IndexReady { .. }));
+        probe.search.search_content("hit", false, 500, None);
+        let overtaken = probe.search.token();
+        let before = probe.seen.len();
+        probe.search.search_content("needle", false, 500, None);
+        let current = probe.search.token();
+        assert_ne!(overtaken, current);
+        match probe
+            .await_event(|e| matches!(e, SearchEvent::Finished { token, .. } if *token == current))
+        {
+            SearchEvent::Finished { token, .. } => assert_eq!(token, current),
+            _ => unreachable!("the probe only returns what it accepts"),
+        }
+        std::thread::sleep(Duration::from_millis(150));
+        probe.seen.extend(probe.search.drain());
+        for event in &probe.seen[before..] {
+            let carried = match event {
+                SearchEvent::FileResults { token, .. }
+                | SearchEvent::ContentBatch { token, .. }
+                | SearchEvent::Finished { token, .. } => Some(*token),
+                _ => None,
+            };
+            assert_ne!(
+                carried,
+                Some(overtaken),
+                "the abandoned query's answer landed after its replacement stood"
+            );
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
     #[test]
     fn shutdown_stops_the_thread() {
         let mut search = WorkspaceSearch::new(Arc::new(|| {}));
