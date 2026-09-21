@@ -5450,17 +5450,11 @@ impl App {
         }
     }
 
-    /// The source offset of the block at the viewport top.
+    /// The source offset of what stands at the viewport top: a block,
+    /// or a line of a code or text file.
     fn top_offset(&self) -> Option<usize> {
         let lay = self.layout.as_ref()?;
-        let mut offset = 0usize;
-        for (index, block) in self.document.blocks.iter().enumerate() {
-            match lay.approx_top(index, 0) {
-                Some(top) if top <= self.scroll_y + 1.0 => offset = block.range.start,
-                _ => break,
-            }
-        }
-        Some(offset)
+        Some(scroll::top_offset(lay, &self.document, self.scroll_y))
     }
 
     /// Runs a sidebar action and persists the tree's root when it moved.
@@ -6894,9 +6888,9 @@ impl App {
             let covered = offset < self.document.source.len() || !self.parse_pending;
             if covered {
                 let placed = self
-                    .document
-                    .block_at_offset(offset)
-                    .and_then(|b| self.layout.as_ref().and_then(|l| l.approx_top(b, 0)))
+                    .layout
+                    .as_ref()
+                    .and_then(|lay| scroll::offset_top(lay, &self.document, offset))
                     .map(|y| caret::seated(y, below));
                 match placed {
                     Some(y) if scroll::reached(y, height, vh) || !self.layout_pending() => {

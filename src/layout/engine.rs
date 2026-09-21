@@ -888,6 +888,31 @@ impl LayoutDoc {
         Some(entry.y)
     }
 
+    /// The line of code block `block` standing at height `y`, from the
+    /// block table: the last of its `lines` whose top is at or above
+    /// `y`, the inverse of `approx_top`. None before the pass places
+    /// the block, and for a block that is not code.
+    pub fn code_line_at(&self, block: usize, lines: usize, y: f32) -> Option<usize> {
+        let position = *self.table.position_of_block.get(block)?;
+        if position == u32::MAX {
+            return None;
+        }
+        let position = position as usize;
+        if self.table.entries[position].flags & ENTRY_CODE == 0 {
+            return None;
+        }
+        let (mut at, mut past) = (0, lines.max(1));
+        while at + 1 < past {
+            let mid = at + (past - at) / 2;
+            if self.table.code_line_top(position, mid) <= y {
+                at = mid;
+            } else {
+                past = mid;
+            }
+        }
+        Some(at)
+    }
+
     /// The recorded top and bottom of a block, from the block table.
     /// None before the pass places the block.
     pub fn block_span(&self, block: usize) -> Option<Range<f32>> {
