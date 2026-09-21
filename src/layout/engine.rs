@@ -6506,6 +6506,13 @@ fn role_color(theme: &Theme, role: SyntaxRole) -> Rgba {
         SyntaxRole::Variable => s.variable,
         SyntaxRole::Punctuation => s.punctuation,
         SyntaxRole::Plain => theme.surface.foreground,
+        // A diff is read by its green and red. The themes name no such
+        // colors among the code ones, but every theme has a green, a
+        // red and a blue chosen to read as text on the page: the tip,
+        // the caution and the note alerts' own.
+        SyntaxRole::Added => theme.alerts.tip,
+        SyntaxRole::Removed => theme.alerts.caution,
+        SyntaxRole::Range => theme.alerts.note,
         // A markdown source is drawn in the colors its own rendering
         // uses, so the file on screen and the page it becomes agree.
         // The rule's dashes and the quote's `>` are the exception: their

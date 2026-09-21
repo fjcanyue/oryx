@@ -32,6 +32,12 @@ pub enum SyntaxRole {
     Variable,
     Punctuation,
     Plain,
+    /// A diff's lines: added, removed, and the `@@` line that says
+    /// where a change sits. Only a grammar that marks text as inserted
+    /// or deleted produces these, a diff above all.
+    Added,
+    Removed,
+    Range,
     /// Markdown source roles. A markdown file edits its own bytes, so
     /// its source is colored from the document's theme, the heading
     /// ramp and the text and block colors, rather than from the code
@@ -861,8 +867,21 @@ fn markdown_role(stack: &ScopeStack, hashes: u8) -> SyntaxRole {
     SyntaxRole::Plain
 }
 
-/// The innermost scope with a known mapping wins.
+/// The innermost scope with a known mapping wins. A diff's lines are
+/// the exception: a line marked as inserted, deleted or as a range is
+/// that from its first character to its last, its `+`, `-` or `@@`
+/// included, since a diff is read by whole lines of one color.
 fn role_for(stack: &ScopeStack) -> SyntaxRole {
+    for scope in stack.as_slice() {
+        let name = scope.build_string();
+        if name.starts_with("markup.inserted") {
+            return SyntaxRole::Added;
+        } else if name.starts_with("markup.deleted") {
+            return SyntaxRole::Removed;
+        } else if name.starts_with("meta.diff.range") {
+            return SyntaxRole::Range;
+        }
+    }
     for scope in stack.as_slice().iter().rev() {
         let name = scope.build_string();
         let role = if name.starts_with("comment") {
@@ -899,6 +918,31 @@ fn role_for(stack: &ScopeStack) -> SyntaxRole {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_diff_tells_its_added_removed_and_range_lines() {
+        let text = "diff --git a/notes.md b/notes.md\nindex 1d7918d..2323a24 100644\n--- a/notes.md\n+++ b/notes.md\n@@ -1,4 +1,5 @@\n # Notes\n-An old line.\n+A new line.\n";
+        let body = CodeBody::from_text(text);
+        let got = spans(text, &body, Some("diff"));
+        let roles =
+            |line: usize| -> Vec<SyntaxRole> { got[line].iter().map(|(_, role)| *role).collect() };
+        assert_eq!(
+            roles(6),
+            vec![SyntaxRole::Removed],
+            "the whole line, its minus included"
+        );
+        assert_eq!(got[6][0].0, 0..13);
+        assert_eq!(roles(7), vec![SyntaxRole::Added]);
+        assert_eq!(roles(4), vec![SyntaxRole::Range], "the @@ line");
+        assert!(
+            !roles(5).contains(&SyntaxRole::Added) && !roles(5).contains(&SyntaxRole::Removed),
+            "a context line keeps the text color"
+        );
+        assert!(
+            !roles(2).contains(&SyntaxRole::Removed) && !roles(3).contains(&SyntaxRole::Added),
+            "the two file lines are names, not changes"
+        );
+    }
 
     fn lines(v: &[&str]) -> CodeBody {
         CodeBody::from_text(&v.join("\n"))
