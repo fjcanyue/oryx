@@ -57,6 +57,9 @@ pub fn search(
         .memory_map(MmapChoice::never())
         .build();
     let mut hits: Vec<ContentHit> = Vec::new();
+    // Hits counted toward the limit whether or not their batch has
+    // ridden out: the batch flush empties `hits`, the limit stands.
+    let mut taken = 0usize;
     let mut truncated = false;
     let mut skipped = 0;
     'files: for file in index.files() {
@@ -90,7 +93,7 @@ pub fn search(
                 if !any {
                     return Ok(true);
                 }
-                if hits.len() >= limit {
+                if taken >= limit {
                     truncated = true;
                     return Ok(false);
                 }
@@ -100,6 +103,7 @@ pub fn search(
                     line_text: Arc::from(trimmed),
                     ranges,
                 });
+                taken += 1;
                 // A full batch rides out at once, mid-file included,
                 // so one big file streams as it goes.
                 if hits.len() >= BATCH {
@@ -321,6 +325,32 @@ mod tests {
         assert_eq!(count, 3);
         assert!(outcome.truncated);
         let outcome = search(&index, "m", false, 5, None, &NEVER, |batch| {
+            count += batch.len()
+        })
+        .unwrap();
+        assert!(!outcome.truncated);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// The limit holds across the batching: a flush must not reset the
+    /// count, or a monorepo-wide query runs every file to the end.
+    #[test]
+    fn the_limit_holds_across_flushed_batches() {
+        let dir = fresh("limit-batches");
+        for n in 0..10 {
+            std::fs::write(dir.join(format!("f{n}.txt")), "m\nm\nm\nm\nm\nm\nm\n").unwrap();
+        }
+        let index = WorkspaceIndex::scan(&dir, RootGeneration(0), &NEVER).unwrap();
+        let mut count = 0;
+        let outcome = search(&index, "m", false, 40, None, &NEVER, |batch| {
+            count += batch.len()
+        })
+        .unwrap();
+        assert_eq!(count, 40, "the limit, not the file count, ends it");
+        assert!(outcome.truncated);
+        // Seventy hits exist; seventy allowed takes them all, and
+        // taking the last is not truncation.
+        let outcome = search(&index, "m", false, 70, None, &NEVER, |batch| {
             count += batch.len()
         })
         .unwrap();

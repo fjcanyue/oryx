@@ -78,15 +78,21 @@ fn the_index_the_queries_and_the_cancel_hold_their_budgets() {
         let file_query = started.elapsed();
         println!("{files} files: warm file query in {file_query:?}");
 
-        // A content query: the first batch and the whole answer.
+        // A content query: the first batch and the whole answer. The
+        // awaited Finished must be this query's; an earlier query's
+        // still parks in `seen` and would time nothing.
         let started = Instant::now();
         search.search_content("the needle rests", false, MAX_CONTENT_HITS, None);
+        let asked = search.token();
         await_event(&mut search, &mut seen, |e| {
             matches!(e, SearchEvent::ContentBatch { .. })
         });
         let first_batch = started.elapsed();
         await_event(&mut search, &mut seen, |e| {
-            matches!(e, SearchEvent::Finished { .. })
+            matches!(
+                e,
+                SearchEvent::Finished { token, .. } if *token == asked
+            )
         });
         let content_total = started.elapsed();
         println!(
