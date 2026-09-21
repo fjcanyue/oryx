@@ -578,25 +578,29 @@ impl Sidebar {
                     let relative = self.search.files[row].relative_path.clone();
                     SideClick::Open(sidebar_search::absolute(&self.root, &relative))
                 }
-                Some(row)
-                    if matches!(
-                        self.search.rows.get(row),
-                        Some(sidebar_search::ContentRow::Hit(_))
-                    ) =>
-                {
-                    self.search.selected = row;
-                    let hit = match self.search.rows[row] {
-                        sidebar_search::ContentRow::Hit(at) => &self.search.content[at],
-                        _ => unreachable!("the guard matched a hit row"),
-                    };
-                    SideClick::SearchHit(
-                        sidebar_search::absolute(&self.root, &hit.relative_path),
-                        hit.line_number,
-                        hit.ranges.first().map_or(0, |r| r.start),
-                        hit.line_text.clone(),
-                    )
-                }
-                _ => SideClick::None,
+                Some(row) => match self.search.rows.get(row) {
+                    // The fold's header folds and unfolds its file.
+                    Some(sidebar_search::ContentRow::Header(at)) => {
+                        let path = self.search.content[*at].relative_path.to_string();
+                        self.search.toggle_file(&path);
+                        SideClick::None
+                    }
+                    Some(sidebar_search::ContentRow::Hit(_)) => {
+                        self.search.selected = row;
+                        let hit = match self.search.rows[row] {
+                            sidebar_search::ContentRow::Hit(at) => &self.search.content[at],
+                            _ => unreachable!("the guard matched a hit row"),
+                        };
+                        SideClick::SearchHit(
+                            sidebar_search::absolute(&self.root, &hit.relative_path),
+                            hit.line_number,
+                            hit.ranges.first().map_or(0, |r| r.start),
+                            hit.line_text.clone(),
+                        )
+                    }
+                    None => SideClick::None,
+                },
+                None => SideClick::None,
             };
         }
         let top = PAD + CAPTION_H;
@@ -975,7 +979,7 @@ fn draw_guide(painter: &mut Painter, level: usize, ry: f32, fg: Rgba) {
 
 /// A small filled triangle centered at `cx`, `cy`: pointing down on an
 /// open folder or an expanded heading, right on a closed one.
-fn draw_triangle(painter: &mut Painter, cx: f32, cy: f32, open: bool, color: Rgba) {
+pub(crate) fn draw_triangle(painter: &mut Painter, cx: f32, cy: f32, open: bool, color: Rgba) {
     if open {
         painter.triangle(
             [(cx - 4.0, cy - 2.0), (cx + 4.0, cy - 2.0), (cx, cy + 3.0)],
@@ -1650,6 +1654,15 @@ mod tests {
             SideClick::None,
             "the header row is not a landing"
         );
+        assert!(
+            side.search.collapsed.contains("sub/inner.md"),
+            "the header click folded its file"
+        );
+        assert_eq!(side.search.rows.len(), 1, "only the header remains");
+        // The same click unfolds it again.
+        side.click(50.0, header_y, &mut outline);
+        assert!(side.search.collapsed.is_empty());
+        assert_eq!(side.search.rows.len(), 2);
         let hit_y = sidebar_search::results_top() + ROW_H + 5.0;
         match side.click(50.0, hit_y, &mut outline) {
             SideClick::SearchHit(path, line, column, expected) => {
