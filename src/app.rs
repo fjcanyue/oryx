@@ -328,6 +328,7 @@ pub fn run(launch: Launch, theme_name: Option<String>) -> anyhow::Result<()> {
         note_file: None,
         note_from: None,
         pending_row: None,
+        pending_search_jump: None,
         disk_seen: None,
         disk_check_at: Instant::now(),
         crlf: opened_crlf,
@@ -869,6 +870,9 @@ struct App {
     /// A row to seat at the top of the editor once the layout places
     /// it, the source view's counterpart to `pending_offset`.
     pending_row: Option<usize>,
+    /// A content search result whose file is opening; the jump lands
+    /// when the document stands.
+    pending_search_jump: Option<PendingSearchJump>,
     /// The open file's on-disk identity at last read or write, for the
     /// external-change check.
     disk_seen: Option<(std::time::SystemTime, u64)>,
@@ -936,6 +940,39 @@ fn owner_after(owner: KeyPane, act: PaneAct, sidebar_open: bool) -> KeyPane {
         PaneAct::Left if sidebar_open => KeyPane::Sidebar,
         PaneAct::Left | PaneAct::Enter => owner,
     }
+}
+
+/// A content search result waiting for its file to finish opening:
+/// once the document stands, the line is checked against the text the
+/// search read and the editor lands on the match.
+#[derive(Debug, Clone)]
+struct PendingSearchJump {
+    path: PathBuf,
+    /// The match's line, one-based as the grep counted it.
+    line: u64,
+    /// The match's column and length in bytes, within the decoded
+    /// line.
+    column: usize,
+    length: usize,
+    /// The line as the search read it, so a file changed since tells
+    /// itself apart from a stale offset.
+    expected_line: Arc<str>,
+}
+
+/// The byte offset of a one-based line's start in `source`; the line
+/// past the end answers None.
+fn line_offset(source: &str, line: u64) -> Option<usize> {
+    if line == 0 {
+        return None;
+    }
+    let mut at = 0;
+    for _ in 1..line {
+        let Some(nl) = source[at..].find('\n') else {
+            return None;
+        };
+        at += nl + 1;
+    }
+    Some(at.min(source.len()))
 }
 
 /// A pointer gesture on the app's own chrome.
@@ -1053,6 +1090,7 @@ impl App {
             Command::CopyText => self.copy_selection(false),
             Command::CopyMarkdown => self.copy_selection(true),
             Command::Find => self.open_search(),
+            Command::SearchInFiles => self.open_sidebar_search(FilesView::ContentSearch),
             Command::FindNext => self.step_search(true),
             Command::FindPrev => self.step_search(false),
             Command::Replace => self.open_replace(),
@@ -4083,6 +4121,15 @@ impl App {
             sidebar::SideClick::OpenSearch => {
                 self.open_sidebar_search(FilesView::FileSearch);
             }
+            sidebar::SideClick::SearchHit(path, line, column, length, expected) => {
+                self.open_search_hit(PendingSearchJump {
+                    path,
+                    line,
+                    column,
+                    length,
+                    expected_line: expected,
+                });
+            }
             sidebar::SideClick::Jump(block) => self.jump_to_heading(block),
             sidebar::SideClick::Tab => {
                 self.config.sidebar_tab = tab;
@@ -4435,6 +4482,72 @@ impl App {
         }
     }
 
+    /// Opens a content result's file and parks the jump to its match,
+    /// landing when the document stands. The search stays open for the
+    /// next result.
+    fn open_search_hit(&mut self, jump: PendingSearchJump) {
+        let path = jump.path.clone();
+        let same = self.path.as_deref() == Some(path.as_path());
+        self.pending_search_jump = Some(jump);
+        if same {
+            self.resolve_pending_search_jump();
+        } else if self.guard_unsaved(confirm::Pending::Open(path.clone(), false)) {
+            self.open_file(&path, false);
+        }
+    }
+
+    /// Lands a parked search jump once its file stands open. A line
+    /// the delivered source has not reached waits for the parse to
+    /// bring it; a line that no longer reads as the search saw it
+    /// still lands, at the line's head rather than the match's own
+    /// column. The landing is the editor at the match: the caret
+    /// marks it and the row seats under it.
+    fn resolve_pending_search_jump(&mut self) {
+        let Some(jump) = self.pending_search_jump.clone() else {
+            return;
+        };
+        if self.path.as_deref() != Some(jump.path.as_path()) {
+            self.pending_search_jump = None;
+            return;
+        }
+        let Some(at) = line_offset(&self.document.source, jump.line) else {
+            if self.parse_pending {
+                return;
+            }
+            self.pending_search_jump = None;
+            return;
+        };
+        self.pending_search_jump = None;
+        let rest = &self.document.source[at.min(self.document.source.len())..];
+        let line_text = rest.split_once('\n').map_or(rest, |(l, _)| l);
+        let line_text = line_text.trim_end_matches('\r');
+        // The file changed since the search read it: the line still
+        // lands, without trusting the old column.
+        let column = if line_text == &*jump.expected_line {
+            jump.column.min(line_text.len())
+        } else {
+            0
+        };
+        let start = at + column;
+        if self.mode != edit::Mode::Edit {
+            let path = self.path.clone().unwrap_or_default();
+            match edit::toggle(edit::Mode::Read, load::detect(&path), self.lossy) {
+                Ok(edit::Mode::Edit) => self.enter_edit(),
+                Ok(edit::Mode::Read) => return,
+                Err(refusal) => {
+                    self.show_notice(refusal.message());
+                    return;
+                }
+            }
+        }
+        self.caret = Some(Caret::at(start));
+        self.selection = None;
+        self.sel_anchor = None;
+        self.seat_editor_on(start);
+        self.wake_caret();
+        self.request_redraw();
+    }
+
     /// The Files tab's search views' keys: the field takes the typing,
     /// the arrows and Enter drive the results, Esc returns to the
     /// tree. Reports whether the key was claimed so the ladder stops.
@@ -4445,6 +4558,15 @@ impl App {
             Claimed,
             Close,
             Open(PathBuf),
+            /// A content result's landing: file, line, column, length
+            /// and the line as the search read it.
+            Jump {
+                path: PathBuf,
+                line: u64,
+                column: usize,
+                length: usize,
+                expected: Arc<str>,
+            },
             Move(i32),
             Page(bool),
             Regex,
@@ -4463,7 +4585,22 @@ impl App {
                     Some(hit) => {
                         Ask::Open(sidebar_search::absolute(side.root(), &hit.relative_path))
                     }
-                    None => Ask::Claimed,
+                    None => match side.search.selected_line() {
+                        Some(hit) => {
+                            let (column, length) = hit
+                                .ranges
+                                .first()
+                                .map_or((0, 0), |r| (r.start, r.end - r.start));
+                            Ask::Jump {
+                                path: sidebar_search::absolute(side.root(), &hit.relative_path),
+                                line: hit.line_number,
+                                column,
+                                length,
+                                expected: hit.line_text.clone(),
+                            }
+                        }
+                        None => Ask::Claimed,
+                    },
                 },
                 Key::Named(NamedKey::ArrowUp) => Ask::Move(-1),
                 Key::Named(NamedKey::ArrowDown) => Ask::Move(1),
@@ -4498,6 +4635,22 @@ impl App {
             }
             Ask::Open(path) => {
                 self.open_search_result(path);
+                true
+            }
+            Ask::Jump {
+                path,
+                line,
+                column,
+                length,
+                expected,
+            } => {
+                self.open_search_hit(PendingSearchJump {
+                    path,
+                    line,
+                    column,
+                    length,
+                    expected_line: expected,
+                });
                 true
             }
             Ask::Move(delta) => {
@@ -4861,6 +5014,10 @@ impl App {
                 }
             }
         }
+        // A search jump that opened this file lands now; one aimed at
+        // a line the streamed open has not delivered waits for the
+        // parse, which the pending row machinery carries.
+        self.resolve_pending_search_jump();
         self.request_redraw();
     }
 
@@ -6397,6 +6554,8 @@ impl ApplicationHandler for App {
         self.fold_parse();
         self.fold_highlights();
         self.fold_workspace_search();
+        // A jump held for the parse's delivery lands with it.
+        self.resolve_pending_search_jump();
     }
 
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
@@ -6688,10 +6847,7 @@ impl ApplicationHandler for App {
                     }
                     self.request_redraw();
                 } else if matches!(self.drag, Some(Drag::SidebarSearchField)) {
-                    let (ux, uy) = (
-                        position.x as f32 / self.scale,
-                        position.y as f32 / self.scale,
-                    );
+                    let ux = position.x as f32 / self.scale;
                     if let Some(side) = self.sidebar.as_mut() {
                         if side.search_active() {
                             let view = side.search.query_view().clone();
@@ -7124,6 +7280,24 @@ mod tests {
             super::window_title(None, Some(Path::new("/docs/notes.txt")), true, true),
             "● notes.txt · editing · oryx"
         );
+    }
+
+    #[test]
+    fn line_offset_walks_to_a_one_based_line() {
+        let text = "alpha\nbeta\ngamma";
+        assert_eq!(super::line_offset(text, 1), Some(0));
+        assert_eq!(super::line_offset(text, 2), Some(6));
+        assert_eq!(super::line_offset(text, 3), Some(11));
+        assert_eq!(super::line_offset(text, 4), None, "past the last line");
+        assert_eq!(super::line_offset(text, 0), None, "lines count from one");
+        assert_eq!(super::line_offset("", 1), Some(0));
+        assert_eq!(super::line_offset("", 2), None);
+    }
+
+    #[test]
+    fn a_trailing_newline_makes_one_more_empty_line() {
+        assert_eq!(super::line_offset("a\nb\n", 3), Some(4));
+        assert_eq!(super::line_offset("a\nb\n", 4), None);
     }
 
     #[test]

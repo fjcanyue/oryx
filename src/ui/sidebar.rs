@@ -114,6 +114,10 @@ pub enum SideClick {
     Thumb,
     /// The Files caption's search entry was pressed.
     OpenSearch,
+    /// A content result was pressed: open the file and land on the
+    /// match — its line, column and length in bytes, and the line as
+    /// the search read it.
+    SearchHit(PathBuf, u64, usize, usize, std::sync::Arc<str>),
 }
 
 /// The magnifier's box at the right end of the Files caption.
@@ -581,7 +585,21 @@ impl Sidebar {
                     ) =>
                 {
                     self.search.selected = row;
-                    SideClick::None
+                    let hit = match self.search.rows[row] {
+                        sidebar_search::ContentRow::Hit(at) => &self.search.content[at],
+                        _ => unreachable!("the guard matched a hit row"),
+                    };
+                    let (column, length) = hit
+                        .ranges
+                        .first()
+                        .map_or((0, 0), |r| (r.start, r.end - r.start));
+                    SideClick::SearchHit(
+                        sidebar_search::absolute(&self.root, &hit.relative_path),
+                        hit.line_number,
+                        column,
+                        length,
+                        hit.line_text.clone(),
+                    )
                 }
                 _ => SideClick::None,
             };
@@ -1603,6 +1621,52 @@ mod tests {
             &mut outline,
         );
         assert_eq!(click, SideClick::Open(dir.join("zeta.md")));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Clicking a content result selects it and hands the app its
+    /// landing: the absolute path, the line, the match's place in it,
+    /// and the line as searched.
+    #[test]
+    fn a_content_result_click_hands_over_its_landing() {
+        use crate::ui::sidebar_search::{FilesView, SearchStatus};
+        use crate::workspace_search::ContentHit;
+        use std::ops::Range;
+        use std::sync::Arc;
+        let dir = temp_tree("content-click");
+        let mut side = Sidebar::new(&dir);
+        side.search.open(FilesView::ContentSearch);
+        side.search.status = SearchStatus::Done {
+            truncated: false,
+            skipped: 0,
+        };
+        side.search.content = vec![ContentHit {
+            relative_path: Arc::from("sub/inner.md"),
+            line_number: 42,
+            line_text: Arc::from("pub struct UserService {"),
+            ranges: vec![Range { start: 11, end: 22 }],
+        }];
+        side.search.refresh_rows();
+        let doc = markdown::parse("");
+        let mut outline = OutlineTree::build(&doc);
+        let header_y = sidebar_search::results_top() + 5.0;
+        assert_eq!(
+            side.click(50.0, header_y, &mut outline),
+            SideClick::None,
+            "the header row is not a landing"
+        );
+        let hit_y = sidebar_search::results_top() + ROW_H + 5.0;
+        match side.click(50.0, hit_y, &mut outline) {
+            SideClick::SearchHit(path, line, column, length, expected) => {
+                assert!(path.ends_with(dir.join("sub").join("inner.md")));
+                assert_eq!(line, 42);
+                assert_eq!(column, 11);
+                assert_eq!(length, 11);
+                assert_eq!(&*expected, "pub struct UserService {");
+            }
+            other => panic!("the hit row answered {other:?}"),
+        }
+        assert_eq!(side.search.selected, 1, "the click selected the line");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }
