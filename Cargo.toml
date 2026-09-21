@@ -12,8 +12,10 @@ rust-version = "1.89"
 
 [dependencies]
 anyhow = "1"
-arboard = { version = "3", default-features = false, features = ["wayland-data-control"] }
+arboard = { version = "3", default-features = false, features = ["wayland-data-control", "image-data"] }
 base64 = "0.22"
+# The local time in a pasted picture's file name.
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
 cosmic-text = "0.17.0"
 directories = "6"
 fancy-regex = "0.16.2"

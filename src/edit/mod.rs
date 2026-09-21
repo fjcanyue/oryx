@@ -6,6 +6,7 @@
 //! are pure functions so the tables are testable on their own; `App`
 //! owns the wiring.
 
+pub mod attach;
 pub mod autosave;
 pub mod caret;
 pub mod manners;

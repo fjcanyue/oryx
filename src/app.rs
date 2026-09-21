@@ -3702,15 +3702,19 @@ impl App {
                 .map_err(|err| eprintln!("oryx: no clipboard: {err}"))
                 .ok();
         }
-        let Some(text) = self.clipboard.as_mut().and_then(|c| c.get_text().ok()) else {
+        // Clipboard line endings normalize like the load; the ledger
+        // writes the file's own ending back on save. Text wins; with no
+        // text to paste, a picture on the clipboard is looked for.
+        let text = self
+            .clipboard
+            .as_mut()
+            .and_then(|c| c.get_text().ok())
+            .map(|text| load::without_returns(&text))
+            .filter(|text| !text.is_empty());
+        let Some(text) = text else {
+            self.paste_picture();
             return;
         };
-        // Clipboard line endings normalize like the load; the ledger
-        // writes the file's own ending back on save.
-        let text = load::without_returns(&text);
-        if text.is_empty() {
-            return;
-        }
         // A line taken whole goes back whole, above the caret's line. The
         // clipboard may have changed hands since, so its text is compared
         // with the line's; a selection is replaced like any paste.
@@ -3730,6 +3734,83 @@ impl App {
             }
         }
         self.type_over(&text, Kind::Structural);
+    }
+
+    /// Ctrl+V with a picture and no text on the clipboard, in a markdown
+    /// file: the picture is written beside the file and linked at the
+    /// caret, which lands between the brackets for the description.
+    fn paste_picture(&mut self) {
+        if !self.markdown_source() {
+            return;
+        }
+        let Some(picture) = self.clipboard.as_mut().and_then(|c| c.get_image().ok()) else {
+            return;
+        };
+        let Some(file) = self.pictures_home() else {
+            return;
+        };
+        let stamp = chrono::Local::now().format("%Y%m%d-%H%M").to_string();
+        let saved = edit::attach::save_pasted(
+            &file,
+            &stamp,
+            picture.width as u32,
+            picture.height as u32,
+            &picture.bytes,
+        );
+        match saved {
+            Ok(relative) => {
+                self.link_pictures(&[relative], true);
+            }
+            Err(err) => self.show_notice(&format!("Oryx could not save the picture: {err}")),
+        }
+    }
+
+    /// An image file dropped on a markdown file being edited: linked
+    /// where it lies under the file's folder, copied beside the file
+    /// otherwise. The caret lands after the link, where the next file
+    /// of the same drop goes.
+    fn drop_picture(&mut self, image: &Path) {
+        let Some(file) = self.pictures_home() else {
+            return;
+        };
+        match edit::attach::adopt_dropped(&file, image) {
+            Ok(relative) => self.link_pictures(&[relative], false),
+            Err(err) => self.show_notice(&format!("Oryx could not copy the picture: {err}")),
+        }
+    }
+
+    /// The file pictures are kept beside. An untitled note lives in a
+    /// folder of Oryx's own until its first save, no place for pictures,
+    /// so it answers None and says what to do.
+    fn pictures_home(&mut self) -> Option<PathBuf> {
+        if self.on_note() {
+            self.show_notice(
+                "Save this note first with Ctrl+S, so Oryx knows where to keep its pictures.",
+            );
+            return None;
+        }
+        self.path.clone()
+    }
+
+    /// Types the links of pictures already on disk, and says where a
+    /// new file went: a paste writes one the reader did not name.
+    fn link_pictures(&mut self, relatives: &[PathBuf], describe: bool) {
+        let destinations: Vec<String> = relatives
+            .iter()
+            .map(|relative| edit::attach::destination(relative))
+            .collect();
+        let at = self.caret.map_or(0, |c| c.offset);
+        let replace = self.selection_source_range().unwrap_or(at..at);
+        let insert = edit::attach::insertion(&self.document.source, replace, &destinations);
+        let caret = if describe {
+            insert.inside
+        } else {
+            insert.after
+        };
+        self.type_edit_at(insert.replace, &insert.text, Kind::Structural, caret);
+        if let Some(first) = relatives.first().filter(|_| describe) {
+            self.show_notice(&format!("Picture saved as {}", first.display()));
+        }
     }
 
     /// A click while editing places the caret at the character.
@@ -5684,10 +5765,13 @@ impl App {
 
     /// A file or folder dropped on the window: the folder roots the
     /// sidebar, the file opens as the dialog would, the unsaved guard
-    /// in front of it.
+    /// in front of it. An image dropped on a markdown file being edited
+    /// is linked in it instead.
     fn drop_path(&mut self, path: &Path) {
         if path.is_dir() {
             self.show_folder(path);
+        } else if self.markdown_source() && edit::attach::is_image(path) {
+            self.drop_picture(path);
         } else if self.guard_unsaved(confirm::Pending::Open(path.to_path_buf(), true)) {
             self.open_file(path, true);
         }

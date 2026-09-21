@@ -429,6 +429,11 @@ pub const TIPS: &[Tip] = &[
     Tip {
         kind: TipKind::Tip,
         area: Area::Editing,
+        text: r#"While you edit a markdown file, `Ctrl+V` pastes a picture from the clipboard. Oryx saves it in an `images` folder next to your file and adds the link. You can also drop an image file on the window."#,
+    },
+    Tip {
+        kind: TipKind::Tip,
+        area: Area::Editing,
         text: r#"Select a few lines and press `Alt+-` for a bullet list, `Alt+1` for a numbered list or `Alt+X` for a task list. The same key again removes it."#,
     },
     Tip {
