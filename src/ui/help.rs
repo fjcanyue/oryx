@@ -224,7 +224,7 @@ pub const TIPS: &[Tip] = &[
     Tip {
         kind: TipKind::Tip,
         area: Area::Moving,
-        text: r#"After you follow a link, a footnote or an outline entry, `Alt+Left` takes you back to where you were reading, one jump at a time."#,
+        text: r#"`Alt+Left` takes you back to where you were before a jump: a link, a footnote, an outline entry, a search, a jump to a line, or another file. `Alt+Right` goes forward again. The back and forward buttons of a mouse do the same."#,
     },
     Tip {
         kind: TipKind::Tip,

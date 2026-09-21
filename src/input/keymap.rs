@@ -40,6 +40,7 @@ pub enum Command {
     Top,
     Bottom,
     Back,
+    Forward,
     Edit,
     Cut,
     Paste,
@@ -72,7 +73,7 @@ pub enum Command {
 impl Command {
     /// Every variant. One test checks each entry has a row in the table,
     /// another that every command a row binds is listed here.
-    pub const ALL: [Command; 63] = [
+    pub const ALL: [Command; 64] = [
         Command::OpenFile,
         Command::Reload,
         Command::Refetch,
@@ -106,6 +107,7 @@ impl Command {
         Command::Top,
         Command::Bottom,
         Command::Back,
+        Command::Forward,
         Command::Edit,
         Command::Cut,
         Command::Paste,
@@ -275,10 +277,13 @@ pub const SHORTCUTS: &[Shortcut] = &[
         ],
     },
     Shortcut {
-        keys: "Alt+Left",
-        action: "Go back after a link or outline jump",
+        keys: "Alt+Left / Alt+Right",
+        action: "Go back to where a jump left, and forward again",
         section: "Navigation",
-        bindings: &[(Binding::AltNamed(NamedKey::ArrowLeft), Command::Back)],
+        bindings: &[
+            (Binding::AltNamed(NamedKey::ArrowLeft), Command::Back),
+            (Binding::AltNamed(NamedKey::ArrowRight), Command::Forward),
+        ],
     },
     Shortcut {
         keys: "Ctrl+Shift+B",
@@ -879,6 +884,17 @@ mod tests {
             super::command(&left, none, false, false, true),
             Some(Command::Back),
             "Alt+Left returns from a jump"
+        );
+        let right = Key::Named(NamedKey::ArrowRight);
+        assert_eq!(
+            super::command(&right, none, false, false, true),
+            Some(Command::Forward),
+            "Alt+Right goes forward again"
+        );
+        assert_eq!(
+            super::command(&right, none, false, false, false),
+            Some(Command::PaneRight),
+            "plain Right keeps the pane switch"
         );
         assert_eq!(
             super::command(&left, none, false, false, false),

@@ -2,6 +2,7 @@ pub mod confirm;
 pub mod export;
 pub mod goto;
 pub mod help;
+pub mod history;
 pub mod notice;
 pub mod occurrences;
 pub mod outline;

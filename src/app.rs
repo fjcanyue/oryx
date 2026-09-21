@@ -42,6 +42,7 @@ use oryx::ui::confirm;
 use oryx::ui::export::{ExportDialog, ExportProgress};
 use oryx::ui::goto::{self, GotoState};
 use oryx::ui::help;
+use oryx::ui::history::{self, History};
 use oryx::ui::notice::{self, Notice};
 use oryx::ui::occurrences::{self, Occurrences};
 use oryx::ui::outline::{entry_offset, OutlineTree};
@@ -286,7 +287,9 @@ pub fn run(
         pending_scroll: None,
         pending_anchor: None,
         pending_offset: None,
-        jump_stack: Vec::new(),
+        history: History::default(),
+        pending_step: None,
+        search_origin: None,
         book_toc,
         positions: config::Positions::load(),
         layout_width: 0.0,
@@ -638,6 +641,7 @@ struct Parked {
 /// Everything the help page displaces, moved back verbatim on return.
 struct Stash {
     path: Option<PathBuf>,
+    history: History,
     document: Document,
     ledger: Option<Ledger>,
     undo: Option<Undo>,
@@ -681,18 +685,6 @@ fn justify_pref(config: &Config, doc: &Document) -> bool {
         } else {
             config.justify_markdown
         }
-}
-
-/// Records the position a jump is leaving. Jumping again from the same
-/// place stacks one return, not two, and the depth stays bounded.
-fn push_jump_position(stack: &mut Vec<usize>, offset: usize) {
-    if stack.last() == Some(&offset) {
-        return;
-    }
-    stack.push(offset);
-    if stack.len() > 100 {
-        stack.remove(0);
-    }
 }
 
 /// The comic display ladder, ordered by magnification: page width,
@@ -1013,9 +1005,15 @@ struct App {
     /// A book source offset to land on once delivered and placed: a
     /// restored reading position or an internal link's target.
     pending_offset: Option<Place>,
-    /// The positions jumps left behind, newest last; Alt+Left returns
-    /// through them one level at a time. Lives with the document.
-    jump_stack: Vec<usize>,
+    /// The places jumps left behind, in this file and in the ones open
+    /// before it; Alt+Left and Alt+Right walk them as a browser does.
+    history: History,
+    /// A step into another file that is waiting on the unsaved question:
+    /// the history moves only once that file really opens.
+    pending_step: Option<bool>,
+    /// Where the reader stood when the search bar opened, filed as a
+    /// place at the first hit taken with Enter.
+    search_origin: Option<history::Entry>,
     /// A book's table of contents as authored; empty for files, whose
     /// outline scans headings instead.
     book_toc: Vec<epub::TocEntry>,
@@ -1501,9 +1499,14 @@ impl App {
                     self.scroll_by(self.page_step());
                 }
             }
-            Command::Back => self.pop_jump(),
-            Command::Top => self.scroll_to(0.0),
+            Command::Back => self.step_history(false),
+            Command::Forward => self.step_history(true),
+            Command::Top => {
+                self.push_jump();
+                self.scroll_to(0.0);
+            }
             Command::Bottom => {
+                self.push_jump();
                 self.scroll_to(self.doc_height());
                 // The placed height is all Oryx knows, so on a document
                 // still streaming this lands short of the file's end;
@@ -1878,6 +1881,9 @@ impl App {
                 _ => None,
             };
             if let Some(jump) = jump {
+                if matches!(jump, Motion::DocStart | Motion::DocEnd) {
+                    self.push_jump();
+                }
                 self.move_caret(jump, shift);
                 return true;
             }
@@ -3102,7 +3108,10 @@ impl App {
                 self.refresh_title();
                 self.resolve_confirm(event_loop);
             }
-            confirm::Decision::Cancel => self.ask_next_leftover(),
+            confirm::Decision::Cancel => {
+                self.pending_step = None;
+                self.ask_next_leftover();
+            }
             confirm::Decision::Hold => {}
         }
     }
@@ -3754,6 +3763,7 @@ impl App {
             self.request_redraw();
             return;
         }
+        self.search_origin = self.here();
         let mut query = TextField::new(self.last_query.clone());
         query.select_all();
         self.search = Some(SearchState {
@@ -3948,6 +3958,7 @@ impl App {
             return;
         }
         let offset = goto::offset(&self.document.source, target);
+        self.push_jump();
         if self.mode == edit::Mode::Edit {
             self.selection = None;
             self.sel_anchor = None;
@@ -3955,7 +3966,6 @@ impl App {
             self.caret = Some(Caret::at(offset));
             self.wake_caret();
         } else {
-            self.push_jump();
             // A rendered page is indexed by blocks, and a line mostly
             // opens on markup no drawn row holds (`#`, `-`, `|`), so the
             // block's own top is the landing, through the outline's
@@ -4159,6 +4169,11 @@ impl App {
         }
         state.current = search::step(state.current, state.matches.len(), forward);
         let block = state.matches[state.current].ordered().0.block;
+        // The first hit taken leaves the place the search began at; the
+        // hits after it are steps of the search, not places.
+        if let Some(origin) = self.search_origin.take() {
+            self.history.jump(origin);
+        }
         self.band = None;
         if self.document.reveal(block) {
             // The match sits inside a folded details group: open the
@@ -5361,24 +5376,110 @@ impl App {
         self.request_redraw();
     }
 
+    /// Where the reader stands, as the history files it: the caret
+    /// while editing, else what shows at the top of the view. An
+    /// untitled note is no place to come back to, since it goes when
+    /// another file opens.
+    fn here(&self) -> Option<history::Entry> {
+        if self.on_note() {
+            return None;
+        }
+        let offset = match (self.mode, self.caret) {
+            (edit::Mode::Edit, Some(caret)) => caret.offset,
+            _ => self.top_offset()?,
+        };
+        Some(history::Entry {
+            file: self.path.clone(),
+            offset,
+        })
+    }
+
     /// Remembers where the reader is standing, so Alt+Left can bring
     /// them back after a jump carries them away.
     fn push_jump(&mut self) {
-        if let Some(offset) = self.top_offset() {
-            push_jump_position(&mut self.jump_stack, offset);
+        if let Some(here) = self.here() {
+            self.history.jump(here);
         }
     }
 
-    /// Returns to the position the last jump left, one level at a time;
-    /// an empty stack does nothing. Read mode only: the editor moves by
-    /// caret, not by jumps.
-    fn pop_jump(&mut self) {
-        if self.mode != edit::Mode::Read {
+    /// Alt+Left and Alt+Right: one place back or forward. Inside the
+    /// open file the view or the caret goes there. A place in another
+    /// file reopens it, through the unsaved question when there are
+    /// edits, and the history moves only once the file really opens.
+    fn step_history(&mut self, forward: bool) {
+        self.history
+            .retain(|place| place.file.as_deref().is_none_or(Path::exists));
+        let here = self.here();
+        let Some(target) = self.history.peek(forward, here.as_ref()).cloned() else {
+            return;
+        };
+        if target.file == self.path {
+            self.history.step(forward, here);
+            self.land_on(target.offset);
             return;
         }
-        if let Some(offset) = self.jump_stack.pop() {
+        let Some(path) = target.file else {
+            return;
+        };
+        self.pending_step = Some(forward);
+        if self.guard_unsaved(confirm::Pending::Open(path.clone(), false)) {
+            self.open_file(&path, false);
+        }
+    }
+
+    /// Shows a place of the open file: the caret goes there while
+    /// editing, the page while reading, a folded section opened first.
+    fn land_on(&mut self, offset: usize) {
+        if self.mode == edit::Mode::Edit {
+            let offset = caret::clamp(&self.document, offset);
+            self.selection = None;
+            self.sel_anchor = None;
+            self.band = None;
+            self.caret = Some(Caret::at(offset));
+            self.seat_editor_on(Place::top(offset));
+            self.wake_caret();
+        } else {
+            let folded = self
+                .document
+                .block_at_offset(offset)
+                .is_some_and(|block| self.document.reveal(block));
+            if folded {
+                self.restart_layout();
+            }
             self.pending_offset = Some(Place::top(offset));
-            self.request_redraw();
+        }
+        self.request_redraw();
+    }
+
+    /// Files what an open leaves behind, and answers the offset to land
+    /// on when the open is a step of the history. Any other open is a
+    /// jump like a link's: the place left is one to come back to.
+    fn history_at_open(
+        &mut self,
+        step: Option<bool>,
+        here: Option<history::Entry>,
+        path: &Path,
+    ) -> Option<usize> {
+        if self.path.as_deref() == Some(path) {
+            return None;
+        }
+        if self.path.is_none() {
+            // The welcome page cannot be reopened, so its places go.
+            self.history.clear();
+        }
+        let step = step.filter(|&forward| {
+            self.history
+                .peek(forward, here.as_ref())
+                .is_some_and(|place| place.file.as_deref() == Some(path))
+        });
+        match step {
+            Some(forward) => self.history.step(forward, here).map(|place| place.offset),
+            None => {
+                if let Some(here) = here {
+                    self.history.jump(here);
+                }
+                None
+            }
         }
     }
 
@@ -5394,6 +5495,7 @@ impl App {
                 .as_ref()
                 .and_then(|parked| entry_offset(&parked.document, block));
             if let Some(offset) = offset {
+                self.push_jump();
                 self.caret = Some(Caret::at(offset));
                 self.seat_editor_on(Place::top(offset));
                 self.wake_caret();
@@ -5630,6 +5732,9 @@ impl App {
             self.overlay = None;
         }
         self.export_warning = None;
+        // Read before the editor is left, while the caret still stands.
+        let here = self.here();
+        let step = self.pending_step.take();
         self.remember_position();
         // The mark is stored against the outgoing path, which `leave_edit`
         // reads before the new one lands below. The parked page goes
@@ -5650,9 +5755,8 @@ impl App {
         self.undo = None;
         self.rehighlight_at = None;
         self.notice = None;
-        // Return positions belong to the file being left.
-        self.jump_stack.clear();
         let path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+        let landing = self.history_at_open(step, here, &path);
         // The note left for another file is done with; reopened, it is
         // the fresh note `open_note` just wrote.
         if self.on_note() && self.note_file.as_deref() != Some(path.as_path()) {
@@ -5793,6 +5897,11 @@ impl App {
                     self.seat_editor_on(Place::top(offset));
                 }
             }
+        }
+        // A step of the history lands on its own place, over the one
+        // the file remembered.
+        if let Some(offset) = landing.filter(|_| opened) {
+            self.land_on(offset);
         }
         self.request_redraw();
     }
@@ -6064,6 +6173,7 @@ impl App {
         let mode = std::mem::replace(&mut self.mode, edit::Mode::Read);
         self.help_stash = Some(Box::new(Stash {
             path: self.path.take(),
+            history: std::mem::take(&mut self.history),
             document: std::mem::take(&mut self.document),
             ledger: self.ledger.take(),
             undo: self.undo.take(),
@@ -6113,8 +6223,12 @@ impl App {
             if let Some(path) = stash.path {
                 self.open_file(&path, false);
             }
+            // After the open, which files nothing from the help page
+            // and would clear the places of a page without a file.
+            self.history = stash.history;
             return;
         }
+        self.history = stash.history;
         self.document = stash.document;
         self.path = stash.path;
         self.ledger = stash.ledger;
@@ -7916,6 +8030,18 @@ impl ApplicationHandler for App {
                 }
             }
             WindowEvent::MouseInput {
+                state: ElementState::Pressed,
+                button: button @ (MouseButton::Back | MouseButton::Forward),
+                ..
+            } => {
+                // The side buttons of a mouse, as in a browser. A dialog
+                // owns the mouse as it does for the other buttons.
+                if self.mouse_muted() || self.confirm.is_some() || self.overlay.is_some() {
+                    return;
+                }
+                self.step_history(button == MouseButton::Forward);
+            }
+            WindowEvent::MouseInput {
                 state,
                 button: MouseButton::Left,
                 ..
@@ -8301,20 +8427,6 @@ mod tests {
             ),
             "Flutter in Action · epub · oryx"
         );
-    }
-
-    #[test]
-    fn the_jump_stack_records_and_collapses_positions() {
-        let mut stack = Vec::new();
-        super::push_jump_position(&mut stack, 10);
-        super::push_jump_position(&mut stack, 10);
-        super::push_jump_position(&mut stack, 25);
-        assert_eq!(stack, [10, 25], "re-jumping from one place stacks once");
-        for offset in 0..300 {
-            super::push_jump_position(&mut stack, offset);
-        }
-        assert!(stack.len() <= 100, "the stack stays bounded");
-        assert_eq!(stack.pop(), Some(299), "the newest return pops first");
     }
 
     #[test]
