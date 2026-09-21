@@ -9,6 +9,7 @@ use crate::doc::model::{BlockKind, Document, Span};
 use crate::layout::{metrics, LayoutDoc, TextRef, TextRun};
 use crate::style::fonts::FontStore;
 use crate::ui::selection::{self, ModelPos, Selection, MARKER_SPAN};
+use std::ops::Range;
 
 /// A caret anchored to a source byte offset. `goal` remembers the
 /// preferred x while stepping vertically through shorter lines.
@@ -334,6 +335,66 @@ fn lines_of(lay: &LayoutDoc, doc: &Document) -> Vec<Line> {
 pub fn row_top(lay: &LayoutDoc, doc: &Document, offset: usize) -> Option<f32> {
     let lines = lines_of(lay, doc);
     locate(&lines, offset).map(|i| lines[i].y)
+}
+
+/// Where an offset stands on the page, as a top and a height: its row
+/// when the page shows one, else the top of its block with no height.
+/// An image line, a rule and a fence have a block and no row; a blank
+/// line belongs to the block above it.
+pub fn place_box(lay: &LayoutDoc, doc: &Document, offset: usize) -> Option<(f32, f32)> {
+    let lines = lines_of(lay, doc);
+    if let Some(i) = locate(&lines, offset) {
+        return Some((lines[i].y, lines[i].h));
+    }
+    match rowless(lay, doc, offset)? {
+        Rowless::Line(span) => Some((span.start, span.end - span.start)),
+        Rowless::Block(span) => Some((span.start, 0.0)),
+    }
+}
+
+/// Where an offset without a row stands.
+enum Rowless {
+    /// An empty line of a file that is one block of lines, by its index.
+    Line(Range<f32>),
+    /// The whole block the offset belongs to.
+    Block(Range<f32>),
+}
+
+impl Rowless {
+    /// A line shows when it is whole inside the view, as a row does; a
+    /// block shows when any part of it is.
+    fn shows(&self, view_top: f32, bottom: f32) -> bool {
+        match self {
+            Rowless::Line(span) => span.start >= view_top && span.end <= bottom,
+            Rowless::Block(span) => span.end >= view_top && span.start < bottom,
+        }
+    }
+}
+
+fn rowless(lay: &LayoutDoc, doc: &Document, offset: usize) -> Option<Rowless> {
+    let block = doc.block_at_offset(offset)?;
+    if doc.code_file || doc.plain_file {
+        let start = doc.blocks[block].range.start;
+        let end = offset.min(doc.source.len()).max(start);
+        let line = doc.source[start..end].matches('\n').count();
+        if let Some(seat) = lay.code_line_seat(block, line) {
+            return Some(Rowless::Line(seat.y..seat.y + seat.height));
+        }
+    }
+    lay.block_span(block).map(Rowless::Block)
+}
+
+/// How far under the top of the view a row stands, carried across a
+/// crossing so the line keeps its place on the screen. A row the
+/// reader scrolled away from answers with the nearest edge, so it
+/// comes back whole inside the view.
+pub fn held(row_y: f32, row_h: f32, scroll_y: f32, view_h: f32) -> f32 {
+    (row_y - scroll_y).clamp(0.0, (view_h - row_h).max(0.0))
+}
+
+/// The scroll that stands a line `below` the top of the view.
+pub fn seated(row_y: f32, below: f32) -> f32 {
+    row_y - below
 }
 
 /// The line holding an offset. A wrap boundary belongs to the later
@@ -884,8 +945,10 @@ fn blank_line_at(
 /// The landing offset on entering edit mode, in precedence order: the
 /// selection's start when one exists, else the remembered offset while
 /// its line is visible, else the first text position in the viewport.
-/// The remembered offset is clamped first, since the file may have
-/// shrunk since it was taken.
+/// A remembered line the page shows no row for (an image, a rule, a
+/// blank line) counts as visible while its block is. The remembered
+/// offset is clamped first, since the file may have shrunk since it
+/// was taken.
 pub fn landing(
     lay: &LayoutDoc,
     doc: &Document,
@@ -903,19 +966,33 @@ pub fn landing(
     let lines = lines_of(lay, doc);
     let bottom = view_top + view_h;
     if let Some(offset) = remembered.map(|offset| clamp(doc, offset)) {
-        if let Some(li) = locate(&lines, offset) {
-            let line = &lines[li];
-            if line.y >= view_top && line.y + line.h <= bottom {
-                return offset;
-            }
+        let shows = match locate(&lines, offset) {
+            Some(li) => lines[li].y >= view_top && lines[li].y + lines[li].h <= bottom,
+            // An image line, a rule, a blank line: no row to test, so
+            // the place it belongs to answers.
+            None => rowless(lay, doc, offset).is_some_and(|place| place.shows(view_top, bottom)),
+        };
+        if shows {
+            return offset;
         }
     }
-    lines
+    let in_view = lines
         .iter()
         .find(|l| l.y >= view_top && l.y + l.h <= bottom)
-        .or_else(|| lines.iter().find(|l| l.y + l.h > view_top && l.y < bottom))
-        .or_else(|| lines.first())
-        .map_or(0, |l| l.start)
+        .or_else(|| lines.iter().find(|l| l.y + l.h > view_top && l.y < bottom));
+    if let Some(line) = in_view {
+        return line.start;
+    }
+    // A view with no text in it, a tall image for one: the block that
+    // fills it, before the first line of the file.
+    let filling = (0..doc.blocks.len()).find(|&block| {
+        lay.block_span(block)
+            .is_some_and(|span| span.end > view_top && span.start < bottom)
+    });
+    match filling {
+        Some(block) => doc.blocks[block].range.start,
+        None => lines.first().map_or(0, |l| l.start),
+    }
 }
 
 /// The scroll that keeps the caret in view: unchanged while the caret
@@ -1950,6 +2027,110 @@ mod tests {
             source.len() - 1,
             "the last position, before the final newline"
         );
+    }
+
+    /// A page with an image between two runs of paragraphs, laid out
+    /// beside the image's file so the image takes its own height.
+    fn image_page() -> (Document, LayoutDoc) {
+        let mut src = String::new();
+        for i in 0..6 {
+            src.push_str(&format!("Before {i}.\n\n"));
+        }
+        src.push_str("![oryx](oryx-test.png)\n\n");
+        for i in 0..6 {
+            src.push_str(&format!("After {i}.\n\n"));
+        }
+        let doc = md_doc(&src);
+        let mut fonts = FontStore::new();
+        let mut media = MediaCache::new(PathBuf::from("examples"));
+        let l = layout(
+            &doc,
+            &Theme::default_dark(),
+            &mut fonts,
+            &mut media,
+            &ViewConfig::default(),
+            2000.0,
+        );
+        (doc, l)
+    }
+
+    #[test]
+    fn landing_keeps_a_remembered_image_line() {
+        let (doc, l) = image_page();
+        let image = at(&doc, "![oryx]");
+        let place = l.images.first().expect("the image is placed");
+        assert!(place.height > 150.0, "the image takes its own height");
+        assert_eq!(row_top(&l, &doc, image), None, "the page shows no row");
+        let got = landing(&l, &doc, None, Some(image), place.y + 40.0, 100.0);
+        assert_eq!(got, image, "a view inside the image keeps the caret's line");
+        let whole = landing(&l, &doc, None, Some(image), place.y - 60.0, 600.0);
+        assert_eq!(whole, image, "and so does a view with text around it");
+    }
+
+    #[test]
+    fn landing_keeps_a_remembered_blank_line() {
+        let (doc, l) = image_page();
+        let blank = at(&doc, "Before 3.") + "Before 3.\n".len();
+        assert_eq!(&doc.source[blank..blank + 1], "\n");
+        let view_top = run(&l, &doc, "Before 2.").y;
+        let got = landing(&l, &doc, None, Some(blank), view_top, 300.0);
+        assert_eq!(got, blank, "the blank line under a visible paragraph");
+    }
+
+    #[test]
+    fn a_remembered_line_off_screen_still_falls_to_the_view() {
+        let (doc, l) = image_page();
+        let image = at(&doc, "![oryx]");
+        let first = run(&l, &doc, "Before 0.");
+        let got = landing(&l, &doc, None, Some(image), first.y, 60.0);
+        assert_eq!(got, at(&doc, "Before 0."));
+    }
+
+    #[test]
+    fn a_view_filled_by_an_image_lands_on_the_image_line() {
+        let (doc, l) = image_page();
+        let place = l.images.first().expect("the image is placed");
+        let got = landing(&l, &doc, None, None, place.y + 40.0, 100.0);
+        assert_eq!(
+            got,
+            at(&doc, "![oryx]"),
+            "the block in view, not the first line of the file"
+        );
+    }
+
+    #[test]
+    fn a_place_without_a_row_answers_by_its_block() {
+        let (doc, l) = image_page();
+        let place = l.images.first().expect("the image is placed");
+        let image = at(&doc, "![oryx]");
+        assert_eq!(place_box(&l, &doc, image), Some((place.y, 0.0)));
+        let text = run(&l, &doc, "After 2.");
+        let (y, h) = place_box(&l, &doc, at(&doc, "After 2.") + 3).unwrap();
+        assert_eq!(y, text.y);
+        assert!(h > 0.0, "a row answers with its own height");
+    }
+
+    #[test]
+    fn the_height_on_screen_stays_inside_the_view() {
+        assert_eq!(held(500.0, 20.0, 440.0, 600.0), 60.0);
+        assert_eq!(held(500.0, 20.0, 500.0, 600.0), 0.0);
+        assert_eq!(held(300.0, 20.0, 440.0, 600.0), 0.0, "a row above the view");
+        assert_eq!(
+            held(1500.0, 20.0, 440.0, 600.0),
+            580.0,
+            "a row below the view comes back whole at the bottom"
+        );
+        assert_eq!(
+            held(500.0, 20.0, 440.0, 10.0),
+            0.0,
+            "a view shorter than a row"
+        );
+    }
+
+    #[test]
+    fn a_held_line_returns_to_its_height() {
+        assert_eq!(seated(500.0, 60.0), 440.0);
+        assert_eq!(seated(500.0, 0.0), 500.0, "a jump lands at the top");
     }
 
     #[test]

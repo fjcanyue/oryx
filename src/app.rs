@@ -397,7 +397,8 @@ pub fn run(
         .document
         .book_id
         .as_deref()
-        .and_then(|key| app.positions.lookup(key));
+        .and_then(|key| app.positions.lookup(key))
+        .map(Place::top);
     if let Some(key) = app.document.book_id.as_deref() {
         app.cfg.direction = app.positions.direction(key);
     }
@@ -569,6 +570,22 @@ fn draw_strip(
         let dst = y as usize * width as usize + inset as usize;
         let src = row * strip.width as usize;
         frame[dst..dst + shown].copy_from_slice(&strip.pixels[src..src + shown]);
+    }
+}
+
+/// A place in the source the view shows once the layout reaches it.
+/// `below` is how far under the top of the view its line stands: zero
+/// for a jump, and for a crossing between the page and the editor the
+/// height the line had on the screen.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Place {
+    offset: usize,
+    below: f32,
+}
+
+impl Place {
+    fn top(offset: usize) -> Place {
+        Place { offset, below: 0.0 }
     }
 }
 
@@ -967,7 +984,7 @@ struct App {
     pending_anchor: Option<String>,
     /// A book source offset to land on once delivered and placed: a
     /// restored reading position or an internal link's target.
-    pending_offset: Option<usize>,
+    pending_offset: Option<Place>,
     /// The positions jumps left behind, newest last; Alt+Left returns
     /// through them one level at a time. Lives with the document.
     jump_stack: Vec<usize>,
@@ -1145,9 +1162,9 @@ struct App {
     /// The folder of the file that was open when the note started,
     /// where its save dialog opens; home when there was none.
     note_from: Option<PathBuf>,
-    /// A row to seat at the top of the editor once the layout places
-    /// it, the source view's counterpart to `pending_offset`.
-    pending_row: Option<usize>,
+    /// A row to seat in the editor once the layout places it, the
+    /// source view's counterpart to `pending_offset`.
+    pending_row: Option<Place>,
     /// The open file's on-disk identity at last read or write, for the
     /// external-change check.
     disk_seen: Option<(std::time::SystemTime, u64)>,
@@ -1572,6 +1589,11 @@ impl App {
             // fresh and the file may have shrunk since the mark was set.
             None => caret::clamp(&self.document, remembered.unwrap_or(0)),
         };
+        let below = self
+            .layout
+            .as_ref()
+            .and_then(|lay| caret::place_box(lay, &self.document, offset))
+            .map_or(0.0, |(y, h)| caret::held(y, h, self.scroll_y, view_h));
         self.mode = edit::Mode::Edit;
         self.caret = Some(Caret::at(offset));
         self.ensure_ledger();
@@ -1592,10 +1614,10 @@ impl App {
             self.edit_park = Some(Box::new(parked));
             self.swapped_document(None, None);
             // The reading scroll means nothing in the source view: the
-            // two documents share no coordinate but the bytes. Seat the
-            // editor on the row the caret landed on, which is the row
-            // the page was resting at.
-            self.seat_editor_on(offset);
+            // two documents share no coordinate but the bytes. The row
+            // the caret landed on takes the height its line had on the
+            // page, so the line does not move under the reader's eyes.
+            self.seat_editor_on(Place { offset, below });
         }
         // The caret owns the keys; a sidebar holding them would strand
         // the arrows. Same funnel as the Right key's explicit handoff.
@@ -1627,22 +1649,26 @@ impl App {
         self.start_highlight(load::pending(&self.document));
     }
 
-    /// Puts the row holding `offset` at the top of the editor, the way
-    /// a jump lands rather than the way a typed caret is kept in view.
-    /// A placed row answers exactly; past the placed height the block
-    /// table answers by line index, which is what a source view is
-    /// indexed by.
-    fn seat_editor_on(&mut self, offset: usize) {
+    /// Puts the row holding the place's offset at its height in the
+    /// editor: at the top the way a jump lands, or where a crossing
+    /// found the line on the page, never the way a typed caret is kept
+    /// in view. A placed row answers exactly; past the placed height
+    /// the block table answers by line index, which is what a source
+    /// view is indexed by.
+    fn seat_editor_on(&mut self, place: Place) {
         // A row the block table knows may still lie below the height the
         // pass has placed; scrolling now would stop short, so the target
         // is held until the document is tall enough to show it.
         let (height, vh) = (self.doc_height(), self.viewport_h());
-        match self.editor_row_y(offset) {
+        let target = self
+            .editor_row_y(place.offset)
+            .map(|y| caret::seated(y, place.below));
+        match target {
             Some(y) if scroll::reached(y, height, vh) || !self.layout_pending() => {
                 self.pending_row = None;
                 self.scroll_to(y);
             }
-            _ => self.pending_row = Some(offset),
+            _ => self.pending_row = Some(place),
         }
     }
 
@@ -1701,6 +1727,14 @@ impl App {
             self.last_replace = row.field.text().to_string();
         }
         let left_at = self.caret.map(|c| c.offset);
+        // Read in the editor, before the page returns: the height of
+        // the caret's row on the screen, which its line keeps.
+        let below = left_at
+            .zip(self.layout.as_ref())
+            .and_then(|(offset, lay)| caret::place_box(lay, &self.document, offset))
+            .map_or(0.0, |(y, h)| {
+                caret::held(y, h, self.scroll_y, self.viewport_h())
+            });
         if let (Some(path), Some(c)) = (self.path.clone(), self.caret) {
             self.edit_marks.insert(path, c.offset);
         }
@@ -1735,9 +1769,12 @@ impl App {
                 self.outline = OutlineTree::build(&self.document);
             }
             // The page the reader came in from, then the row they are
-            // leaving on: a restored layout answers exactly, and a page
-            // still to be laid out answers through the pending target
-            // once it reaches that far.
+            // leaving on, at the height it had in the editor: a restored
+            // layout answers exactly, and a page still to be laid out
+            // answers through the pending target once it reaches that
+            // far. A line the page shows no row for, an image or a
+            // blank line, goes through the pending target too, which
+            // stands its block at that height.
             self.scroll_y = parked.scroll_y;
             if let Some(offset) = left_at {
                 match self
@@ -1745,8 +1782,8 @@ impl App {
                     .as_ref()
                     .and_then(|lay| caret::row_top(lay, &self.document, offset))
                 {
-                    Some(y) => self.scroll_to(y),
-                    None => self.pending_offset = Some(offset),
+                    Some(y) => self.scroll_to(caret::seated(y, below)),
+                    None => self.pending_offset = Some(Place { offset, below }),
                 }
             }
         }
@@ -2069,7 +2106,7 @@ impl App {
             state.stale = true;
         }
         if !visible {
-            self.pending_offset = Some(caret);
+            self.pending_offset = Some(Place::top(caret));
         }
         self.count_after_edit();
         self.arm_pause_save();
@@ -3905,12 +3942,12 @@ impl App {
                 if folded {
                     self.restart_layout();
                 }
-                self.pending_offset = Some(line_end);
+                self.pending_offset = Some(Place::top(line_end));
                 self.request_redraw();
                 return;
             }
         }
-        self.seat_editor_on(offset);
+        self.seat_editor_on(Place::top(offset));
         self.request_redraw();
     }
 
@@ -5272,7 +5309,7 @@ impl App {
             return;
         }
         if let Some(offset) = self.jump_stack.pop() {
-            self.pending_offset = Some(offset);
+            self.pending_offset = Some(Place::top(offset));
             self.request_redraw();
         }
     }
@@ -5290,7 +5327,7 @@ impl App {
                 .and_then(|parked| entry_offset(&parked.document, block));
             if let Some(offset) = offset {
                 self.caret = Some(Caret::at(offset));
-                self.seat_editor_on(offset);
+                self.seat_editor_on(Place::top(offset));
                 self.wake_caret();
             }
             self.request_redraw();
@@ -5320,7 +5357,7 @@ impl App {
                 if self.document.reveal(block) {
                     self.restart_layout();
                 }
-                self.pending_offset = Some(offset);
+                self.pending_offset = Some(Place::top(offset));
                 self.request_redraw();
             }
             None => {}
@@ -5658,7 +5695,8 @@ impl App {
                 } else {
                     self.read_marks.get(&path).copied()
                 }
-            });
+            })
+            .map(Place::top);
         if let Some(side) = self.sidebar.as_mut() {
             if reroot && side.root() != dir {
                 let tab = side.tab();
@@ -5690,7 +5728,7 @@ impl App {
             self.enter_edit();
             if self.edit_park.is_none() {
                 if let Some(offset) = self.caret.map(|c| c.offset) {
-                    self.seat_editor_on(offset);
+                    self.seat_editor_on(Place::top(offset));
                 }
             }
         }
@@ -6117,7 +6155,7 @@ impl App {
             return;
         }
         if let Some(offset) = self.top_offset() {
-            self.pending_offset = Some(offset);
+            self.pending_offset = Some(Place::top(offset));
         }
         self.cfg.comic = fit;
         self.layout = None;
@@ -6507,7 +6545,7 @@ impl App {
                         self.restart_layout();
                     }
                 }
-                self.pending_offset = Some(offset);
+                self.pending_offset = Some(Place::top(offset));
                 self.request_redraw();
             }
         } else if target.starts_with("http://") || target.starts_with("https://") {
@@ -6767,8 +6805,11 @@ impl App {
         // pending discipline as the offset target below, resolved
         // against rows rather than blocks, since the editor is indexed
         // by lines and a source view is one block.
-        if let Some(offset) = self.pending_row {
-            match self.editor_row_y(offset) {
+        if let Some(place) = self.pending_row {
+            let target = self
+                .editor_row_y(place.offset)
+                .map(|y| caret::seated(y, place.below));
+            match target {
                 Some(y) if scroll::reached(y, height, vh) || !self.layout_pending() => {
                     self.pending_row = None;
                     self.scroll_to(y);
@@ -6777,7 +6818,7 @@ impl App {
                 _ => {}
             }
         }
-        if let Some(offset) = self.pending_offset {
+        if let Some(Place { offset, below }) = self.pending_offset {
             // Held while the offset lies past the delivered source; the
             // worker's delivery brings the rest.
             let covered = offset < self.document.source.len() || !self.parse_pending;
@@ -6785,7 +6826,8 @@ impl App {
                 let placed = self
                     .document
                     .block_at_offset(offset)
-                    .and_then(|b| self.layout.as_ref().and_then(|l| l.approx_top(b, 0)));
+                    .and_then(|b| self.layout.as_ref().and_then(|l| l.approx_top(b, 0)))
+                    .map(|y| caret::seated(y, below));
                 match placed {
                     Some(y) if scroll::reached(y, height, vh) || !self.layout_pending() => {
                         self.pending_offset = None;

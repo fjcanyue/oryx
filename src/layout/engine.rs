@@ -888,6 +888,17 @@ impl LayoutDoc {
         Some(entry.y)
     }
 
+    /// The recorded top and bottom of a block, from the block table.
+    /// None before the pass places the block.
+    pub fn block_span(&self, block: usize) -> Option<Range<f32>> {
+        let position = *self.table.position_of_block.get(block)?;
+        if position == u32::MAX {
+            return None;
+        }
+        let entry = &self.table.entries[position as usize];
+        Some(entry.y..entry.bottom().max(entry.y))
+    }
+
     /// Where the first glyph of line `line` of code block `block`
     /// stands, from the block table alone: the caret's seat on a line
     /// the layout holds no glyphs for. None before the pass places the
