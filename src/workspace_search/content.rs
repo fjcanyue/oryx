@@ -22,6 +22,14 @@ use super::types::{BufferOverride, ContentHit};
 /// and wakes the loop, rather than one event a match.
 pub const BATCH: usize = 30;
 
+/// How much of a matching line is kept, in characters. A bundled or
+/// minified file can carry a whole megabyte on one line; the preview
+/// needs a screen's worth, and the memory must not hold the rest.
+const LINE_PREVIEW: usize = 1000;
+/// How many match ranges one line highlights; a pathological pattern
+/// over a long line makes thousands, and the eye reads none of them.
+const LINE_RANGES: usize = 50;
+
 /// How a content query ended.
 pub struct ContentOutcome {
     /// The limit cut the answer short.
@@ -79,20 +87,24 @@ pub fn search(
         {
             let mut take_line = |line_number: u64, line: &str| -> Result<bool, io::Error> {
                 let trimmed = line.trim_end_matches(['\r', '\n']);
+                // A bundled file's one-megabyte line previews as its
+                // head; the elided tail would never render, and the
+                // fitted drawing and the stored hit stay bounded.
+                let shown = match trimmed.char_indices().nth(LINE_PREVIEW) {
+                    Some((at, _)) => &trimmed[..at],
+                    None => trimmed,
+                };
                 // Where in the line the pattern landed; the searcher
-                // matched the whole line, the ranges narrow it.
+                // matched the whole line, the ranges narrow it. The
+                // line is here because it matched somewhere — past the
+                // kept head, the hit stands with nothing to highlight.
                 let mut ranges: Vec<Range<usize>> = Vec::new();
-                let mut any = false;
-                let _ = matcher.find_iter(trimmed.as_bytes(), |m| {
-                    any = true;
-                    if !m.is_empty() && m.end() <= trimmed.len() {
+                let _ = matcher.find_iter(shown.as_bytes(), |m| {
+                    if !m.is_empty() && m.end() <= shown.len() && ranges.len() < LINE_RANGES {
                         ranges.push(m.start()..m.end());
                     }
-                    true
+                    ranges.len() < LINE_RANGES
                 });
-                if !any {
-                    return Ok(true);
-                }
                 if taken >= limit {
                     truncated = true;
                     return Ok(false);
@@ -100,7 +112,7 @@ pub fn search(
                 hits.push(ContentHit {
                     relative_path: Arc::from(&*file.relative_path),
                     line_number,
-                    line_text: Arc::from(trimmed),
+                    line_text: Arc::from(shown),
                     ranges,
                 });
                 taken += 1;
@@ -355,6 +367,51 @@ mod tests {
         })
         .unwrap();
         assert!(!outcome.truncated);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A bundled file's megabyte line: the hit keeps a bounded head
+    /// and a bounded handful of ranges, or the fitted drawing on the
+    /// UI thread walks the whole line a character at a time and the
+    /// panel reads as frozen.
+    #[test]
+    fn a_megabyte_line_previews_a_bounded_head() {
+        let dir = fresh("huge-line");
+        let mut line = String::with_capacity(400_000);
+        for _ in 0..100_000 {
+            line.push_str("usr ");
+        }
+        line.push_str("needle");
+        std::fs::write(dir.join("bundle.js"), &line).unwrap();
+        std::fs::write(dir.join("plain.txt"), "needle too\n").unwrap();
+        let index = WorkspaceIndex::scan(&dir, RootGeneration(0), &NEVER).unwrap();
+        let mut hits: Vec<ContentHit> = Vec::new();
+        search(&index, "needle", false, 10, None, &NEVER, |batch| {
+            hits.extend(batch);
+        })
+        .unwrap();
+        assert_eq!(
+            hits.len(),
+            2,
+            "a match past the kept head still reports its line"
+        );
+        let bundle = &hits[0];
+        assert_eq!(&*bundle.relative_path, "bundle.js");
+        assert!(bundle.line_text.chars().count() <= LINE_PREVIEW);
+        assert!(
+            bundle.line_text.starts_with("usr "),
+            "the head, not the tail"
+        );
+        assert!(bundle.ranges.is_empty(), "nothing visible to highlight");
+        // A pattern scattering over the long head highlights a
+        // bounded number of ranges, not thousands.
+        let mut hits = Vec::new();
+        search(&index, "usr", false, 10, None, &NEVER, |batch| {
+            hits.extend(batch);
+        })
+        .unwrap();
+        assert!(hits[0].ranges.len() <= LINE_RANGES);
+        assert!(!hits[0].ranges.is_empty());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
