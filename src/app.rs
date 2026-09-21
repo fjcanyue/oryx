@@ -4351,12 +4351,45 @@ impl App {
                     .search_files(&query, workspace_search::MAX_FILE_RESULTS);
             }
             FilesView::ContentSearch => {
-                // The content view's grep arrives with its own phase;
-                // until then its field only holds text.
+                let query = side.search.content_query.text().to_string();
+                let regex = side.search.regex;
+                side.search.status = SearchStatus::Searching;
+                let buffer = self.dirty_buffer_override();
+                self.workspace.search_content(
+                    &query,
+                    regex,
+                    workspace_search::MAX_CONTENT_HITS,
+                    buffer,
+                );
             }
             FilesView::Tree => {}
         }
         self.request_redraw();
+    }
+
+    /// The current document's unsaved text, when it is dirty and lives
+    /// inside the workspace: the search answers against what the
+    /// reader sees. A clean or outside-the-root document contributes
+    /// nothing; an unsaved note has no disk file to shadow.
+    fn dirty_buffer_override(&mut self) -> Option<workspace_search::BufferOverride> {
+        if !self.edits_unsaved() {
+            return None;
+        }
+        // The ledger's emission is the same byte-exact text a save
+        // would write; only a file that read cleanly can edit, so it
+        // is UTF-8.
+        let bytes = self.ledger.as_ref()?.emit();
+        let text = String::from_utf8(bytes).ok()?;
+        let relative = self.path.as_ref().and_then(|path| {
+            let root = self.sidebar.as_ref()?.root();
+            let rel = path.strip_prefix(root).ok()?;
+            let text = rel.to_str()?.replace(std::path::MAIN_SEPARATOR, "/");
+            (!text.is_empty()).then(|| Arc::from(text))
+        });
+        Some(workspace_search::BufferOverride {
+            relative_path: relative,
+            text: Arc::from(text),
+        })
     }
 
     /// Enters one of the Files tab's search views, opening the panel

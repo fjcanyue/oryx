@@ -12,6 +12,7 @@ use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
+use super::content;
 use super::file_matcher::FileMatcher;
 use super::index::{ScanFailure, WorkspaceIndex};
 use super::types::{QueryGeneration, RootGeneration, SearchCommand, SearchEvent, SearchToken};
@@ -398,18 +399,68 @@ impl Worker {
         limit: usize,
         current_buffer: Option<super::types::BufferOverride>,
     ) {
-        // Phase 4 fills in the grep; the shape of the answer stands
-        // already.
-        let _ = (query, regex, limit, current_buffer);
-        self.emit(SearchEvent::ContentBatch {
-            token,
-            results: Vec::new(),
-        });
-        self.emit(SearchEvent::Finished {
-            token,
-            truncated: false,
-            skipped: 0,
-        });
+        if query.is_empty() || !self.cancel.stands_on(token) {
+            self.emit(SearchEvent::ContentBatch {
+                token,
+                results: Vec::new(),
+            });
+            self.emit(SearchEvent::Finished {
+                token,
+                truncated: false,
+                skipped: 0,
+            });
+            return;
+        }
+        let Some(index) = self.index.as_ref() else {
+            self.emit(SearchEvent::ContentBatch {
+                token,
+                results: Vec::new(),
+            });
+            self.emit(SearchEvent::Finished {
+                token,
+                truncated: false,
+                skipped: 0,
+            });
+            return;
+        };
+        // Batches stream straight onto the arrivals queue; the loop
+        // wakes once a batch, the way the media caches wake once an
+        // image.
+        let arrivals = self.arrivals.clone();
+        let waker = self.waker.clone();
+        let cancel = self.cancel.clone();
+        let outcome = content::search(
+            index,
+            query,
+            regex,
+            limit,
+            current_buffer.as_ref(),
+            &|| !cancel.stands_on(token),
+            |batch| {
+                arrivals
+                    .lock()
+                    .expect("search arrivals lock")
+                    .push(SearchEvent::ContentBatch {
+                        token,
+                        results: batch,
+                    });
+                waker();
+            },
+        );
+        if !self.cancel.stands_on(token) {
+            return;
+        }
+        match outcome {
+            Ok(outcome) => self.emit(SearchEvent::Finished {
+                token,
+                truncated: outcome.truncated,
+                skipped: outcome.skipped,
+            }),
+            Err(message) => self.emit(SearchEvent::Error {
+                token: Some(token),
+                message,
+            }),
+        }
     }
 
     /// Parks an event for the UI and wakes the event loop.
@@ -629,6 +680,61 @@ mod tests {
                     .map(|hit| hit.relative_path.to_string())
                     .collect();
                 assert_eq!(paths, ["main.rs", "src/main.rs"]);
+            }
+            _ => unreachable!("the probe only returns what it accepts"),
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_content_query_answers_through_the_worker_in_batches() {
+        let dir = fresh("content-query");
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        std::fs::write(dir.join("src/a.rs"), "one\nUserService::new\ntwo\n").unwrap();
+        std::fs::write(dir.join("src/b.rs"), "UserService again\n").unwrap();
+        let mut probe = Probe::new();
+        probe.search.sync_root(&dir);
+        probe.await_event(|e| matches!(e, SearchEvent::IndexReady { .. }));
+        probe.search.search_content("UserService", false, 500, None);
+        let mut lines = Vec::new();
+        loop {
+            match probe.await_event(|e| matches!(e, SearchEvent::ContentBatch { .. })) {
+                SearchEvent::ContentBatch { token, results } => {
+                    assert_eq!(token, probe.search.token());
+                    for hit in results {
+                        lines.push((hit.relative_path.to_string(), hit.line_number));
+                    }
+                }
+                _ => unreachable!("the probe only returns what it accepts"),
+            }
+            // Stop once the run finished; the queue drains in order.
+            if probe
+                .seen
+                .iter()
+                .any(|e| matches!(e, SearchEvent::Finished { .. }))
+            {
+                break;
+            }
+        }
+        assert_eq!(
+            lines,
+            [("src/a.rs".to_string(), 2), ("src/b.rs".to_string(), 1),]
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn an_invalid_regex_reports_through_the_worker() {
+        let dir = fresh("invalid-regex");
+        std::fs::write(dir.join("a.txt"), "text\n").unwrap();
+        let mut probe = Probe::new();
+        probe.search.sync_root(&dir);
+        probe.await_event(|e| matches!(e, SearchEvent::IndexReady { .. }));
+        probe.search.search_content("foo(", true, 500, None);
+        match probe.await_event(|e| matches!(e, SearchEvent::Error { .. })) {
+            SearchEvent::Error { token, message } => {
+                assert!(token.is_some(), "the pattern's own error, not the root's");
+                assert!(!message.is_empty());
             }
             _ => unreachable!("the probe only returns what it accepts"),
         }

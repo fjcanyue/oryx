@@ -5,6 +5,7 @@
 //! and receives events; this module owns the walking, the matching
 //! and the reading, all off the UI thread.
 
+mod content;
 mod file_matcher;
 mod index;
 mod types;
