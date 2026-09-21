@@ -394,7 +394,7 @@ pub const TIPS: &[Tip] = &[
     Tip {
         kind: TipKind::Tip,
         area: Area::Editing,
-        text: r#"In the editor, with nothing selected, `Ctrl+C` copies the whole line you are on and `Ctrl+X` cuts it. Paste it at the start of another line to repeat it or move it there."#,
+        text: r#"In the editor, with nothing selected, `Ctrl+C` copies the whole line you are on and `Ctrl+X` cuts it."#,
     },
     Tip {
         kind: TipKind::Tip,

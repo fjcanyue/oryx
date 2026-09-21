@@ -82,6 +82,17 @@ pub fn line_take(source: &str, caret: usize) -> Option<LineTake> {
     Some(LineTake { cut, text, caret })
 }
 
+/// Where a line taken by `line_take` is pasted with the caret at
+/// `caret` and nothing selected: at the start of the caret's line,
+/// wherever the caret stands in it, as VS Code and Zed do, so a whole
+/// line never splits another. Answers the insert position and the
+/// caret after it, on the letter it was on.
+pub fn line_paste(source: &str, caret: usize, text: &str) -> (usize, usize) {
+    let caret = caret.min(source.len());
+    let start = source[..caret].rfind('\n').map_or(0, |i| i + 1);
+    (start, caret + text.len())
+}
+
 /// What Enter does after a markdown marker: continue the construct on
 /// the new line, or end it when the item stands empty.
 #[derive(Debug, PartialEq, Eq)]
@@ -1269,6 +1280,17 @@ mod tests {
             (take.cut.clone(), take.text.as_str(), take.caret),
             (2..4, "b\n", 2)
         );
+    }
+
+    #[test]
+    fn a_taken_line_is_pasted_above_the_carets_line() {
+        assert_eq!(
+            line_paste("one\ntwo", 5, "one\n"),
+            (4, 9),
+            "from the middle of two: in front of it, the caret on the same letter"
+        );
+        assert_eq!(line_paste("one\ntwo", 0, "x\n"), (0, 2), "the first line");
+        assert_eq!(line_paste("one\n", 4, "x\n"), (4, 6), "the empty last row");
     }
 
     #[test]

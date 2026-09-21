@@ -313,6 +313,7 @@ pub fn run(
         last_click: None,
         selection: None,
         clipboard: None,
+        line_clip: None,
         overlay: None,
         overlay_mouse: false,
         export: None,
@@ -1028,6 +1029,10 @@ struct App {
     /// Created on first copy and kept alive so the content outlives the
     /// call on X11.
     clipboard: Option<arboard::Clipboard>,
+    /// The text of the last line Ctrl+C or Ctrl+X took with nothing
+    /// selected. While the clipboard still holds it, a paste puts it
+    /// above the caret's line; any other copy from here forgets it.
+    line_clip: Option<String>,
     /// The single active modal overlay; receives keys, clicks, and wheel
     /// while open.
     overlay: Option<Box<dyn Overlay>>,
@@ -3582,7 +3587,8 @@ impl App {
         }
         let Some(range) = self.selection_source_range().filter(|r| !r.is_empty()) else {
             if let Some(take) = self.caret_line() {
-                self.set_clipboard(take.text);
+                self.set_clipboard(take.text.clone());
+                self.line_clip = Some(take.text);
                 self.type_edit_at(take.cut, "", Kind::Structural, take.caret);
             }
             return;
@@ -3619,6 +3625,16 @@ impl App {
         // writes the file's own ending back on save.
         let text = load::without_returns(&text);
         if text.is_empty() {
+            return;
+        }
+        // A line taken whole goes back whole, above the caret's line. The
+        // clipboard may have changed hands since, so its text is compared
+        // with the line's; a selection is replaced like any paste.
+        let selected = self.selection_source_range().is_some_and(|r| !r.is_empty());
+        if !selected && self.line_clip.as_deref() == Some(&*text) {
+            let caret = self.caret.map_or(0, |c| c.offset);
+            let (at, after) = edit::manners::line_paste(&self.document.source, caret, &text);
+            self.type_edit_at(at..at, &text, Kind::Structural, after);
             return;
         }
         // An address pasted over selected markdown text links the text.
@@ -6368,7 +6384,8 @@ impl App {
     fn copy_selection(&mut self, as_markdown: bool) {
         let Some(sel) = self.selection.filter(|s| !s.is_empty()) else {
             if let Some(take) = self.caret_line() {
-                self.set_clipboard(take.text);
+                self.set_clipboard(take.text.clone());
+                self.line_clip = Some(take.text);
             }
             return;
         };
@@ -6384,6 +6401,7 @@ impl App {
     }
 
     fn set_clipboard(&mut self, text: String) {
+        self.line_clip = None;
         if self.clipboard.is_none() {
             self.clipboard = arboard::Clipboard::new()
                 .map_err(|err| eprintln!("oryx: no clipboard: {err}"))
