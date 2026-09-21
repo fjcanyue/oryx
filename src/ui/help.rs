@@ -434,6 +434,16 @@ pub const TIPS: &[Tip] = &[
     Tip {
         kind: TipKind::Tip,
         area: Area::Editing,
+        text: r#"When you paste or drop a picture larger than 2560 pixels, Oryx makes it smaller, so your file stays fast to open."#,
+    },
+    Tip {
+        kind: TipKind::Tip,
+        area: Area::Editing,
+        text: r#"`Ctrl+Shift+V` pastes a picture as-is without resizing, just like using images from the file's folder."#,
+    },
+    Tip {
+        kind: TipKind::Tip,
+        area: Area::Editing,
         text: r#"Select a few lines and press `Alt+-` for a bullet list, `Alt+1` for a numbered list or `Alt+X` for a task list. The same key again removes it."#,
     },
     Tip {

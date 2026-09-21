@@ -12,6 +12,44 @@ use std::path::{Path, PathBuf};
 /// The folder beside the markdown file that holds its pictures.
 pub const FOLDER: &str = "images";
 
+/// The longer side a picture brought in is reduced to, in pixels. A
+/// page never draws a picture wider than its window, and a 4800 by 3200
+/// photo costs half a second and 130 MB to show where a 2560 one costs
+/// a tenth of that (measured 21/09/2026). The limit sits above what a
+/// 2560 screen captures, so such a screenshot is never touched and its
+/// small text stays sharp.
+pub const LIMIT: u32 = 2560;
+
+/// A picture on disk beside the file, and what bringing it in changed.
+#[derive(Debug, PartialEq)]
+pub struct Saved {
+    /// The picture's path from the file's folder.
+    pub relative: PathBuf,
+    /// The size it had and the size it was reduced to, when it was.
+    pub resized: Option<((u32, u32), (u32, u32))>,
+}
+
+/// The size a picture is reduced to, its longer side at the limit and
+/// its shape kept; None for a picture within the limit.
+pub fn fitted(width: u32, height: u32) -> Option<(u32, u32)> {
+    let longer = width.max(height);
+    if longer <= LIMIT {
+        return None;
+    }
+    let scale = |side: u32| {
+        let scaled =
+            (u64::from(side) * u64::from(LIMIT) + u64::from(longer) / 2) / u64::from(longer);
+        (scaled as u32).max(1)
+    };
+    Some((scale(width), scale(height)))
+}
+
+/// The filter a picture is reduced with.
+const FILTER: image::imageops::FilterType = image::imageops::FilterType::CatmullRom;
+
+/// The quality a reduced JPEG is written at.
+const JPEG_QUALITY: u8 = 90;
+
 /// Whether a dropped file is a picture a markdown page shows, told by
 /// its extension.
 pub fn is_image(path: &Path) -> bool {
@@ -131,17 +169,23 @@ pub fn insertion(source: &str, replace: Range<usize>, destinations: &[String]) -
 }
 
 /// Writes a pasted picture, RGBA rows, as a PNG into the images folder
-/// beside `file`, the folder made when missing. Answers the picture's
-/// path from the file's folder.
+/// beside `file`, the folder made when missing. A picture above the
+/// limit is reduced to it unless `full` asks for every pixel.
 pub fn save_pasted(
     file: &Path,
     stamp: &str,
     width: u32,
     height: u32,
     rgba: &[u8],
-) -> io::Result<PathBuf> {
+    full: bool,
+) -> io::Result<Saved> {
     let picture = image::RgbaImage::from_raw(width, height, rgba.to_vec())
         .ok_or_else(|| io::Error::other("the clipboard's picture is cut short"))?;
+    let target = fitted(width, height).filter(|_| !full);
+    let picture = match target {
+        Some((w, h)) => image::imageops::resize(&picture, w, h, FILTER),
+        None => picture,
+    };
     let dir = folder_of(file);
     let images = dir.join(FOLDER);
     std::fs::create_dir_all(&images)?;
@@ -149,17 +193,27 @@ pub fn save_pasted(
     picture
         .save_with_format(images.join(&name), image::ImageFormat::Png)
         .map_err(io::Error::other)?;
-    Ok(Path::new(FOLDER).join(name))
+    Ok(Saved {
+        relative: Path::new(FOLDER).join(name),
+        resized: target.map(|to| ((width, height), to)),
+    })
 }
 
 /// Brings a dropped picture to the file: linked where it lies when it
-/// sits under the file's folder, copied into the images folder
-/// otherwise. Answers the picture's path from the file's folder.
-pub fn adopt_dropped(file: &Path, image: &Path) -> io::Result<PathBuf> {
+/// sits under the file's folder, and never touched there; copied into
+/// the images folder otherwise. The copy of a JPEG or a PNG above the
+/// limit is reduced to it, in its own format and turned the way its
+/// camera says; a GIF may move, a WebP may too and an SVG has no
+/// pixels, so those are copied byte for byte. The dropped file itself
+/// is never changed.
+pub fn adopt_dropped(file: &Path, image: &Path) -> io::Result<Saved> {
     let dir = folder_of(file);
     let image = image.canonicalize()?;
     if let Some(relative) = under(&dir, &image) {
-        return Ok(relative);
+        return Ok(Saved {
+            relative,
+            resized: None,
+        });
     }
     let name = image
         .file_name()
@@ -168,8 +222,74 @@ pub fn adopt_dropped(file: &Path, image: &Path) -> io::Result<PathBuf> {
     let images = dir.join(FOLDER);
     std::fs::create_dir_all(&images)?;
     let name = free_name(&images, &name);
-    std::fs::copy(&image, images.join(&name))?;
-    Ok(Path::new(FOLDER).join(name))
+    let resized = match reduced(&image) {
+        Some(reduced) => {
+            reduced.write(&images.join(&name))?;
+            Some((reduced.from, reduced.to))
+        }
+        None => {
+            std::fs::copy(&image, images.join(&name))?;
+            None
+        }
+    };
+    Ok(Saved {
+        relative: Path::new(FOLDER).join(name),
+        resized,
+    })
+}
+
+/// A dropped picture decoded, turned upright and reduced to the limit.
+struct Reduced {
+    picture: image::DynamicImage,
+    format: image::ImageFormat,
+    from: (u32, u32),
+    to: (u32, u32),
+}
+
+impl Reduced {
+    fn write(&self, path: &Path) -> io::Result<()> {
+        let file = std::io::BufWriter::new(std::fs::File::create(path)?);
+        match self.format {
+            image::ImageFormat::Jpeg => {
+                image::codecs::jpeg::JpegEncoder::new_with_quality(file, JPEG_QUALITY)
+                    .encode_image(&self.picture.to_rgb8())
+            }
+            _ => self
+                .picture
+                .write_with_encoder(image::codecs::png::PngEncoder::new(file)),
+        }
+        .map_err(io::Error::other)
+    }
+}
+
+/// The reduced form of a picture file, or None when the file is copied
+/// as it is: within the limit by its header, not a JPEG or a PNG by its
+/// content, or unreadable, which is the copy's business to report.
+fn reduced(path: &Path) -> Option<Reduced> {
+    use image::ImageDecoder;
+    let reader = image::ImageReader::open(path)
+        .ok()?
+        .with_guessed_format()
+        .ok()?;
+    let format = reader
+        .format()
+        .filter(|f| matches!(f, image::ImageFormat::Jpeg | image::ImageFormat::Png))?;
+    let mut decoder = reader.into_decoder().ok()?;
+    let (width, height) = decoder.dimensions();
+    fitted(width, height)?;
+    // The camera's word on which way is up is lost with the rest of
+    // the file's data, so it is applied to the pixels first.
+    let orientation = decoder.orientation().ok()?;
+    let mut picture = image::DynamicImage::from_decoder(decoder).ok()?;
+    picture.apply_orientation(orientation);
+    let from = (picture.width(), picture.height());
+    let to = fitted(from.0, from.1)?;
+    Some(Reduced {
+        picture: picture.resize_exact(to.0, to.1, FILTER),
+        format,
+        from,
+        to,
+    })
 }
 
 /// The folder a file's pictures are counted from.
@@ -323,18 +443,22 @@ mod tests {
         let dir = scratch("paste");
         let file = dir.join("trip.md");
         let rgba: Vec<u8> = [255u8, 0, 0, 255].repeat(6);
-        let first = save_pasted(&file, "20260921-1542", 3, 2, &rgba).unwrap();
-        assert_eq!(first, PathBuf::from("images/trip-20260921-1542.png"));
-        let written = image::open(dir.join(&first)).unwrap().to_rgba8();
+        let first = save_pasted(&file, "20260921-1542", 3, 2, &rgba, false).unwrap();
+        assert_eq!(
+            first.relative,
+            PathBuf::from("images/trip-20260921-1542.png")
+        );
+        assert_eq!(first.resized, None);
+        let written = image::open(dir.join(&first.relative)).unwrap().to_rgba8();
         assert_eq!(written.dimensions(), (3, 2));
         assert_eq!(written.get_pixel(2, 1).0, [255, 0, 0, 255]);
-        let second = save_pasted(&file, "20260921-1542", 3, 2, &rgba).unwrap();
+        let second = save_pasted(&file, "20260921-1542", 3, 2, &rgba, false).unwrap();
         assert_eq!(
-            second,
+            second.relative,
             PathBuf::from("images/trip-20260921-1542-2.png"),
             "the same minute keeps both"
         );
-        assert!(save_pasted(&file, "20260921-1542", 3, 2, &rgba[..5]).is_err());
+        assert!(save_pasted(&file, "20260921-1542", 3, 2, &rgba[..5], false).is_err());
     }
 
     #[test]
@@ -344,7 +468,9 @@ mod tests {
         std::fs::create_dir_all(dir.join("art")).unwrap();
         std::fs::write(dir.join("art/cat.png"), b"inside").unwrap();
         assert_eq!(
-            adopt_dropped(&file, &dir.join("art/cat.png")).unwrap(),
+            adopt_dropped(&file, &dir.join("art/cat.png"))
+                .unwrap()
+                .relative,
             PathBuf::from("art/cat.png")
         );
         assert!(
@@ -354,16 +480,167 @@ mod tests {
 
         let outside = scratch("drop-outside");
         std::fs::write(outside.join("dog.jpg"), b"outside").unwrap();
-        let copied = adopt_dropped(&file, &outside.join("dog.jpg")).unwrap();
+        let copied = adopt_dropped(&file, &outside.join("dog.jpg"))
+            .unwrap()
+            .relative;
         assert_eq!(copied, PathBuf::from("images/dog.jpg"));
         assert_eq!(std::fs::read(dir.join(&copied)).unwrap(), b"outside");
         assert!(outside.join("dog.jpg").exists(), "a copy, not a move");
-        let again = adopt_dropped(&file, &outside.join("dog.jpg")).unwrap();
+        let again = adopt_dropped(&file, &outside.join("dog.jpg"))
+            .unwrap()
+            .relative;
         assert_eq!(
             again,
             PathBuf::from("images/dog-2.jpg"),
             "a taken name is kept"
         );
         assert!(adopt_dropped(&file, &outside.join("missing.png")).is_err());
+    }
+
+    #[test]
+    fn a_picture_above_the_limit_is_fitted_to_it() {
+        assert_eq!(fitted(2560, 1440), None, "a 2560 screen's capture stays");
+        assert_eq!(fitted(1440, 2560), None);
+        assert_eq!(fitted(100, 100), None);
+        assert_eq!(fitted(4800, 3200), Some((2560, 1707)));
+        assert_eq!(fitted(3200, 4800), Some((1707, 2560)));
+        assert_eq!(fitted(3840, 2160), Some((2560, 1440)));
+        assert_eq!(fitted(2561, 10), Some((2560, 10)));
+        assert_eq!(fitted(10000, 3), Some((2560, 1)), "never a side of zero");
+    }
+
+    /// A wide picture, a gradient so a resize has something to keep.
+    fn wide(width: u32, height: u32) -> image::RgbaImage {
+        image::RgbaImage::from_fn(width, height, |x, y| {
+            image::Rgba([(x * 255 / width) as u8, (y * 255 / height) as u8, 90, 255])
+        })
+    }
+
+    fn size_of(path: &Path) -> (u32, u32) {
+        image::image_dimensions(path).unwrap()
+    }
+
+    fn format_of(path: &Path) -> image::ImageFormat {
+        image::ImageReader::open(path)
+            .unwrap()
+            .with_guessed_format()
+            .unwrap()
+            .format()
+            .unwrap()
+    }
+
+    #[test]
+    fn a_big_pasted_picture_is_reduced_unless_every_pixel_is_asked_for() {
+        let dir = scratch("paste-big");
+        let file = dir.join("trip.md");
+        let picture = wide(3000, 120);
+        let stamp = "20260921-1700";
+        let reduced = save_pasted(&file, stamp, 3000, 120, picture.as_raw(), false).unwrap();
+        assert_eq!(reduced.resized, Some(((3000, 120), (2560, 102))));
+        assert_eq!(size_of(&dir.join(&reduced.relative)), (2560, 102));
+        let whole = save_pasted(&file, stamp, 3000, 120, picture.as_raw(), true).unwrap();
+        assert_eq!(whole.resized, None);
+        assert_eq!(size_of(&dir.join(&whole.relative)), (3000, 120));
+    }
+
+    #[test]
+    fn a_big_dropped_picture_is_copied_reduced_in_its_own_format() {
+        let dir = scratch("drop-big");
+        let file = dir.join("trip.md");
+        let outside = scratch("drop-big-outside");
+        let picture = image::DynamicImage::ImageRgba8(wide(3000, 120));
+        picture.save(outside.join("wide.png")).unwrap();
+        picture.to_rgb8().save(outside.join("wide.jpg")).unwrap();
+        for (name, format) in [
+            ("wide.png", image::ImageFormat::Png),
+            ("wide.jpg", image::ImageFormat::Jpeg),
+        ] {
+            let before = std::fs::read(outside.join(name)).unwrap();
+            let saved = adopt_dropped(&file, &outside.join(name)).unwrap();
+            assert_eq!(saved.relative, Path::new(FOLDER).join(name));
+            assert_eq!(saved.resized, Some(((3000, 120), (2560, 102))), "{name}");
+            assert_eq!(size_of(&dir.join(&saved.relative)), (2560, 102));
+            assert_eq!(format_of(&dir.join(&saved.relative)), format);
+            assert_eq!(
+                std::fs::read(outside.join(name)).unwrap(),
+                before,
+                "the dropped file itself is never changed"
+            );
+        }
+    }
+
+    #[test]
+    fn what_is_small_or_may_move_is_copied_byte_for_byte() {
+        let dir = scratch("drop-as-is");
+        let file = dir.join("trip.md");
+        let outside = scratch("drop-as-is-outside");
+        let small = image::DynamicImage::ImageRgba8(wide(800, 60));
+        small.to_rgb8().save(outside.join("small.jpg")).unwrap();
+        let big = image::DynamicImage::ImageRgba8(wide(3000, 120));
+        big.save_with_format(outside.join("big.gif"), image::ImageFormat::Gif)
+            .unwrap();
+        big.save_with_format(outside.join("big.webp"), image::ImageFormat::WebP)
+            .unwrap();
+        std::fs::write(
+            outside.join("big.svg"),
+            b"<svg width=\"9000\" height=\"9000\"/>",
+        )
+        .unwrap();
+        std::fs::write(outside.join("broken.png"), b"not a picture at all").unwrap();
+        for name in ["small.jpg", "big.gif", "big.webp", "big.svg", "broken.png"] {
+            let saved = adopt_dropped(&file, &outside.join(name)).unwrap();
+            assert_eq!(saved.resized, None, "{name}");
+            assert_eq!(
+                std::fs::read(dir.join(&saved.relative)).unwrap(),
+                std::fs::read(outside.join(name)).unwrap(),
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_big_picture_already_under_the_folder_is_never_touched() {
+        let dir = scratch("drop-in-place-big");
+        let file = dir.join("trip.md");
+        let picture = image::DynamicImage::ImageRgba8(wide(3000, 120));
+        picture.save(dir.join("wide.png")).unwrap();
+        let before = std::fs::read(dir.join("wide.png")).unwrap();
+        let saved = adopt_dropped(&file, &dir.join("wide.png")).unwrap();
+        assert_eq!(saved.relative, PathBuf::from("wide.png"));
+        assert_eq!(saved.resized, None);
+        assert_eq!(std::fs::read(dir.join("wide.png")).unwrap(), before);
+        assert!(!dir.join(FOLDER).exists());
+    }
+
+    #[test]
+    fn a_photo_is_turned_the_way_its_camera_says_before_it_is_reduced() {
+        let dir = scratch("drop-turned");
+        let file = dir.join("trip.md");
+        let outside = scratch("drop-turned-outside");
+        let mut jpeg = Vec::new();
+        image::DynamicImage::ImageRgba8(wide(3000, 120))
+            .to_rgb8()
+            .write_to(
+                &mut std::io::Cursor::new(&mut jpeg),
+                image::ImageFormat::Jpeg,
+            )
+            .unwrap();
+        // An Exif block right after the start marker, one entry: the
+        // orientation tag (0x0112) at 6, a quarter turn clockwise.
+        let mut exif = b"Exif\0\0II*\0\x08\0\0\0\x01\0".to_vec();
+        exif.extend_from_slice(&[0x12, 0x01, 3, 0, 1, 0, 0, 0, 6, 0, 0, 0, 0, 0, 0, 0]);
+        let mut turned = jpeg[..2].to_vec();
+        turned.extend_from_slice(&[0xFF, 0xE1]);
+        turned.extend_from_slice(&((exif.len() + 2) as u16).to_be_bytes());
+        turned.extend_from_slice(&exif);
+        turned.extend_from_slice(&jpeg[2..]);
+        std::fs::write(outside.join("phone.jpg"), &turned).unwrap();
+        let saved = adopt_dropped(&file, &outside.join("phone.jpg")).unwrap();
+        assert_eq!(
+            size_of(&dir.join(&saved.relative)),
+            (102, 2560),
+            "upright, since the copy no longer says how to turn it"
+        );
+        assert_eq!(saved.resized, Some(((120, 3000), (102, 2560))));
     }
 }

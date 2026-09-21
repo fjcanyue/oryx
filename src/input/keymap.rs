@@ -44,6 +44,7 @@ pub enum Command {
     Edit,
     Cut,
     Paste,
+    PasteFull,
     Undo,
     Redo,
     Save,
@@ -73,7 +74,7 @@ pub enum Command {
 impl Command {
     /// Every variant. One test checks each entry has a row in the table,
     /// another that every command a row binds is listed here.
-    pub const ALL: [Command; 64] = [
+    pub const ALL: [Command; 65] = [
         Command::OpenFile,
         Command::Reload,
         Command::Refetch,
@@ -111,6 +112,7 @@ impl Command {
         Command::Edit,
         Command::Cut,
         Command::Paste,
+        Command::PasteFull,
         Command::Undo,
         Command::Redo,
         Command::Save,
@@ -389,6 +391,12 @@ pub const SHORTCUTS: &[Shortcut] = &[
         action: "Paste at the caret (editing)",
         section: "Edit",
         bindings: &[(Binding::Ctrl("v"), Command::Paste)],
+    },
+    Shortcut {
+        keys: "Ctrl+Shift+V",
+        action: "Paste a big picture at its full size (editing markdown)",
+        section: "Edit",
+        bindings: &[(Binding::CtrlShift("v"), Command::PasteFull)],
     },
     Shortcut {
         keys: "Ctrl+Z",
@@ -1073,6 +1081,7 @@ mod tests {
     fn cut_and_paste_resolve() {
         assert_eq!(command(&chr("x"), true, false), Some(Command::Cut));
         assert_eq!(command(&chr("v"), true, false), Some(Command::Paste));
+        assert_eq!(command(&chr("V"), true, true), Some(Command::PasteFull));
     }
 
     #[test]

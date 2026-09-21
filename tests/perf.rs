@@ -1091,3 +1091,89 @@ fn occurrences_measured() {
         );
     }
 }
+
+/// What bringing a big picture in costs on the window's thread: a
+/// 4800 by 3200 picture pasted at full size and reduced, the same
+/// picture dropped as a JPEG and as a PNG, and the resize alone under
+/// each filter, which is how the filter was chosen.
+#[test]
+#[ignore = "timing probe, release mode"]
+fn pictures_measured() {
+    use image::imageops::{resize, FilterType};
+    use oryx::edit::attach;
+    let (w, h) = (4800u32, 3200u32);
+    let mut seed = 1u32;
+    let picture = image::RgbaImage::from_fn(w, h, |x, y| {
+        seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+        let noise = (seed >> 27) as u8;
+        image::Rgba([
+            (x * 255 / w) as u8 ^ noise,
+            (y * 255 / h) as u8,
+            noise * 4,
+            255,
+        ])
+    });
+    let dir = std::env::temp_dir().join(format!("oryx-pictures-measured-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    // Beside the note's folder, not under it: a picture under it is
+    // linked where it lies and never read.
+    std::fs::create_dir_all(dir.join("outside")).unwrap();
+    std::fs::create_dir_all(dir.join("notes")).unwrap();
+    let file = dir.join("notes/note.md");
+    let ms = |started: Instant| started.elapsed().as_secs_f64() * 1000.0;
+    for (name, filter) in [
+        ("triangle", FilterType::Triangle),
+        ("catmull-rom", FilterType::CatmullRom),
+        ("lanczos3", FilterType::Lanczos3),
+    ] {
+        let started = Instant::now();
+        let small = resize(&picture, 2560, 1707, filter);
+        println!(
+            "resize 4800x3200 to 2560x1707, {name}: {:.0}ms ({} bytes)",
+            ms(started),
+            small.len()
+        );
+    }
+    let started = Instant::now();
+    let small = image::imageops::thumbnail(&picture, 2560, 1707);
+    println!(
+        "resize 4800x3200 to 2560x1707, thumbnail: {:.0}ms ({} bytes)",
+        ms(started),
+        small.len()
+    );
+    for full in [true, false] {
+        let started = Instant::now();
+        let saved = attach::save_pasted(&file, "stamp", w, h, picture.as_raw(), full).unwrap();
+        let bytes = std::fs::metadata(dir.join("notes").join(&saved.relative))
+            .unwrap()
+            .len();
+        println!(
+            "paste, full size {full}: {:.0}ms, {:.1} MB on disk",
+            ms(started),
+            bytes as f64 / 1e6
+        );
+    }
+    let dynamic = image::DynamicImage::ImageRgba8(picture);
+    dynamic
+        .to_rgb8()
+        .save(dir.join("outside/photo.jpg"))
+        .unwrap();
+    dynamic.save(dir.join("outside/photo.png")).unwrap();
+    for name in ["photo.jpg", "photo.png"] {
+        let before = std::fs::metadata(dir.join("outside").join(name))
+            .unwrap()
+            .len();
+        let started = Instant::now();
+        let saved = attach::adopt_dropped(&file, &dir.join("outside").join(name)).unwrap();
+        let bytes = std::fs::metadata(dir.join("notes").join(&saved.relative))
+            .unwrap()
+            .len();
+        println!(
+            "drop {name}: {:.0}ms, {:.1} MB to {:.1} MB",
+            ms(started),
+            before as f64 / 1e6,
+            bytes as f64 / 1e6
+        );
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}

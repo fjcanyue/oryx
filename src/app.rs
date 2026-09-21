@@ -1530,7 +1530,8 @@ impl App {
             Command::DuplicateLines => self.duplicate_lines(),
             Command::DeleteLines => self.delete_lines(),
             Command::Comment => self.comment_lines(),
-            Command::Paste => self.paste_clipboard(),
+            Command::Paste => self.paste_clipboard(false),
+            Command::PasteFull => self.paste_clipboard(true),
             Command::Undo => self.undo_edit(),
             Command::Redo => self.redo_edit(),
             Command::Save => {
@@ -3693,7 +3694,7 @@ impl App {
 
     /// Pastes the clipboard as source bytes at the caret, replacing the
     /// selection when one stands; inert outside edit mode.
-    fn paste_clipboard(&mut self) {
+    fn paste_clipboard(&mut self, full: bool) {
         if self.mode != edit::Mode::Edit {
             return;
         }
@@ -3712,7 +3713,7 @@ impl App {
             .map(|text| load::without_returns(&text))
             .filter(|text| !text.is_empty());
         let Some(text) = text else {
-            self.paste_picture();
+            self.paste_picture(full);
             return;
         };
         // A line taken whole goes back whole, above the caret's line. The
@@ -3738,8 +3739,10 @@ impl App {
 
     /// Ctrl+V with a picture and no text on the clipboard, in a markdown
     /// file: the picture is written beside the file and linked at the
-    /// caret, which lands between the brackets for the description.
-    fn paste_picture(&mut self) {
+    /// caret, which lands between the brackets for the description. A
+    /// picture above `attach::LIMIT` is reduced to it; Ctrl+Shift+V asks
+    /// for every pixel with `full`.
+    fn paste_picture(&mut self, full: bool) {
         if !self.markdown_source() {
             return;
         }
@@ -3756,10 +3759,20 @@ impl App {
             picture.width as u32,
             picture.height as u32,
             &picture.bytes,
+            full,
         );
         match saved {
-            Ok(relative) => {
-                self.link_pictures(&[relative], true);
+            Ok(saved) => {
+                self.link_picture(&saved.relative, true);
+                // A paste writes a file the reader did not name, and a
+                // reduced one has lost pixels for good: both are said.
+                self.show_notice(&match saved.resized {
+                    Some((_, to)) => format!(
+                        "Oryx made the picture smaller ({}x{}). Ctrl+Shift+V pastes it without resizing.",
+                        to.0, to.1
+                    ),
+                    None => format!("Picture saved as {}", saved.relative.display()),
+                });
             }
             Err(err) => self.show_notice(&format!("Oryx could not save the picture: {err}")),
         }
@@ -3767,14 +3780,22 @@ impl App {
 
     /// An image file dropped on a markdown file being edited: linked
     /// where it lies under the file's folder, copied beside the file
-    /// otherwise. The caret lands after the link, where the next file
-    /// of the same drop goes.
+    /// otherwise, the copy of a big JPEG or PNG reduced to
+    /// `attach::LIMIT`.
     fn drop_picture(&mut self, image: &Path) {
         let Some(file) = self.pictures_home() else {
             return;
         };
         match edit::attach::adopt_dropped(&file, image) {
-            Ok(relative) => self.link_pictures(&[relative], false),
+            Ok(saved) => {
+                self.link_picture(&saved.relative, false);
+                if let Some((_, to)) = saved.resized {
+                    self.show_notice(&format!(
+                        "Oryx saved a smaller copy ({}x{}) in images. The source file was not changed.",
+                        to.0, to.1
+                    ));
+                }
+            }
             Err(err) => self.show_notice(&format!("Oryx could not copy the picture: {err}")),
         }
     }
@@ -3792,13 +3813,12 @@ impl App {
         self.path.clone()
     }
 
-    /// Types the links of pictures already on disk, and says where a
-    /// new file went: a paste writes one the reader did not name.
-    fn link_pictures(&mut self, relatives: &[PathBuf], describe: bool) {
-        let destinations: Vec<String> = relatives
-            .iter()
-            .map(|relative| edit::attach::destination(relative))
-            .collect();
+    /// Types the link of a picture already on disk. A pasted picture
+    /// leaves the caret between the brackets, for its description; a
+    /// dropped one leaves it after the link, where the next file of the
+    /// same drop goes.
+    fn link_picture(&mut self, relative: &Path, describe: bool) {
+        let destinations = [edit::attach::destination(relative)];
         let at = self.caret.map_or(0, |c| c.offset);
         let replace = self.selection_source_range().unwrap_or(at..at);
         let insert = edit::attach::insertion(&self.document.source, replace, &destinations);
@@ -3808,9 +3828,6 @@ impl App {
             insert.after
         };
         self.type_edit_at(insert.replace, &insert.text, Kind::Structural, caret);
-        if let Some(first) = relatives.first().filter(|_| describe) {
-            self.show_notice(&format!("Picture saved as {}", first.display()));
-        }
     }
 
     /// A click while editing places the caret at the character.
