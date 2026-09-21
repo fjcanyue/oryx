@@ -12,6 +12,7 @@ use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
+use super::file_matcher::FileMatcher;
 use super::index::{ScanFailure, WorkspaceIndex};
 use super::types::{QueryGeneration, RootGeneration, SearchCommand, SearchEvent, SearchToken};
 
@@ -191,7 +192,7 @@ impl Drop for WorkspaceSearch {
 }
 
 /// What the worker thread owns: the channel, the shared queues, the
-/// index and the standing root.
+/// index, the matcher and the standing root.
 struct Worker {
     rx: Receiver<SearchCommand>,
     arrivals: Arc<Mutex<Vec<SearchEvent>>>,
@@ -199,6 +200,7 @@ struct Worker {
     waker: Waker,
     index: Option<WorkspaceIndex>,
     root: Option<PathBuf>,
+    files: FileMatcher,
 }
 
 impl Worker {
@@ -215,6 +217,7 @@ impl Worker {
             waker,
             index: None,
             root: None,
+            files: FileMatcher::new(),
         }
     }
 
@@ -345,15 +348,29 @@ impl Worker {
             });
             return;
         }
-        // Phase 2 fills in the fuzzy ranking; the shape of the answer
-        // stands already.
-        self.emit(SearchEvent::FileResults {
-            token,
-            results: Vec::new(),
-        });
+        let Some(index) = self.index.as_ref() else {
+            self.emit(SearchEvent::FileResults {
+                token,
+                results: Vec::new(),
+            });
+            self.emit(SearchEvent::Finished {
+                token,
+                truncated: false,
+                skipped: 0,
+            });
+            return;
+        };
+        let cancel = self.cancel.clone();
+        let (results, truncated) = self
+            .files
+            .rank(index, query, limit, &|| !cancel.stands_on(token));
+        if !self.cancel.stands_on(token) {
+            return;
+        }
+        self.emit(SearchEvent::FileResults { token, results });
         self.emit(SearchEvent::Finished {
             token,
-            truncated: false,
+            truncated,
             skipped: 0,
         });
     }
@@ -572,6 +589,31 @@ mod tests {
                 assert_eq!(token, probe.search.token());
                 assert!(!truncated);
                 assert_eq!(skipped, 0);
+            }
+            _ => unreachable!("the probe only returns what it accepts"),
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_file_query_answers_through_the_worker_ranked() {
+        let dir = fresh("file-query");
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        for f in ["main.rs", "src/main.rs", "notes.md"] {
+            std::fs::write(dir.join(f), "x").unwrap();
+        }
+        let mut probe = Probe::new();
+        probe.search.sync_root(&dir);
+        probe.await_event(|e| matches!(e, SearchEvent::IndexReady { .. }));
+        probe.search.search_files("main", 100);
+        match probe.await_event(|e| matches!(e, SearchEvent::FileResults { .. })) {
+            SearchEvent::FileResults { token, results } => {
+                assert_eq!(token, probe.search.token());
+                let paths: Vec<String> = results
+                    .iter()
+                    .map(|hit| hit.relative_path.to_string())
+                    .collect();
+                assert_eq!(paths, ["main.rs", "src/main.rs"]);
             }
             _ => unreachable!("the probe only returns what it accepts"),
         }

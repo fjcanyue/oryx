@@ -230,14 +230,7 @@ pub struct Sidebar {
 /// and a file does when Oryx can display it, which for an extension the
 /// table does not name means reading the first bytes.
 fn recognized(path: &Path, is_dir: bool) -> bool {
-    if is_dir {
-        return true;
-    }
-    match load::detect(path) {
-        FileKind::Unknown => load::is_text_file(path),
-        FileKind::Undisplayable => false,
-        _ => true,
-    }
+    is_dir || load::is_displayable_file(path)
 }
 
 /// The recognized entries of one directory, directories first, both

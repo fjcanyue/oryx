@@ -106,6 +106,18 @@ pub fn is_text_file(path: &Path) -> bool {
     }
 }
 
+/// Whether Oryx can open this file, by extension and name when they
+/// answer, by the first bytes otherwise. The sidebar's tree and the
+/// workspace search share this one policy, so a file the tree lists is
+/// a file a search may return.
+pub fn is_displayable_file(path: &Path) -> bool {
+    match detect(path) {
+        FileKind::Unknown => is_text_file(path),
+        FileKind::Undisplayable => false,
+        _ => true,
+    }
+}
+
 /// A book's continuation past the open prefix, whichever format built
 /// it. The app drives it through one surface; each variant walks its
 /// own container.
