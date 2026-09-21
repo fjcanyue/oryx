@@ -32,6 +32,9 @@ pub struct SearchToken {
 pub struct FileHit {
     /// The file's path below the workspace root, `/`-separated.
     pub relative_path: Arc<str>,
+    /// Where in `relative_path` the file's own name starts, so the
+    /// directory above it can be drawn apart from it.
+    pub basename_start: u32,
     /// The matcher's score; higher ranks first.
     pub score: u32,
     /// Byte offsets into `relative_path` of the characters the query

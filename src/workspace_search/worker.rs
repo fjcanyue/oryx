@@ -313,7 +313,10 @@ impl Worker {
         let cancel = self.cancel.clone();
         match WorkspaceIndex::scan(&root, generation, &|| !cancel.root_stands(generation)) {
             Ok(index) => {
-                if !self.cancel.root_stands(generation) {
+                // The generation on the built index and the standing
+                // one must agree: either disagreeing means a newer
+                // root took over while the walk ran.
+                if index.generation() != generation || !self.cancel.root_stands(generation) {
                     return;
                 }
                 let files = index.len();
@@ -360,6 +363,18 @@ impl Worker {
             });
             return;
         };
+        if index.is_empty() {
+            self.emit(SearchEvent::FileResults {
+                token,
+                results: Vec::new(),
+            });
+            self.emit(SearchEvent::Finished {
+                token,
+                truncated: false,
+                skipped: 0,
+            });
+            return;
+        }
         let cancel = self.cancel.clone();
         let (results, truncated) = self
             .files

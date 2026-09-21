@@ -286,7 +286,7 @@ pub fn bar_hit(width: f32, replace_row: bool, px: f32, py: f32) -> Option<BarHit
 /// placeholder when empty, selection and caret drawn only on the field
 /// the keyboard feeds. Answers where the text stands, for the mouse.
 #[allow(clippy::too_many_arguments)]
-fn draw_field(
+pub(crate) fn draw_field(
     painter: &mut Painter,
     theme: &Theme,
     field: &TextField,

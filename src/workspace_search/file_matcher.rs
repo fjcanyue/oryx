@@ -129,6 +129,7 @@ impl FileMatcher {
         }
         FileHit {
             relative_path: Arc::from(&*file.relative_path),
+            basename_start: file.basename_start as u32,
             score,
             matched,
         }

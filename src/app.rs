@@ -46,10 +46,12 @@ use oryx::ui::search::{self, BarHit, ReplaceRow, SearchState};
 use oryx::ui::selection::{self, ModelPos, Selection};
 use oryx::ui::settings::{self, Settings};
 use oryx::ui::sidebar::{self, Sidebar};
+use oryx::ui::sidebar_search::{self, FilesView, SearchStatus};
 use oryx::ui::textfield::{Edit, TextField};
 use oryx::ui::theme_browser::ThemeBrowser;
 use oryx::ui::theme_editor::ThemeEditor;
 use oryx::ui::tooltip;
+use oryx::workspace_search::{self, SearchEvent};
 use winit::application::ApplicationHandler;
 use winit::dpi::{PhysicalPosition, PhysicalSize};
 use winit::event::{
@@ -180,6 +182,7 @@ pub fn run(launch: Launch, theme_name: Option<String>) -> anyhow::Result<()> {
         highlighter.start(pending, move || waker());
     }
     let mut parser = ParseWorker::new();
+    let workspace = workspace_search::WorkspaceSearch::new(waker.clone());
     // A book starts its worker through `start_book` once the app owns
     // the media cache; only the markdown prefix starts here.
     if streamed && book.is_none() {
@@ -246,6 +249,7 @@ pub fn run(launch: Launch, theme_name: Option<String>) -> anyhow::Result<()> {
         waker,
         highlighter,
         parser,
+        workspace,
         pending_recolor: Vec::new(),
         last_recolor: Instant::now(),
         parse_pending: streamed,
@@ -666,6 +670,9 @@ struct App {
     highlighter: Highlighter,
     /// Background full-parse worker behind a streamed open.
     parser: ParseWorker,
+    /// Background workspace search worker: the Files tab's index,
+    /// fuzzy ranking and grep, woken through the shared waker.
+    workspace: workspace_search::WorkspaceSearch,
     /// Recolors owed to arrived highlights, applied in throttled waves.
     pending_recolor: Vec<(usize, std::ops::Range<usize>)>,
     /// When the last wave ran, pacing the next.
@@ -940,6 +947,8 @@ enum Drag {
     SidebarEdge(f32),
     /// The sidebar's scrollbar thumb; the panel holds the grab.
     SidebarThumb,
+    /// The sidebar search's query field, selecting while dragged.
+    SidebarSearchField,
 }
 
 fn drag_is_edge(drag: Drag) -> bool {
@@ -3461,6 +3470,7 @@ impl App {
             // and the document owns every key again.
             self.close_search();
             if self.sidebar_edge_press() {
+            } else if self.sidebar_search_field_press() {
             } else if (self.cursor.x as f32) < self.inset() && self.sidebar.is_some() {
                 let (x, y) = self.ui_cursor();
                 self.sidebar_click(x, y);
@@ -4045,6 +4055,9 @@ impl App {
         }
         self.config.last_dir = text;
         config::save(&self.config);
+        // Every root move lands here; the search worker follows the
+        // panel wherever it goes.
+        self.sync_search_root();
     }
 
     /// Routes a click inside the panel: a tab switch persists, a file
@@ -4066,6 +4079,9 @@ impl App {
                 if self.guard_unsaved(confirm::Pending::Open(path.clone(), false)) {
                     self.open_file(&path, false);
                 }
+            }
+            sidebar::SideClick::OpenSearch => {
+                self.open_sidebar_search(FilesView::FileSearch);
             }
             sidebar::SideClick::Jump(block) => self.jump_to_heading(block),
             sidebar::SideClick::Tab => {
@@ -4233,6 +4249,301 @@ impl App {
         self.request_redraw();
     }
 
+    /// Folds the search worker's arrived events into the Files tab's
+    /// search state. An answer carries the token it was asked under;
+    /// one that no longer stands is dropped here, the second wall
+    /// after the worker's own cancellation.
+    fn fold_workspace_search(&mut self) {
+        let token = self.workspace.token();
+        let mut touched = false;
+        for event in self.workspace.drain() {
+            match event {
+                SearchEvent::IndexStarted { .. } => {
+                    if let Some(side) = self.sidebar.as_mut() {
+                        if side.search.active() {
+                            side.search.status = SearchStatus::Indexing;
+                            touched = true;
+                        }
+                    }
+                }
+                SearchEvent::IndexReady { files, .. } => {
+                    if let Some(side) = self.sidebar.as_mut() {
+                        side.search.status = SearchStatus::Idle { files };
+                        touched = true;
+                    }
+                    // A query typed while the walk ran never met an
+                    // index; it runs again now that one stands.
+                    self.run_current_search();
+                }
+                SearchEvent::FileResults {
+                    token: asked,
+                    results,
+                } if asked == token => {
+                    if let Some(side) = self.sidebar.as_mut() {
+                        side.search.files = results;
+                        side.search.selected = 0;
+                        side.search.scroll = 0.0;
+                        touched = true;
+                    }
+                }
+                SearchEvent::ContentBatch {
+                    token: asked,
+                    results,
+                } if asked == token => {
+                    if let Some(side) = self.sidebar.as_mut() {
+                        side.search.content.extend(results);
+                        side.search.refresh_rows();
+                        touched = true;
+                    }
+                }
+                SearchEvent::Finished {
+                    token: asked,
+                    truncated,
+                    skipped,
+                } if asked == token => {
+                    if let Some(side) = self.sidebar.as_mut() {
+                        side.search.status = SearchStatus::Done { truncated, skipped };
+                        touched = true;
+                    }
+                }
+                SearchEvent::Error {
+                    token: asked,
+                    message,
+                } if asked.map_or(true, |asked| asked == token) => {
+                    if let Some(side) = self.sidebar.as_mut() {
+                        side.search.status = match asked {
+                            Some(_) => SearchStatus::InvalidPattern,
+                            None => SearchStatus::Error(message),
+                        };
+                        touched = true;
+                    }
+                }
+                _ => {}
+            }
+        }
+        if touched {
+            self.request_redraw();
+        }
+    }
+
+    /// Hands the search worker the sidebar's root. The worker's own
+    /// repeat check makes this cheap to call on every root move.
+    fn sync_search_root(&mut self) {
+        if let Some(side) = self.sidebar.as_ref() {
+            self.workspace.sync_root(side.root());
+        }
+    }
+
+    /// Re-issues the active search view's standing query.
+    fn run_current_search(&mut self) {
+        let Some(side) = self.sidebar.as_mut() else {
+            return;
+        };
+        if !side.search.active() {
+            return;
+        }
+        let view = side.search.view;
+        match view {
+            FilesView::FileSearch => {
+                let query = side.search.file_query.text().to_string();
+                side.search.status = SearchStatus::Searching;
+                self.workspace
+                    .search_files(&query, workspace_search::MAX_FILE_RESULTS);
+            }
+            FilesView::ContentSearch => {
+                // The content view's grep arrives with its own phase;
+                // until then its field only holds text.
+            }
+            FilesView::Tree => {}
+        }
+        self.request_redraw();
+    }
+
+    /// Enters one of the Files tab's search views, opening the panel
+    /// when it is closed and the keys moving to it.
+    fn open_sidebar_search(&mut self, view: FilesView) {
+        if self.sidebar.is_none() {
+            self.open_sidebar(true);
+        }
+        if let Some(side) = self.sidebar.as_mut() {
+            side.set_tab(sidebar::Tab::Files);
+            self.config.sidebar_tab = sidebar::Tab::Files;
+            config::save(&self.config);
+            side.search.open(view);
+        }
+        self.sync_search_root();
+        self.move_ownership(PaneAct::ClickSidebar);
+        self.run_current_search();
+    }
+
+    /// Moves the search results' selection.
+    fn search_move(&mut self, delta: i32) {
+        if let Some(side) = self.sidebar.as_mut() {
+            let list_h = side.list_h();
+            side.search.move_selection(delta, list_h);
+        }
+        self.request_redraw();
+    }
+
+    /// Pages the search results' selection.
+    fn search_page(&mut self, down: bool) {
+        if let Some(side) = self.sidebar.as_mut() {
+            let list_h = side.list_h();
+            side.search.page(down, list_h);
+        }
+        self.request_redraw();
+    }
+
+    /// Opens the selected search result through the same guarded path
+    /// the tree's rows take. The search stays open for the next result.
+    fn open_search_result(&mut self, path: PathBuf) {
+        if self.guard_unsaved(confirm::Pending::Open(path.clone(), false)) {
+            self.open_file(&path, false);
+        }
+    }
+
+    /// The Files tab's search views' keys: the field takes the typing,
+    /// the arrows and Enter drive the results, Esc returns to the
+    /// tree. Reports whether the key was claimed so the ladder stops.
+    fn sidebar_search_key(&mut self, key: &Key, ctrl: bool, shift: bool, alt: bool) -> bool {
+        /// What a press asked for, computed under the panel's borrow.
+        enum Ask {
+            Pass,
+            Claimed,
+            Close,
+            Open(PathBuf),
+            Move(i32),
+            Page(bool),
+            Regex,
+            Rerun,
+        }
+        let ask = {
+            let Some(side) = self.sidebar.as_mut() else {
+                return false;
+            };
+            if !side.search.active() {
+                return false;
+            }
+            match key {
+                Key::Named(NamedKey::Escape) => Ask::Close,
+                Key::Named(NamedKey::Enter) => match side.search.selected_file() {
+                    Some(hit) => {
+                        Ask::Open(sidebar_search::absolute(side.root(), &hit.relative_path))
+                    }
+                    None => Ask::Claimed,
+                },
+                Key::Named(NamedKey::ArrowUp) => Ask::Move(-1),
+                Key::Named(NamedKey::ArrowDown) => Ask::Move(1),
+                Key::Named(NamedKey::PageUp) => Ask::Page(false),
+                Key::Named(NamedKey::PageDown) => Ask::Page(true),
+                // Alt with a character is the panel's own chord family,
+                // the find bar's Alt+R among them; anything else passes.
+                Key::Character(c) if alt => {
+                    let content = side.search.view == FilesView::ContentSearch;
+                    if content && c.eq_ignore_ascii_case("r") {
+                        Ask::Regex
+                    } else {
+                        Ask::Pass
+                    }
+                }
+                _ => match side.search.query_field_mut().key(key, ctrl, shift) {
+                    Edit::Changed => Ask::Rerun,
+                    Edit::Handled => Ask::Claimed,
+                    Edit::Ignored => Ask::Pass,
+                },
+            }
+        };
+        match ask {
+            Ask::Pass => false,
+            Ask::Claimed => true,
+            Ask::Close => {
+                if let Some(side) = self.sidebar.as_mut() {
+                    side.search.close();
+                }
+                self.request_redraw();
+                true
+            }
+            Ask::Open(path) => {
+                self.open_search_result(path);
+                true
+            }
+            Ask::Move(delta) => {
+                self.search_move(delta);
+                true
+            }
+            Ask::Page(down) => {
+                self.search_page(down);
+                true
+            }
+            Ask::Regex => {
+                if let Some(side) = self.sidebar.as_mut() {
+                    side.search.regex = !side.search.regex;
+                }
+                self.run_current_search();
+                true
+            }
+            Ask::Rerun => {
+                self.run_current_search();
+                true
+            }
+        }
+    }
+
+    /// A press on the search row: the regex toggle flips, the query
+    /// field takes the caret (a word on the second click, everything
+    /// on the third) and a drag selects. Reports whether the press
+    /// belonged to the row.
+    fn sidebar_search_field_press(&mut self) -> bool {
+        let (ux, uy) = self.ui_cursor();
+        let pressed = {
+            let Some(side) = self.sidebar.as_mut() else {
+                return false;
+            };
+            if !side.search_active() {
+                return false;
+            }
+            let content = side.search.view == FilesView::ContentSearch;
+            if content {
+                let (tx, ty, tw, th) = sidebar_search::toggle_rect(side.width());
+                if ux >= tx && ux < tx + tw && uy >= ty && uy < ty + th {
+                    side.search.regex = !side.search.regex;
+                    true
+                } else {
+                    false
+                }
+            } else {
+                false
+            }
+        };
+        if pressed {
+            self.run_current_search();
+            return true;
+        }
+        let field = {
+            let Some(side) = self.sidebar.as_mut() else {
+                return false;
+            };
+            if !side.search_active() {
+                return false;
+            }
+            let content = side.search.view == FilesView::ContentSearch;
+            let (fx, fy, fw, fh) = sidebar_search::field_rect(side.width(), content);
+            if !(ux >= fx && ux < fx + fw && uy >= fy - 4.0 && uy < fy + fh + 4.0) {
+                return false;
+            }
+            let view = side.search.query_view().clone();
+            side.search
+                .query_field_mut()
+                .click(ux - view.left, &view.offsets, Instant::now());
+            true
+        };
+        if field {
+            self.drag = Some(Drag::SidebarSearchField);
+            self.request_redraw();
+        }
+        field
+    }
+
     /// Persists whether the panel is open and how wide, after a gesture
     /// ends or the panel is toggled, never per frame.
     fn save_sidebar_state(&mut self) {
@@ -4316,6 +4627,7 @@ impl App {
             .unwrap_or(f32::MAX);
         side.set_width(self.config.sidebar_width, window_w);
         self.sidebar = Some(side);
+        self.sync_search_root();
     }
 
     /// A file or folder dropped on the window: the folder roots the
@@ -6051,6 +6363,7 @@ impl ApplicationHandler for App {
         }
         self.fold_parse();
         self.fold_highlights();
+        self.fold_workspace_search();
     }
 
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
@@ -6194,6 +6507,9 @@ impl ApplicationHandler for App {
                         self.overlay_result(result);
                     }
                     _ if self.search_key(&logical_key, ctrl, shift) => {}
+                    // The Files tab's search views take the whole
+                    // keyboard next, the way the find bar does.
+                    _ if self.sidebar_search_key(&logical_key, ctrl, shift, alt) => {}
                     // A search field has the keyboard: what the bar did
                     // not claim acts only when it is app-wide. Nothing
                     // reaches the editor's own keys or the document's
@@ -6205,6 +6521,18 @@ impl ApplicationHandler for App {
                     }
                     _ if self.mode == edit::Mode::Edit
                         && self.edit_key(&logical_key, ctrl, shift) => {}
+                    // A plain slash over the Files tree, the panel
+                    // owning the keys, opens the file search.
+                    None if self.sidebar_owns_keys()
+                        && self.mode == edit::Mode::Read
+                        && self.sidebar.as_ref().is_some_and(|s| {
+                            s.tab() == sidebar::Tab::Files && !s.search.active()
+                        })
+                        && matches!(&logical_key, Key::Character(c)
+                            if c.as_str() == "/" && !ctrl && !alt) =>
+                    {
+                        self.open_sidebar_search(FilesView::FileSearch);
+                    }
                     Some(Command::LineUp) if self.sidebar_owns_keys() => {
                         self.sidebar_move(-1);
                     }
@@ -6324,6 +6652,20 @@ impl ApplicationHandler for App {
                     let y = position.y as f32 / self.scale;
                     if let Some(side) = self.sidebar.as_mut() {
                         side.drag_thumb(y, &mut self.outline);
+                    }
+                    self.request_redraw();
+                } else if matches!(self.drag, Some(Drag::SidebarSearchField)) {
+                    let (ux, uy) = (
+                        position.x as f32 / self.scale,
+                        position.y as f32 / self.scale,
+                    );
+                    if let Some(side) = self.sidebar.as_mut() {
+                        if side.search_active() {
+                            let view = side.search.query_view().clone();
+                            side.search
+                                .query_field_mut()
+                                .drag_to(ux - view.left, &view.offsets);
+                        }
                     }
                     self.request_redraw();
                 } else if self.drag.is_some() {

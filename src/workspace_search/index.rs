@@ -19,13 +19,6 @@ pub struct IndexedFile {
     pub basename_start: usize,
 }
 
-impl IndexedFile {
-    /// The file's name, the part of the path after the last separator.
-    pub fn basename(&self) -> &str {
-        &self.relative_path[self.basename_start..]
-    }
-}
-
 /// The files under one root, as of one walk.
 #[derive(Debug)]
 pub struct WorkspaceIndex {
@@ -207,7 +200,7 @@ mod tests {
             .iter()
             .find(|f| &*f.relative_path == "src/ui/sidebar.rs")
             .unwrap();
-        assert_eq!(deep.basename(), "sidebar.rs");
+        assert_eq!(&deep.relative_path[deep.basename_start..], "sidebar.rs");
         let top = index
             .files()
             .iter()
@@ -217,7 +210,6 @@ mod tests {
             top.basename_start, 0,
             "no separator before a top-level name"
         );
-        assert_eq!(top.basename(), "top.md");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
