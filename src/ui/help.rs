@@ -144,6 +144,16 @@ pub const TIPS: &[Tip] = &[
     Tip {
         kind: TipKind::Tip,
         area: Area::Files,
+        text: r#"You can pipe text into Oryx from a terminal, as in `git diff | oryx`. `Ctrl+S` asks where to save it."#,
+    },
+    Tip {
+        kind: TipKind::Tip,
+        area: Area::Files,
+        text: r#"Oryx guesses what piped text is, a script or JSON for example. Add `--as md` to read it as markdown: `cat notes | oryx --as md`."#,
+    },
+    Tip {
+        kind: TipKind::Tip,
+        area: Area::Files,
         text: r#"Press `Ctrl+O` to open a file. The dialog opens in the folder of the file you are reading, or in the folder the sidebar shows."#,
     },
     Tip {

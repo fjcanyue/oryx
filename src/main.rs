@@ -46,7 +46,7 @@ fn recover_refusal(folder: &std::path::Path) -> Option<String> {
 }
 
 /// The first line of the usage, which a refused command line repeats.
-const USAGE_LINE: &str = "Usage: oryx [OPTIONS] [FILE | FOLDER]";
+const USAGE_LINE: &str = "Usage: oryx [OPTIONS] [FILE | FOLDER | -]";
 
 /// The text `--help` prints.
 fn usage() -> String {
@@ -55,8 +55,11 @@ fn usage() -> String {
          Opens a markdown, code or text file, or a book (EPUB, FB2, MOBI,\n\
          AZW3, CBZ, CBR). A folder opens the sidebar on it. Without an\n\
          argument the window explains how to open a file. FILE:412 opens\n\
-         the file at line 412, and FILE:412:10 at column 10 of that line.\n\n\
+         the file at line 412, and FILE:412:10 at column 10 of that line.\n\
+         Text piped in is shown too, as in `git diff | oryx`; a lone - asks\n\
+         for standard input outright. Save it under a name to keep it.\n\n\
          Options:\n\
+         \x20 --as KIND      show piped text as this kind: md, diff, json, rs\n\
          \x20 --theme NAME   start with the named theme\n\
          \x20 --register     install the file association and icons\n\
          \x20 --clear-cache  remove the downloaded remote images\n\
@@ -110,6 +113,7 @@ enum Cli {
         /// The folder of a leftover note to take over, from a running
         /// copy that recovers it in a second window; private too.
         recover: Option<PathBuf>,
+        piped: Piped,
     },
     Version,
     Register,
@@ -119,11 +123,44 @@ enum Cli {
     Refused(String),
 }
 
+/// What the command line says about text piped in.
+#[derive(Debug, Default, PartialEq)]
+struct Piped {
+    /// A lone `-`: standard input is asked for outright.
+    explicit: bool,
+    /// `--as KIND`: the kind the text is shown as, `md` or `diff`.
+    kind: Option<String>,
+}
+
+/// The message for a refused `--as`.
+const AS_REFUSAL: &str = "--as takes a kind, such as md, diff or json";
+
+/// Whether standard input is read before the window opens. A lone `-`
+/// asks for it. Without one it is read when no file is named and the
+/// input is not a terminal: `git diff | oryx`. A second window of a
+/// running Oryx never reads it, since it inherits the first one's
+/// input. An empty input, a desktop launcher's, reads as no text.
+fn reads_stdin(piped: &Piped, named: bool, terminal: bool, second_window: bool) -> bool {
+    !second_window && (piped.explicit || (!named && !terminal))
+}
+
+/// Standard input read to its end, before the window opens: a slow
+/// producer delays the window by as long as it runs. None for an empty
+/// input and for one that cannot be read, which open the welcome page
+/// as a launch with no file does.
+fn piped_bytes() -> Option<Vec<u8>> {
+    use std::io::Read;
+    let mut bytes = Vec::new();
+    std::io::stdin().lock().read_to_end(&mut bytes).ok()?;
+    (!bytes.is_empty()).then_some(bytes)
+}
+
 fn parse_args(args: impl Iterator<Item = OsString>) -> Cli {
     let mut path: Option<PathBuf> = None;
     let mut theme: Option<String> = None;
     let mut beside: Option<(i32, i32)> = None;
     let mut recover: Option<PathBuf> = None;
+    let mut piped = Piped::default();
     let mut args = args;
     while let Some(arg) = args.next() {
         match arg.to_str() {
@@ -148,6 +185,11 @@ fn parse_args(args: impl Iterator<Item = OsString>) -> Cli {
                     None => return Cli::Refused("--beside takes a position as X,Y".to_string()),
                 }
             }
+            Some("--as") => match args.next().and_then(|kind| kind.into_string().ok()) {
+                Some(kind) if oryx::doc::load::kind_is_plain(&kind) => piped.kind = Some(kind),
+                _ => return Cli::Refused(AS_REFUSAL.to_string()),
+            },
+            Some("-") => piped.explicit = true,
             Some("--recover") => match args.next() {
                 Some(folder) => recover = Some(PathBuf::from(folder)),
                 None => return Cli::Refused("--recover takes a folder".to_string()),
@@ -163,6 +205,7 @@ fn parse_args(args: impl Iterator<Item = OsString>) -> Cli {
         theme,
         beside,
         recover,
+        piped,
     }
 }
 
@@ -195,16 +238,24 @@ fn main() -> ExitCode {
             theme,
             beside,
             recover,
+            piped,
         } => {
             if let Some(message) = recover.as_deref().and_then(recover_refusal) {
                 eprintln!("oryx: {message}");
                 return ExitCode::FAILURE;
             }
-            run(
-                recover.map_or_else(|| launch(path), app::Launch::Recover),
-                theme,
-                beside,
-            )
+            use std::io::IsTerminal;
+            let second_window = beside.is_some() || recover.is_some();
+            let terminal = std::io::stdin().is_terminal();
+            let text = reads_stdin(&piped, path.is_some(), terminal, second_window)
+                .then(piped_bytes)
+                .flatten();
+            let launch = match (recover, text) {
+                (Some(folder), _) => app::Launch::Recover(folder),
+                (None, Some(bytes)) => app::Launch::Piped(bytes, piped.kind),
+                (None, None) => launch(path),
+            };
+            run(launch, theme, beside)
         }
     }
 }
@@ -321,6 +372,7 @@ mod tests {
                 theme: Some("dracula".to_string()),
                 beside: None,
                 recover: None,
+                piped: Piped::default(),
             }
         );
         assert_eq!(
@@ -330,6 +382,7 @@ mod tests {
                 theme: None,
                 beside: None,
                 recover: None,
+                piped: Piped::default(),
             }
         );
         assert_eq!(
@@ -339,6 +392,7 @@ mod tests {
                 theme: None,
                 beside: None,
                 recover: None,
+                piped: Piped::default(),
             },
             "a path form opens a file whose name starts with dashes"
         );
@@ -377,6 +431,7 @@ mod tests {
                 theme: None,
                 beside: Some((40, 60)),
                 recover: Some(PathBuf::from("/state/notes/7-1")),
+                piped: Piped::default(),
             }
         );
         assert_eq!(
@@ -394,6 +449,7 @@ mod tests {
                 theme: None,
                 beside: Some((40, 60)),
                 recover: None,
+                piped: Piped::default(),
             }
         );
         assert_eq!(
@@ -403,6 +459,7 @@ mod tests {
                 theme: None,
                 beside: Some((-10, 7)),
                 recover: None,
+                piped: Piped::default(),
             },
             "a monitor left of the main one has negative x"
         );
@@ -426,5 +483,69 @@ mod tests {
             parse_args(args(&["--theme"])),
             Cli::Refused("--theme takes a theme name".to_string())
         );
+    }
+
+    #[test]
+    fn a_dash_asks_for_standard_input_and_as_names_the_kind() {
+        let run = |piped: Piped| Cli::Run {
+            path: None,
+            theme: None,
+            beside: None,
+            recover: None,
+            piped,
+        };
+        assert_eq!(
+            parse_args(args(&["-"])),
+            run(Piped {
+                explicit: true,
+                kind: None
+            })
+        );
+        assert_eq!(
+            parse_args(args(&["--as", "md"])),
+            run(Piped {
+                explicit: false,
+                kind: Some("md".to_string())
+            })
+        );
+        assert_eq!(
+            parse_args(args(&["-", "--as", "diff"])),
+            run(Piped {
+                explicit: true,
+                kind: Some("diff".to_string())
+            })
+        );
+        assert_eq!(
+            parse_args(args(&["--as"])),
+            Cli::Refused(AS_REFUSAL.to_string())
+        );
+        assert_eq!(
+            parse_args(args(&["--as", "../notes"])),
+            Cli::Refused(AS_REFUSAL.to_string())
+        );
+    }
+
+    #[test]
+    fn standard_input_is_read_only_when_text_can_come_from_it() {
+        let plain = Piped::default();
+        let dash = Piped {
+            explicit: true,
+            kind: None,
+        };
+        assert!(reads_stdin(&plain, false, false, false), "git diff | oryx");
+        assert!(
+            !reads_stdin(&plain, false, true, false),
+            "oryx, typed in a terminal"
+        );
+        assert!(
+            !reads_stdin(&plain, true, false, false),
+            "git diff | oryx notes.md"
+        );
+        assert!(!reads_stdin(&plain, false, false, true), "a second window");
+        assert!(
+            reads_stdin(&dash, false, true, false),
+            "oryx -, then typed text"
+        );
+        assert!(!reads_stdin(&dash, false, false, true));
     }
 }

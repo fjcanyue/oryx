@@ -126,6 +126,9 @@ pub enum Launch {
     /// No file: the leftover note in this folder is taken over, the
     /// second window a recovery starts.
     Recover(PathBuf),
+    /// No file: text piped in on standard input, and the kind asked
+    /// for with `--as`, if any.
+    Piped(Vec<u8>, Option<String>),
 }
 
 pub fn run(
@@ -137,12 +140,17 @@ pub fn run(
         Launch::Recover(folder) => Some(folder.clone()),
         _ => None,
     };
+    let mut piped_at_start = None;
     let (path, folder, launch_target) = match launch {
         Launch::Empty => (None, None, None),
         Launch::File(path) => (Some(path), None, None),
         Launch::FileAt(path, target) => (Some(path), None, Some(target)),
         Launch::Folder(dir) => (None, Some(dir.canonicalize().unwrap_or(dir)), None),
         Launch::Recover(_) => (None, None, None),
+        Launch::Piped(bytes, kind) => {
+            piped_at_start = Some((bytes, kind));
+            (None, None, None)
+        }
     };
     // One form of the path for the whole session. Everything keyed on
     // it, the edit marks, the resume note, the disk identity, has to
@@ -213,7 +221,7 @@ pub fn run(
         parser.start(document.source.clone(), move || waker());
     }
     let mut changed = false;
-    if path.is_none() {
+    if path.is_none() && piped_at_start.is_none() {
         // The welcome page showed its tip; the next launch gets the next.
         config.tip = config.tip.wrapping_add(1);
         changed = true;
@@ -380,6 +388,8 @@ pub fn run(
         note_copy_failed: false,
         leftovers: Vec::new(),
         recover_at_start,
+        piped_at_start,
+        piped_file: None,
         count_line: None,
         count_key: None,
         count_at: None,
@@ -1252,6 +1262,12 @@ struct App {
     leftovers: Vec<notes::Leftover>,
     /// The leftover folder a recovery's second window was started on.
     recover_at_start: Option<PathBuf>,
+    /// Text piped in at the launch and the kind asked for, opened once
+    /// the window exists.
+    piped_at_start: Option<(Vec<u8>, Option<String>)>,
+    /// The temporary file piped text lives in, in the note's folder,
+    /// gone with it at quit. Saving it asks for a name, as a note does.
+    piped_file: Option<PathBuf>,
     /// The transient corner notice, while one holds or fades.
     notice: Option<Notice>,
     /// Reused notice canvas, mirroring the overlay canvas mechanics.
@@ -2451,8 +2467,9 @@ impl App {
     /// receipt shown with its lines-changed figure. True when nothing
     /// was left unsaved.
     fn save(&mut self) -> bool {
-        // The note has no place of its own: the save names it.
-        if self.on_note() {
+        // The note and piped text have no place of their own: the save
+        // names them.
+        if self.unnamed() {
             return self.save_as();
         }
         let Some(path) = self.path.clone() else {
@@ -2541,7 +2558,7 @@ impl App {
         };
         let facts = autosave::Facts {
             unsaved: self.edits_unsaved(),
-            note: self.on_note(),
+            note: self.unnamed(),
             deleted: self.file_deleted,
             conflict: self.disk_conflict,
             seen: self.disk_seen,
@@ -2598,7 +2615,7 @@ impl App {
         let mut dialog = rfd::FileDialog::new();
         let home = config::home_dir();
         if let Some(dir) = save_dialog_dir(
-            self.on_note(),
+            self.unnamed(),
             self.note_from.as_deref(),
             self.path.as_deref(),
             home.as_deref(),
@@ -2685,6 +2702,55 @@ impl App {
     /// True while the open file is the untitled note.
     fn on_note(&self) -> bool {
         self.note_file.is_some() && self.note_file == self.path
+    }
+
+    /// True while the open file is the text piped in at the launch.
+    fn on_piped(&self) -> bool {
+        self.piped_file.is_some() && self.piped_file == self.path
+    }
+
+    /// True while the open file has no place of its own, the note or
+    /// piped text: a save names it, and no automatic save writes it,
+    /// which would clear the unsaved dot over a file that goes at quit.
+    fn unnamed(&self) -> bool {
+        self.on_note() || self.on_piped()
+    }
+
+    /// Text piped in (`git diff | oryx`) becomes a real file in this
+    /// Oryx's own folder, named by what the text is, so every rule that
+    /// hangs off the open file holds and the ordinary open path colors
+    /// it. The file stays until quit, so a reload, another file opened
+    /// and Alt+Left all find it again; it is a note in one way only, a
+    /// save asks for a name. The save dialog opens where the command
+    /// was typed.
+    fn open_piped(&mut self, bytes: &[u8], kind: Option<&str>) {
+        let Some(root) = notes_root() else {
+            self.show_notice("No folder for the piped text");
+            return;
+        };
+        let seat = match self.note_seat.take() {
+            Some(seat) => Ok(seat),
+            None => notes::Seat::claim(&root),
+        };
+        let seat = match seat {
+            Ok(seat) => seat,
+            Err(err) => {
+                self.show_notice(&format!("Could not keep the piped text: {err}"));
+                return;
+            }
+        };
+        // The head is enough to tell what the text is, and a lossy
+        // reading of it is enough for the telling.
+        let head = String::from_utf8_lossy(&bytes[..bytes.len().min(64 * 1024)]);
+        let path = seat.file(&load::piped_name(kind, &head));
+        self.note_seat = Some(seat);
+        if let Err(err) = save::write_atomic(&path, bytes) {
+            self.show_notice(&format!("Could not keep the piped text: {err}"));
+            return;
+        }
+        self.note_from = std::env::current_dir().ok();
+        self.piped_file = Some(path.clone());
+        self.open_file(&path, false);
     }
 
     /// Ctrl+M: an empty markdown page in the editor at once, named at
@@ -3800,13 +3866,13 @@ impl App {
         }
     }
 
-    /// The file pictures are kept beside. An untitled note lives in a
-    /// folder of Oryx's own until its first save, no place for pictures,
-    /// so it answers None and says what to do.
+    /// The file pictures are kept beside. An untitled note and piped
+    /// text live in a folder of Oryx's own until their first save, no
+    /// place for pictures, so they answer None and say what to do.
     fn pictures_home(&mut self) -> Option<PathBuf> {
-        if self.on_note() {
+        if self.unnamed() {
             self.show_notice(
-                "Save this note first with Ctrl+S, so Oryx knows where to keep its pictures.",
+                "Save this file first with Ctrl+S, so Oryx knows where to keep its pictures.",
             );
             return None;
         }
@@ -5387,6 +5453,12 @@ impl App {
 
     /// Folder of the open document, if it has one.
     fn document_dir(&self) -> Option<PathBuf> {
+        // The note and piped text lie in a folder of Oryx's own, nothing
+        // to browse: their folder is the one they came from, the file
+        // open before the note, or where the pipe's command was typed.
+        if self.unnamed() {
+            return self.note_from.clone();
+        }
         self.path
             .as_ref()
             .and_then(|p| p.parent().map(Path::to_path_buf))
@@ -5912,7 +5984,7 @@ impl App {
             .map(Path::to_path_buf)
             .filter(|d| !d.as_os_str().is_empty())
             .unwrap_or_else(|| PathBuf::from("."));
-        if opened && !self.on_note() {
+        if opened && !self.unnamed() {
             self.remember_dir(&dir);
         }
         self.media = MediaCache::new(dir.clone());
@@ -7865,6 +7937,9 @@ impl ApplicationHandler for App {
             }
         } else if self.beside.is_none() {
             self.offer_leftovers();
+        }
+        if let Some((bytes, kind)) = self.piped_at_start.take() {
+            self.open_piped(&bytes, kind.as_deref());
         }
     }
 

@@ -800,8 +800,82 @@ static CODE_EXTENSIONS: &[(&str, &str)] = &[
     ("zsh", "bash"),
 ];
 
+/// The name of the temporary file a text piped into Oryx is written
+/// to: `piped` with the extension the asked kind names (`--as md`), or
+/// the one the text names by itself, or `txt`. The ordinary open path
+/// takes it from there.
+pub fn piped_name(kind: Option<&str>, text: &str) -> String {
+    let extension = match kind {
+        Some(kind) => kind.to_ascii_lowercase(),
+        None => crate::style::highlight::sniff_extension(text)
+            .unwrap_or("txt")
+            .to_string(),
+    };
+    format!("piped.{extension}")
+}
+
+/// Whether a kind asked for on the command line can stand as a file
+/// extension: letters, digits, and the few marks grammars use (`c++`,
+/// `objective-c`, `c#`).
+pub fn kind_is_plain(kind: &str) -> bool {
+    (1..=32).contains(&kind.len())
+        && kind
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || "+-#_".contains(c))
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_piped_text_is_named_by_what_it_is() {
+        use super::{detect, piped_name, FileKind};
+        use std::path::Path;
+        let diff = "diff --git a/src/app.rs b/src/app.rs\nindex 1d7918d..2323a24 100644\n--- a/src/app.rs\n+++ b/src/app.rs\n@@ -1,3 +1,4 @@\n fn main() {\n+    run();\n }\n";
+        assert_eq!(piped_name(None, diff), "piped.diff");
+        assert_eq!(
+            piped_name(None, "{\n  \"name\": \"oryx\",\n  \"fast\": true\n}\n"),
+            "piped.json"
+        );
+        assert_eq!(piped_name(None, "#!/bin/sh\necho hi\n"), "piped.sh");
+        assert_eq!(
+            piped_name(None, "#!/usr/bin/env python3\nprint(1)\n"),
+            "piped.py"
+        );
+        assert_eq!(
+            piped_name(None, "Just a few words.\nAnd a second line.\n"),
+            "piped.txt"
+        );
+        assert_eq!(piped_name(None, ""), "piped.txt");
+        assert_eq!(
+            piped_name(Some("md"), diff),
+            "piped.md",
+            "the asked kind wins"
+        );
+        assert_eq!(piped_name(Some("RS"), "fn main() {}"), "piped.rs");
+        assert_eq!(detect(Path::new("piped.md")), FileKind::Markdown);
+        assert!(matches!(detect(Path::new("piped.diff")), FileKind::Code(_)));
+        assert_eq!(detect(Path::new("piped.txt")), FileKind::Text);
+    }
+
+    #[test]
+    fn a_kind_is_letters_digits_and_a_few_marks() {
+        use super::kind_is_plain;
+        for kind in ["md", "diff", "c++", "objective-c", "c#", "f90", "x_y"] {
+            assert!(kind_is_plain(kind), "{kind}");
+        }
+        for kind in [
+            "",
+            "../x",
+            "a/b",
+            "a b",
+            "a.b",
+            "md\n",
+            "x".repeat(40).as_str(),
+        ] {
+            assert!(!kind_is_plain(kind), "{kind:?}");
+        }
+    }
+
     use super::*;
     use crate::doc::model::BlockKind;
     use std::path::PathBuf;

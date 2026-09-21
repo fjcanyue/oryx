@@ -703,6 +703,19 @@ pub fn sniff_language(name: &str, text: &str) -> Option<&'static str> {
         .map(|syntax| syntax.name.as_str())
 }
 
+/// The file extension of the grammar a text names by itself, `diff` for
+/// a diff, `sh` for a shell script: the name a text with no file behind
+/// it is given, so the ordinary open path colors it. None for a text
+/// that says nothing.
+pub fn sniff_extension(text: &str) -> Option<&'static str> {
+    let name = sniff_language("", text)?;
+    syntax_set()
+        .find_syntax_by_name(name)?
+        .file_extensions
+        .first()
+        .map(String::as_str)
+}
+
 /// The language a modeline names, in the vim form (`vim: set ft=sh:`,
 /// `vi:ft=sh`, `syntax=sh`) or the Emacs form (`-*- mode: python -*-`,
 /// `-*- python -*-`), looked for in the first and the last five lines.

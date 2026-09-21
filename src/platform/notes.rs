@@ -60,6 +60,12 @@ impl Seat {
         self.dir.join(NOTE_NAME)
     }
 
+    /// Another file of this Oryx's own inside the folder, the text
+    /// piped in at the launch; it goes with the folder.
+    pub fn file(&self, name: &str) -> PathBuf {
+        self.dir.join(name)
+    }
+
     /// The clean way out: the folder goes, the lock with it.
     pub fn release(self) {
         remove(&self.dir, self.lock);
