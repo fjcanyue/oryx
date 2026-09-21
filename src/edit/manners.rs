@@ -727,9 +727,11 @@ pub struct MarkEdit {
 /// carries the mark at both ends, or sits just inside a pair of them,
 /// loses the pair; anything else gains one. A single star just outside
 /// is not a pair when it belongs to a double, so italic inside bold
-/// adds its own star. With no selection and no word, an empty pair
-/// opens with the caret inside; with a word, the caret keeps its
-/// letter. The inner range is what stays selected.
+/// adds its own star. With no selection the caret's place among the
+/// line's marks decides first (`toggle_at_caret`); then, with no word,
+/// an empty pair opens with the caret inside, and with a word the
+/// caret keeps its letter, or goes past the closing mark from the
+/// word's end. The inner range is what stays selected.
 pub fn toggle_mark(
     source: &str,
     selection: Option<std::ops::Range<usize>>,
@@ -751,7 +753,13 @@ pub fn toggle_mark(
             .map_or(source.len(), |(i, _)| at + i);
         (end > start).then_some(start..end)
     };
-    let (range, pinned) = match selection.filter(|r| !r.is_empty()) {
+    let selection = selection.filter(|r| !r.is_empty());
+    if selection.is_none() {
+        if let Some(edit) = toggle_at_caret(source, caret, mark) {
+            return edit;
+        }
+    }
+    let (range, pinned) = match selection {
         Some(r) => (r, None),
         None => match word(caret) {
             Some(r) => (r, Some(caret)),
@@ -810,13 +818,137 @@ pub fn toggle_mark(
         };
     }
     let inner = range.start + m..range.end + m;
-    let caret = pinned.map_or(inner.end, |p| ride(p, range.start, m as i64));
+    // A caret at the word's end is someone writing on: it goes past the
+    // closing mark, so the next letters land outside the mark.
+    let caret = pinned.map_or(inner.end, |p| {
+        if p == range.end {
+            inner.end + m
+        } else {
+            ride(p, range.start, m as i64)
+        }
+    });
     MarkEdit {
         replace: range,
         text: format!("{mark}{text}{mark}"),
         inner,
         caret,
     }
+}
+
+/// What the key does by where the caret stands among the marks of its
+/// own line, nothing selected. On an empty pair the pair goes. Right
+/// before a run's closing mark the caret steps over it and the text
+/// stays, the word processor's "off for what comes next". Anywhere
+/// else inside a run the run loses its marks, however many words it
+/// holds. None everywhere else, and on a line whose marks do not pair,
+/// where the word under the caret decides as before.
+fn toggle_at_caret(source: &str, caret: usize, mark: &str) -> Option<MarkEdit> {
+    let m = mark.len();
+    let sign = mark.as_bytes()[0];
+    let line_start = source[..caret].rfind('\n').map_or(0, |i| i + 1);
+    let line_end = source[caret..]
+        .find('\n')
+        .map_or(source.len(), |i| caret + i);
+    let line = &source[line_start..line_end];
+    let at = caret - line_start;
+    let b = line.as_bytes();
+
+    // The empty pair: the mark on both sides and no more of its sign
+    // around it, with no word pressed against the closing mark, which
+    // would make that mark an opening one.
+    if at >= m
+        && line[..at].ends_with(mark)
+        && line[at..].starts_with(mark)
+        && (at == m || b[at - m - 1] != sign)
+        && b.get(at + m)
+            .is_none_or(|c| *c != sign && !c.is_ascii_alphanumeric())
+    {
+        let open = caret - m;
+        return Some(MarkEdit {
+            replace: open..caret + m,
+            text: String::new(),
+            inner: open..open,
+            caret: open,
+        });
+    }
+
+    let (open, close) = marked_runs(line, mark)?
+        .into_iter()
+        .find(|(open, close)| open + m <= at && at <= *close)?;
+    if at == close {
+        return Some(MarkEdit {
+            replace: caret..caret,
+            text: String::new(),
+            inner: caret..caret,
+            caret: caret + m,
+        });
+    }
+    let text = &line[open + m..close];
+    let start = line_start + open;
+    Some(MarkEdit {
+        replace: start..line_start + close + m,
+        text: text.to_string(),
+        inner: start..start + text.len(),
+        caret: caret - m,
+    })
+}
+
+/// The runs `mark` wraps on one line, as the byte positions of each
+/// opening and closing mark. A run of the mark's sign is read the way
+/// markdown pairs it: two stars a bold mark, one an italic mark, three
+/// one of each; one backtick a code mark. A sign after a backslash, a
+/// star inside inline code, and a run with whitespace on both sides (a
+/// bullet, a product) are text. None when the marks do not pair, an
+/// odd count or a mark facing the wrong way.
+fn marked_runs(line: &str, mark: &str) -> Option<Vec<(usize, usize)>> {
+    let sign = mark.as_bytes()[0];
+    let code = if sign == b'`' {
+        Vec::new()
+    } else {
+        marked_runs(line, "`").unwrap_or_default()
+    };
+    let b = line.as_bytes();
+    // Each mark found: its position, whether it may open, may close.
+    let mut found: Vec<(usize, bool, bool)> = Vec::new();
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] != sign {
+            i += 1;
+            continue;
+        }
+        let mut start = i;
+        while i < b.len() && b[i] == sign {
+            i += 1;
+        }
+        if start > 0 && b[start - 1] == b'\\' {
+            start += 1;
+        }
+        let len = i - start;
+        if code
+            .iter()
+            .any(|(open, close)| *open < start && start < *close)
+        {
+            continue;
+        }
+        let opens = b.get(i).is_some_and(|c| !c.is_ascii_whitespace());
+        let closes = start > 0 && !b[start - 1].is_ascii_whitespace();
+        if !opens && !closes {
+            continue;
+        }
+        match mark {
+            "**" => found.extend((0..len / 2).map(|k| (start + 2 * k, opens, closes))),
+            "*" if len % 2 == 1 => found.push((start + len - 1, opens, closes)),
+            "`" if len == 1 => found.push((start, true, true)),
+            _ => {}
+        }
+    }
+    if found.len() % 2 == 1 {
+        return None;
+    }
+    found
+        .chunks(2)
+        .map(|pair| (pair[0].1 && pair[1].2).then_some((pair[0].0, pair[1].0)))
+        .collect()
 }
 
 /// Ctrl+K: the selection becomes a link's text with the caret in the
@@ -1672,8 +1804,18 @@ mod tests {
         );
         assert_eq!(
             toggle_mark("a word b", None, 6, "**"),
-            e(2..6, "**word**", 4..8, 8),
-            "at the word's end"
+            e(2..6, "**word**", 4..8, 10),
+            "at the word's end the caret goes past the closing mark, to write on"
+        );
+        assert_eq!(
+            toggle_mark("a word b", None, 6, "*"),
+            e(2..6, "*word*", 3..7, 8),
+            "italic the same"
+        );
+        assert_eq!(
+            toggle_mark("a word b", None, 6, "`"),
+            e(2..6, "`word`", 3..7, 8),
+            "inline code the same"
         );
         assert_eq!(
             toggle_mark("a word b", None, 2, "*"),
@@ -1695,6 +1837,111 @@ mod tests {
             toggle_mark("état", None, 2, "_"),
             e(0..5, "_état_", 1..6, 3),
             "a word is any run of letters"
+        );
+    }
+
+    /// A `MarkEdit`, written short.
+    fn mark_edit(
+        replace: std::ops::Range<usize>,
+        text: &str,
+        inner: std::ops::Range<usize>,
+        caret: usize,
+    ) -> MarkEdit {
+        MarkEdit {
+            replace,
+            text: text.to_string(),
+            inner,
+            caret,
+        }
+    }
+
+    #[test]
+    fn the_key_again_before_the_closing_mark_steps_over_it() {
+        assert_eq!(
+            toggle_mark("**two words**", None, 11, "**"),
+            mark_edit(11..11, "", 11..11, 13),
+            "bold off for what comes next, the text untouched"
+        );
+        assert_eq!(
+            toggle_mark("an *old tale* here", None, 12, "*"),
+            mark_edit(12..12, "", 12..12, 13)
+        );
+        assert_eq!(
+            toggle_mark("a `x y` b", None, 6, "`"),
+            mark_edit(6..6, "", 6..6, 7)
+        );
+    }
+
+    #[test]
+    fn the_key_again_on_an_empty_pair_removes_it() {
+        assert_eq!(
+            toggle_mark("a **** b", None, 4, "**"),
+            mark_edit(2..6, "", 2..2, 2)
+        );
+        assert_eq!(
+            toggle_mark("a ** b", None, 3, "*"),
+            mark_edit(2..4, "", 2..2, 2)
+        );
+        assert_eq!(
+            toggle_mark("``", None, 1, "`"),
+            mark_edit(0..2, "", 0..0, 0)
+        );
+        assert_eq!(
+            toggle_mark("**word**", None, 1, "*"),
+            mark_edit(1..1, "**", 2..2, 2),
+            "between the stars of a bold mark is no empty italic pair"
+        );
+    }
+
+    #[test]
+    fn the_key_inside_a_marked_run_removes_its_marks() {
+        assert_eq!(
+            toggle_mark("**two words**", None, 9, "**"),
+            mark_edit(0..13, "two words", 0..9, 7),
+            "a run of two words, the caret inside the second"
+        );
+        assert_eq!(
+            toggle_mark("**two words**", None, 2, "**"),
+            mark_edit(0..13, "two words", 0..9, 0),
+            "right after the opening mark"
+        );
+        assert_eq!(
+            toggle_mark("say `let x = 1` now", None, 9, "`"),
+            mark_edit(4..15, "let x = 1", 4..13, 8)
+        );
+        assert_eq!(
+            toggle_mark("`a ** b` and **c d**", None, 17, "**"),
+            mark_edit(13..20, "c d", 13..16, 15),
+            "stars inside code are text"
+        );
+    }
+
+    #[test]
+    fn a_line_that_is_unclear_keeps_the_word_behavior() {
+        assert_eq!(
+            toggle_mark("**a word b**", None, 6, "*"),
+            mark_edit(4..8, "*word*", 5..9, 7),
+            "italic inside bold: no italic run here, the word is wrapped"
+        );
+        assert_eq!(
+            toggle_mark("* item one", None, 8, "*"),
+            mark_edit(7..10, "*one*", 8..11, 9),
+            "a bullet's star is no mark"
+        );
+        assert_eq!(
+            toggle_mark("2 * 3 and a*b*c", None, 12, "*"),
+            mark_edit(11..14, "b", 11..12, 11),
+            "a star between spaces is text; the pair around b is a run"
+        );
+        assert_eq!(
+            toggle_mark("a*b **x y**", None, 8, "*"),
+            mark_edit(8..9, "*y*", 9..10, 9),
+            "one star alone: unclear, the word is wrapped"
+        );
+        assert_eq!(
+            toggle_mark("**open and no end", None, 8, "**"),
+            mark_edit(7..10, "**and**", 9..12, 10),
+            "an opening mark alone"
         );
     }
 

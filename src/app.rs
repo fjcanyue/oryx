@@ -3262,6 +3262,12 @@ impl App {
         let had_selection = selection.is_some();
         let caret = self.caret.map_or(0, |c| c.offset);
         let edit = edit::manners::toggle_mark(&self.document.source, selection, caret, mark);
+        // A step over a closing mark changes no text: the caret moves,
+        // and the file is as clean, the undo history as long, as before.
+        if edit.replace.is_empty() && edit.text.is_empty() {
+            self.place_caret_at(edit.caret);
+            return;
+        }
         self.type_edit_at(edit.replace, &edit.text, Kind::Structural, edit.caret);
         if had_selection && !edit.inner.is_empty() {
             if let Some(s) = caret::span_selection(&self.document, edit.inner.start, edit.inner.end)

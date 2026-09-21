@@ -409,6 +409,11 @@ pub const TIPS: &[Tip] = &[
     Tip {
         kind: TipKind::Tip,
         area: Area::Editing,
+        text: r#"You can write bold the way you do in a word processor: press `Ctrl+B`, type, and press `Ctrl+B` again to go on in plain text. `Ctrl+I` and `` Ctrl+` `` work the same way."#,
+    },
+    Tip {
+        kind: TipKind::Tip,
+        area: Area::Editing,
         text: r#"`Ctrl+K` turns the selected text into a link. You can also paste a web address over a selection and Oryx will make it a link."#,
     },
     Tip {
