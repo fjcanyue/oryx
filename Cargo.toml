@@ -8,7 +8,7 @@ description = "Fast editor for markdown and code, reader for ebooks and comics"
 edition = "2021"
 license = "GPL-3.0-only"
 repository = "https://github.com/wmahfoudh/oryx"
-rust-version = "1.85"
+rust-version = "1.88"
 
 [dependencies]
 anyhow = "1"
@@ -17,7 +17,13 @@ base64 = "0.22"
 cosmic-text = "0.17.0"
 directories = "6"
 fancy-regex = "0.16.2"
+# Workspace search: the walk, the fuzzy matcher and the grep stack,
+# ripgrep's own traversal and search crates behind a small module.
+grep-matcher = "0.1"
+grep-regex = "0.1.14"
+grep-searcher = "0.1.16"
 html5ever = "0.39"
+ignore = "0.4.33"
 markup5ever_rcdom = "0.39"
 # SVG output only: the default features pull the `mmdc`-style CLI (clap)
 # and a PNG rasterizer (resvg/usvg) Oryx already has its own copy of.
@@ -25,6 +31,7 @@ mermaid-rs-renderer = { version = "0.3.1", default-features = false }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "rayon"] }
 miniz_oxide = "0.8"
 noad = { path = "noad" }
+nucleo-matcher = "0.3.1"
 open = "5"
 palmbook = { path = "palmbook" }
 rarball = { path = "rarball" }

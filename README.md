@@ -199,7 +199,7 @@ The Linux packages need glibc 2.35 and OpenSSL 3, which means Debian 12, Ubuntu 
 
 ### From source
 
-Building requires **Rust 1.80 or later**.
+Building requires **Rust 1.88 or later**.
 
 ```sh
 git clone https://github.com/wmahfoudh/oryx.git

@@ -7,3 +7,4 @@ pub mod paint;
 pub mod platform;
 pub mod style;
 pub mod ui;
+pub mod workspace_search;
