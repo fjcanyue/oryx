@@ -55,7 +55,7 @@ use oryx::workspace_search::{self, SearchEvent};
 use winit::application::ApplicationHandler;
 use winit::dpi::{PhysicalPosition, PhysicalSize};
 use winit::event::{
-    ElementState, KeyEvent, MouseButton, MouseScrollDelta, TouchPhase, WindowEvent,
+    ElementState, Ime, KeyEvent, MouseButton, MouseScrollDelta, TouchPhase, WindowEvent,
 };
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{Key, ModifiersState, NamedKey};
@@ -339,6 +339,7 @@ pub fn run(launch: Launch, theme_name: Option<String>) -> anyhow::Result<()> {
         bom: opened_bom,
         caret_snap: false,
         blink_visible: true,
+        ime_on: false,
         blink_flip: Instant::now(),
         notice: None,
         notice_canvas: None,
@@ -895,6 +896,10 @@ struct App {
     /// The blink's current half and when it flips, driven by the timer;
     /// every caret action restarts the visible half.
     blink_visible: bool,
+    /// Whether the IME stands allowed right now; the system keyboard
+    /// follows the focused input site, and calls to the window go out
+    /// only on the change.
+    ime_on: bool,
     blink_flip: Instant,
     /// The transient corner notice, while one holds or fades.
     notice: Option<Notice>,
@@ -3547,6 +3552,63 @@ impl App {
         }
     }
 
+    /// An IME event: the composition itself shows in the system's own
+    /// window; the committed text lands in whatever input site has the
+    /// keyboard, the same place a typed character would.
+    fn ime(&mut self, event: Ime) {
+        if let Ime::Commit(text) = event {
+            self.ime_commit(&text);
+        }
+    }
+
+    /// Routes committed IME text to the focused input site: the find
+    /// bar first, as it also outranks in the key ladder, then the
+    /// sidebar's search field while its panel owns the keys, then the
+    /// editor's caret.
+    fn ime_commit(&mut self, text: &str) {
+        if self.search.is_some() {
+            self.push_query(text);
+            return;
+        }
+        if self.sidebar_owns_keys() && self.mode == edit::Mode::Read {
+            let changed = self.sidebar.as_mut().is_some_and(|side| {
+                side.search.active() && side.search.query_field_mut().insert(text) == Edit::Changed
+            });
+            if changed {
+                self.run_current_search();
+            }
+            return;
+        }
+        if self.mode == edit::Mode::Edit {
+            if !self.wrap_selection(text) {
+                self.type_over(text, Kind::Insert);
+            }
+            self.wake_caret();
+        }
+    }
+
+    /// Allows or refuses the IME with the focused input site: the
+    /// editor's caret, the find bar's field, or the sidebar's search
+    /// field while its panel owns the keys. The window is told only on
+    /// a change.
+    fn sync_ime(&mut self) {
+        let wanted = self.search.is_some()
+            || self.mode == edit::Mode::Edit
+            || (self.sidebar_owns_keys()
+                && self.mode == edit::Mode::Read
+                && self
+                    .sidebar
+                    .as_ref()
+                    .is_some_and(|side| side.search.active()));
+        if wanted == self.ime_on {
+            return;
+        }
+        self.ime_on = wanted;
+        if let Some(gfx) = self.gfx.as_ref() {
+            gfx.window.set_ime_allowed(wanted);
+        }
+    }
+
     /// The matching release.
     fn left_release(&mut self) {
         self.overlay_mouse = false;
@@ -4555,8 +4617,14 @@ impl App {
 
     /// The Files tab's search views' keys: the field takes the typing,
     /// the arrows and Enter drive the results, Esc returns to the
-    /// tree. Reports whether the key was claimed so the ladder stops.
+    /// tree. Only while the panel owns the keyboard: a search view
+    /// still showing must not eat the editor's typing once a click or
+    /// an opened match took the keys back. Reports whether the key was
+    /// claimed so the ladder stops.
     fn sidebar_search_key(&mut self, key: &Key, ctrl: bool, shift: bool, alt: bool) -> bool {
+        if !self.sidebar_owns_keys() || self.mode != edit::Mode::Read {
+            return false;
+        }
         /// What a press asked for, computed under the panel's borrow.
         enum Ask {
             Pass,
@@ -6065,6 +6133,7 @@ impl App {
         // Frames mean interaction; idle draws nothing, so the disk
         // check rides them without ever waking the loop itself.
         self.check_disk();
+        self.sync_ime();
         let inset = self.inset() as u32;
         let Some(size) = self.gfx.as_ref().map(|g| g.window.inner_size()) else {
             return;
@@ -6288,6 +6357,14 @@ impl App {
         if self.mode == edit::Mode::Edit && self.blink_visible {
             if let Some(c) = self.caret {
                 if let Some(b) = c.geometry(lay, &self.document, &mut self.fonts) {
+                    // The IME's composition window follows the caret,
+                    // so the typing reads where it lands.
+                    let x = inset as f32 + b.x.max(0.0) * self.scale;
+                    let y = (b.y - self.scroll_y).max(0.0) * self.scale;
+                    gfx.window.set_ime_cursor_area(
+                        PhysicalPosition::new(x, y),
+                        PhysicalSize::new((b.h * self.scale).max(1.0), (b.h * self.scale).max(1.0)),
+                    );
                     draw_caret(
                         &mut buffer,
                         size.width,
@@ -6635,6 +6712,7 @@ impl ApplicationHandler for App {
                 self.check_disk();
             }
             WindowEvent::ModifiersChanged(m) => self.modifiers = m.state(),
+            WindowEvent::Ime(event) => self.ime(event),
             WindowEvent::KeyboardInput {
                 event:
                     KeyEvent {

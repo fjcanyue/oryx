@@ -6,6 +6,7 @@
 //! its own, so leaving it restores the tree exactly, and the file and
 //! content queries each keep their own text across switches.
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use crate::paint::painter::Painter;
@@ -78,6 +79,9 @@ pub struct SidebarSearchState {
     pub content: Vec<ContentHit>,
     /// The content view's flattened rows, rebuilt when `content` grows.
     pub rows: Vec<ContentRow>,
+    /// The content view's files folded to their header row, by path.
+    /// Batches keep arriving into the folded groups unseen.
+    pub collapsed: HashSet<String>,
     /// Where each query's text was last drawn, for the mouse.
     pub file_view: FieldView,
     pub content_view: FieldView,
@@ -102,6 +106,7 @@ impl SidebarSearchState {
             files: Vec::new(),
             content: Vec::new(),
             rows: Vec::new(),
+            collapsed: HashSet::new(),
             file_view: FieldView::default(),
             content_view: FieldView::default(),
         }
@@ -125,6 +130,7 @@ impl SidebarSearchState {
         self.files.clear();
         self.content.clear();
         self.rows.clear();
+        self.collapsed.clear();
         self.selected = 0;
         self.scroll = 0.0;
     }
@@ -152,7 +158,8 @@ impl SidebarSearchState {
         }
     }
 
-    /// Rebuilds the content view's rows after its hits changed.
+    /// Rebuilds the content view's rows after its hits changed. A
+    /// folded file keeps its header and loses its lines.
     pub fn refresh_rows(&mut self) {
         self.rows.clear();
         let mut last: Option<&str> = None;
@@ -161,9 +168,29 @@ impl SidebarSearchState {
                 self.rows.push(ContentRow::Header(at));
                 last = Some(&hit.relative_path);
             }
+            if self.collapsed.contains(&*hit.relative_path) {
+                continue;
+            }
             self.rows.push(ContentRow::Hit(at));
         }
         self.selected = self.selected.min(self.rows.len().saturating_sub(1));
+    }
+
+    /// Folds or unfolds one file's group, and seats the selection on
+    /// its header either way, so a fold never strands the selection on
+    /// a row that vanished.
+    pub fn toggle_file(&mut self, path: &str) {
+        if !self.collapsed.insert(path.to_string()) {
+            self.collapsed.remove(path);
+        }
+        self.refresh_rows();
+        let seat = self.rows.iter().position(|row| match row {
+            ContentRow::Header(at) => &*self.content[*at].relative_path == path,
+            ContentRow::Hit(_) => false,
+        });
+        if let Some(at) = seat {
+            self.selected = at;
+        }
     }
 
     /// The results' full height, headers included where there are any.
@@ -561,11 +588,25 @@ fn draw_content_results(
         slot += 1;
         match state.rows[index] {
             ContentRow::Header(at) => {
+                // The fold's own row: a triangle for its state, the
+                // path beside it, the click on either folding the file.
                 let path = state.content[at].relative_path.clone();
+                let folded = state.collapsed.contains(&*path);
+                crate::ui::sidebar::draw_triangle(
+                    painter,
+                    PAD + 5.0,
+                    ry + ROW_H / 2.0,
+                    !folded,
+                    soft(ui.sidebar_fg),
+                );
+                let avail = width - PAD - 18.0;
+                let shown = crate::ui::sidebar::fit(&path, avail, |text| {
+                    painter.measure(text, BODY_FAMILY, TEXT_SIZE, 700)
+                });
                 painter.text(
-                    PAD,
+                    PAD + 16.0,
                     ry + 6.0,
-                    &path,
+                    &shown,
                     BODY_FAMILY,
                     TEXT_SIZE,
                     700,
@@ -862,6 +903,67 @@ mod tests {
         let joined = absolute(root, "src/ui/mod.rs");
         assert!(joined.starts_with(root));
         assert!(joined.ends_with(Path::new("src").join("ui").join("mod.rs")));
+    }
+
+    #[test]
+    fn a_folded_file_keeps_its_header_and_loses_its_lines() {
+        let mut state = SidebarSearchState::new();
+        state.open(FilesView::ContentSearch);
+        state.content = vec![
+            line("a.rs", 1, "x"),
+            line("a.rs", 2, "y"),
+            line("b.rs", 3, "z"),
+        ];
+        state.refresh_rows();
+        state.toggle_file("a.rs");
+        assert_eq!(
+            state.rows,
+            vec![
+                ContentRow::Header(0),
+                ContentRow::Header(2),
+                ContentRow::Hit(2)
+            ],
+            "a.rs folds to its header alone"
+        );
+        assert_eq!(state.selected, 0, "the fold seats the selection");
+        // A batch arriving while folded stays hidden until the unfold;
+        // the unfolded files take their new lines in.
+        state.content.push(line("b.rs", 4, "w"));
+        state.refresh_rows();
+        assert_eq!(
+            state.rows,
+            vec![
+                ContentRow::Header(0),
+                ContentRow::Header(2),
+                ContentRow::Hit(2),
+                ContentRow::Hit(3),
+            ],
+            "a.rs stays folded, b.rs grows"
+        );
+        state.toggle_file("a.rs");
+        assert_eq!(
+            state.rows,
+            vec![
+                ContentRow::Header(0),
+                ContentRow::Hit(0),
+                ContentRow::Hit(1),
+                ContentRow::Header(2),
+                ContentRow::Hit(2),
+                ContentRow::Hit(3),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_fold_under_the_selection_never_strands_it() {
+        let mut state = SidebarSearchState::new();
+        state.open(FilesView::ContentSearch);
+        state.content = vec![line("a.rs", 1, "x"), line("a.rs", 2, "y")];
+        state.refresh_rows();
+        state.selected = 2;
+        state.toggle_file("a.rs");
+        assert_eq!(state.selected, 0, "the vanished row's own header");
+        assert!(state.selected_line().is_none());
     }
 
     #[test]
