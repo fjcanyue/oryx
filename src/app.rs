@@ -3573,16 +3573,32 @@ impl App {
         }
     }
 
-    /// Cut is copy plus a delete splice; inert outside edit mode.
+    /// Cut is copy plus a delete splice; inert outside edit mode. With
+    /// nothing selected it takes the caret's line, ending included, as
+    /// one undo unit.
     fn cut_selection(&mut self) {
         if self.mode != edit::Mode::Edit {
             return;
         }
-        let Some(range) = self.selection_source_range() else {
+        let Some(range) = self.selection_source_range().filter(|r| !r.is_empty()) else {
+            if let Some(take) = self.caret_line() {
+                self.set_clipboard(take.text);
+                self.type_edit_at(take.cut, "", Kind::Structural, take.caret);
+            }
             return;
         };
         self.copy_selection(false);
         self.type_edit(range, "", Kind::Structural);
+    }
+
+    /// The caret's line for a copy or a cut with nothing selected; the
+    /// editor only.
+    fn caret_line(&self) -> Option<edit::manners::LineTake> {
+        if self.mode != edit::Mode::Edit {
+            return None;
+        }
+        let caret = self.caret?.offset;
+        edit::manners::line_take(&self.document.source, caret)
     }
 
     /// Pastes the clipboard as source bytes at the caret, replacing the
@@ -6347,8 +6363,13 @@ impl App {
     }
 
     /// Puts the selection on the clipboard, as markdown or plain text.
+    /// In the editor with nothing selected, the caret's line goes, the
+    /// same bytes under either key since the editor shows the source.
     fn copy_selection(&mut self, as_markdown: bool) {
-        let Some(sel) = self.selection else {
+        let Some(sel) = self.selection.filter(|s| !s.is_empty()) else {
+            if let Some(take) = self.caret_line() {
+                self.set_clipboard(take.text);
+            }
             return;
         };
         let text = if as_markdown {

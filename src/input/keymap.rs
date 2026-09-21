@@ -357,7 +357,7 @@ pub const SHORTCUTS: &[Shortcut] = &[
     },
     Shortcut {
         keys: "Ctrl+C",
-        action: "Copy selection as text",
+        action: "Copy selection as text, or the line (editing)",
         section: "Selection",
         bindings: &[(Binding::Ctrl("c"), Command::CopyText)],
     },
@@ -375,7 +375,7 @@ pub const SHORTCUTS: &[Shortcut] = &[
     },
     Shortcut {
         keys: "Ctrl+X",
-        action: "Cut the selection (editing)",
+        action: "Cut the selection, or the line (editing)",
         section: "Edit",
         bindings: &[(Binding::Ctrl("x"), Command::Cut)],
     },

@@ -43,6 +43,45 @@ pub fn hard_break(line: &str, col: usize) -> Option<String> {
     Some(text)
 }
 
+/// The caret's line as Ctrl+C and Ctrl+X take it when nothing is
+/// selected.
+#[derive(Debug, PartialEq, Eq)]
+pub struct LineTake {
+    /// The bytes a cut removes.
+    pub cut: std::ops::Range<usize>,
+    /// The clipboard's text: the line and one newline, so a paste at a
+    /// line's start puts a whole line back.
+    pub text: String,
+    /// Where a cut leaves the caret.
+    pub caret: usize,
+}
+
+/// The line holding `caret`. A cut removes the line through its own
+/// ending, and the caret stands where the next line moved up to. The
+/// last line has no ending of its own: it takes the one before it, so
+/// no empty line is left behind, and the caret goes to the start of
+/// the line that is now last. None in an empty file.
+pub fn line_take(source: &str, caret: usize) -> Option<LineTake> {
+    if source.is_empty() {
+        return None;
+    }
+    let caret = caret.min(source.len());
+    let start = source[..caret].rfind('\n').map_or(0, |i| i + 1);
+    let end = source[caret..]
+        .find('\n')
+        .map_or(source.len(), |i| caret + i);
+    let text = format!("{}\n", &source[start..end]);
+    let (cut, caret) = if end < source.len() {
+        (start..end + 1, start)
+    } else if start > 0 {
+        let above = source[..start - 1].rfind('\n').map_or(0, |i| i + 1);
+        (start - 1..end, above)
+    } else {
+        (start..end, 0)
+    };
+    Some(LineTake { cut, text, caret })
+}
+
 /// What Enter does after a markdown marker: continue the construct on
 /// the new line, or end it when the item stands empty.
 #[derive(Debug, PartialEq, Eq)]
@@ -1194,6 +1233,52 @@ mod tests {
         assert_eq!(source, "- one  \n   two\n");
         let doc = crate::doc::markdown::parse(source);
         assert_eq!(doc.blocks.len(), 1, "one item still");
+    }
+
+    #[test]
+    fn a_line_is_taken_with_its_ending() {
+        let take = line_take("a\nbee\nc", 4).expect("a line");
+        assert_eq!(
+            (take.cut.clone(), take.text.as_str(), take.caret),
+            (2..6, "bee\n", 2)
+        );
+        let take = line_take("a\nb", 0).expect("the first line");
+        assert_eq!(
+            (take.cut.clone(), take.text.as_str(), take.caret),
+            (0..2, "a\n", 0)
+        );
+        let take = line_take("a\n\nb", 2).expect("an empty line");
+        assert_eq!(
+            (take.cut.clone(), take.text.as_str(), take.caret),
+            (2..3, "\n", 2)
+        );
+    }
+
+    #[test]
+    fn the_last_line_takes_the_ending_before_it() {
+        let take = line_take("a\nb", 3).expect("the last line");
+        assert_eq!(take.text, "b\n", "the clipboard always gets a whole line");
+        assert_eq!(take.cut, 1..3, "no empty line is left behind");
+        assert_eq!(take.caret, 0, "the start of the line that is now last");
+
+        let take = line_take("one\ntwo\nthree", 9).expect("the last of three");
+        assert_eq!((take.cut.clone(), take.caret), (7..13, 4));
+
+        let take = line_take("a\nb\n", 2).expect("a last line with its own ending");
+        assert_eq!(
+            (take.cut.clone(), take.text.as_str(), take.caret),
+            (2..4, "b\n", 2)
+        );
+    }
+
+    #[test]
+    fn a_lone_line_and_an_empty_file() {
+        let take = line_take("abc", 1).expect("the only line");
+        assert_eq!(
+            (take.cut.clone(), take.text.as_str(), take.caret),
+            (0..3, "abc\n", 0)
+        );
+        assert_eq!(line_take("", 0), None, "nothing to take");
     }
 
     #[test]
