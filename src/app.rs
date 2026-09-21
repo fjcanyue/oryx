@@ -2608,6 +2608,14 @@ impl App {
     /// caret and the scroll survive the move. True once the file is
     /// written; false when the dialog is dismissed or the write fails.
     fn save_as(&mut self) -> bool {
+        // A file only read so far has no ledger yet: its own bytes are
+        // what goes under the new name, as the editor would hold them.
+        // Text piped in is the case that matters, saved without ever
+        // being edited; a book or a text that did not read cleanly
+        // stays out, as it stays out of the editor.
+        if self.ledger.is_none() && self.writable() {
+            self.ensure_ledger();
+        }
         let Some(ledger) = self.ledger.as_ref() else {
             return false;
         };
