@@ -49,6 +49,14 @@ impl Cancel {
     pub fn root_stands(&self, generation: RootGeneration) -> bool {
         self.root.load(Ordering::SeqCst) == generation.0
     }
+
+    /// Stops honoring every generation at once, so a shutting-down
+    /// join never waits out a grep the UI has already left: whatever
+    /// is running sees itself superseded between files and stops.
+    fn kill(&self) {
+        self.root.store(u64::MAX, Ordering::SeqCst);
+        self.query.store(u64::MAX, Ordering::SeqCst);
+    }
 }
 
 /// The UI's handle on the worker: sends commands, keeps the token the
@@ -192,11 +200,14 @@ impl WorkspaceSearch {
         std::mem::take(&mut *queue)
     }
 
-    /// Stops the worker and waits for the thread to end. Safe to call
+    /// Stops the worker and waits for the thread to end. The kill
+    /// switch first makes any running walk or grep see itself
+    /// superseded, so the wait is short even mid-scan. Safe to call
     /// twice; dropping the handle without this parks the thread on its
     /// channel until the process ends.
     pub fn shutdown(&mut self) {
         let _ = self.tx.send(SearchCommand::Shutdown);
+        self.cancel.kill();
         if let Some(handle) = self.handle.take() {
             let _ = handle.join();
         }
@@ -317,7 +328,11 @@ impl Worker {
                     limit,
                     current_buffer,
                 }) => waiting = (token, query, regex, limit, current_buffer),
-                Ok(SearchCommand::Shutdown) => backlog.push(SearchCommand::Shutdown),
+                // Shutdown does not wait out a typist's window.
+                Ok(SearchCommand::Shutdown) => {
+                    backlog.push(SearchCommand::Shutdown);
+                    break;
+                }
                 Ok(other) => backlog.push(other),
                 Err(RecvTimeoutError::Timeout) => break,
                 Err(RecvTimeoutError::Disconnected) => break,
@@ -802,6 +817,22 @@ mod tests {
             );
         }
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// The kill switch behind a prompt shutdown: whatever generations
+    /// the UI stands on, a killed worker owes no one an answer, so a
+    /// join cannot wait out a running grep.
+    #[test]
+    fn kill_stops_honoring_every_generation() {
+        let cancel = Cancel::default();
+        assert!(cancel.stands_on(SearchToken::default()));
+        cancel.kill();
+        assert!(!cancel.stands_on(SearchToken::default()));
+        assert!(!cancel.root_stands(RootGeneration(0)));
+        assert!(!cancel.stands_on(SearchToken {
+            root: RootGeneration(7),
+            query: QueryGeneration(9),
+        }));
     }
 
     #[test]
