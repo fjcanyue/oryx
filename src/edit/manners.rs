@@ -711,6 +711,35 @@ pub fn wrap_pair(typed: &str, markdown: bool) -> Option<(&'static str, &'static 
     }
 }
 
+/// The word the caret stands in or at an end of: a run of letters,
+/// digits and underscores. None between two spaces or in an empty file.
+fn word_at(source: &str, at: usize) -> Option<std::ops::Range<usize>> {
+    let is_word = |c: char| c.is_alphanumeric() || c == '_';
+    let start = source[..at]
+        .char_indices()
+        .rev()
+        .take_while(|(_, c)| is_word(*c))
+        .last()
+        .map_or(at, |(i, _)| i);
+    let end = source[at..]
+        .char_indices()
+        .find(|(_, c)| !is_word(*c))
+        .map_or(source.len(), |(i, _)| at + i);
+    (end > start).then_some(start..end)
+}
+
+/// The run of non-blank characters the caret stands in or at an end
+/// of, when it is an address.
+fn address_at(source: &str, at: usize) -> Option<std::ops::Range<usize>> {
+    let start = source[..at].rfind(char::is_whitespace).map_or(0, |i| {
+        i + source[i..].chars().next().map_or(1, char::len_utf8)
+    });
+    let end = source[at..]
+        .find(char::is_whitespace)
+        .map_or(source.len(), |i| at + i);
+    (end > start && is_url(&source[start..end])).then_some(start..end)
+}
+
 /// One splice that wraps or unwraps a mark: the bytes to replace, the
 /// text that goes there, the inner text's range afterwards, and where
 /// the caret stands.
@@ -739,20 +768,7 @@ pub fn toggle_mark(
     mark: &str,
 ) -> MarkEdit {
     let m = mark.len();
-    let word = |at: usize| -> Option<std::ops::Range<usize>> {
-        let is_word = |c: char| c.is_alphanumeric() || c == '_';
-        let start = source[..at]
-            .char_indices()
-            .rev()
-            .take_while(|(_, c)| is_word(*c))
-            .last()
-            .map_or(at, |(i, _)| i);
-        let end = source[at..]
-            .char_indices()
-            .find(|(_, c)| !is_word(*c))
-            .map_or(source.len(), |(i, _)| at + i);
-        (end > start).then_some(start..end)
-    };
+    let word = |at: usize| word_at(source, at);
     let selection = selection.filter(|r| !r.is_empty());
     if selection.is_none() {
         if let Some(edit) = toggle_at_caret(source, caret, mark) {
@@ -953,14 +969,20 @@ fn marked_runs(line: &str, mark: &str) -> Option<Vec<(usize, usize)>> {
 
 /// Ctrl+K: the selection becomes a link's text with the caret in the
 /// empty parentheses; a selection that is itself an address becomes
-/// the target with the caret in the empty brackets; with no selection
-/// an empty link opens with the caret in the brackets.
+/// the target with the caret in the empty brackets. With no selection
+/// the address under the caret, else the word under it, stands for the
+/// selection, as the word does for the bold key; with neither, an
+/// empty link opens with the caret in the brackets.
 pub fn link_edit(
     source: &str,
     selection: Option<std::ops::Range<usize>>,
     caret: usize,
 ) -> MarkEdit {
-    let (replace, text, caret) = match selection.filter(|r| !r.is_empty()) {
+    let taken = selection
+        .filter(|r| !r.is_empty())
+        .or_else(|| address_at(source, caret))
+        .or_else(|| word_at(source, caret));
+    let (replace, text, caret) = match taken {
         Some(r) => {
             let inner = &source[r.clone()];
             if is_url(inner) {
@@ -1959,14 +1981,46 @@ mod tests {
             "the caret in the parentheses"
         );
         assert_eq!(
-            link_edit("ab", None, 1),
-            e(1..1, "[]()", 2),
-            "the caret in the brackets"
+            link_edit("a  b", None, 2),
+            e(2..2, "[]()", 3),
+            "no word: an empty link, the caret in the brackets"
         );
+        assert_eq!(link_edit("", None, 0), e(0..0, "[]()", 1));
         assert_eq!(
             link_edit("see https://x.y now", Some(4..15), 15),
             e(4..15, "[](https://x.y)", 5),
             "a selected address becomes the target, the caret in the brackets"
+        );
+    }
+
+    #[test]
+    fn a_link_takes_the_word_or_the_address_under_the_caret() {
+        let e = |replace: std::ops::Range<usize>, text: &str, caret: usize| MarkEdit {
+            replace,
+            text: text.to_string(),
+            inner: caret..caret,
+            caret,
+        };
+        assert_eq!(
+            link_edit("see link now", None, 6),
+            e(4..8, "[link]()", 11),
+            "inside the word: its text, the caret in the parentheses"
+        );
+        assert_eq!(
+            link_edit("see link", None, 8),
+            e(4..8, "[link]()", 11),
+            "at the word's end"
+        );
+        assert_eq!(link_edit("ab", None, 1), e(0..2, "[ab]()", 5));
+        assert_eq!(
+            link_edit("see https://x.y now", None, 9),
+            e(4..15, "[](https://x.y)", 5),
+            "on an address: the target, the caret in the brackets"
+        );
+        assert_eq!(
+            link_edit("see https://x.y now", None, 15),
+            e(4..15, "[](https://x.y)", 5),
+            "at the address's end"
         );
     }
 

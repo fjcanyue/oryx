@@ -482,7 +482,7 @@ pub const SHORTCUTS: &[Shortcut] = &[
     },
     Shortcut {
         keys: "Ctrl+K",
-        action: "Link around the selection, or an empty link; pasting an address over a selection links it too (markdown editing)",
+        action: "Link around the selection or the word, or an empty link; pasting an address over a selection links it too (markdown editing)",
         section: "Edit",
         bindings: &[(Binding::Ctrl("k"), Command::Link)],
     },

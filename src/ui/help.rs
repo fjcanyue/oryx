@@ -414,7 +414,7 @@ pub const TIPS: &[Tip] = &[
     Tip {
         kind: TipKind::Tip,
         area: Area::Editing,
-        text: r#"`Ctrl+K` turns the selected text into a link. You can also paste a web address over a selection and Oryx will make it a link."#,
+        text: r#"`Ctrl+K` turns the selected text, or the word the caret is on, into a link. You can also paste a web address over a selection and Oryx will make it a link."#,
     },
     Tip {
         kind: TipKind::Tip,
