@@ -30,6 +30,9 @@ const TOGGLE_H: f32 = 22.0;
 const TOGGLE_GAP: f32 = 8.0;
 /// The line-number column's width in the content view.
 const GUTTER_W: f32 = 40.0;
+/// How much of a matching line the drawing even considers, in
+/// characters; the worker keeps a longer head, the panel shows less.
+const PREVIEW_CHARS: usize = 64;
 
 /// Which of the Files tab's views is showing; the tree is one of them,
 /// so the tab's state is complete only with this.
@@ -694,7 +697,14 @@ fn draw_hit_line(
     let text_x = PAD + GUTTER_W;
     let avail = width - text_x - PAD;
     let line = hit.line_text.trim_end_matches(['\r', '\n']);
-    let shown = crate::ui::sidebar::fit(line, avail, |text| {
+    // The fitting walks the text a character at a time, so the line
+    // arrives already cut to what a wide panel could ever show; a
+    // bundled file's megabyte line never reaches the walk.
+    let head = match line.char_indices().nth(PREVIEW_CHARS) {
+        Some((at, _)) => &line[..at],
+        None => line,
+    };
+    let shown = crate::ui::sidebar::fit(head, avail, |text| {
         painter.measure(text, CODE_FAMILY, LINE_SIZE, 400)
     });
     let cut = shown.len();
