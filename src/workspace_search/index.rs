@@ -47,11 +47,6 @@ impl WorkspaceIndex {
         self.files.is_empty()
     }
 
-    /// The root the files were walked from.
-    pub fn root(&self) -> &Path {
-        &self.root
-    }
-
     /// The generation the index was built under.
     pub fn generation(&self) -> RootGeneration {
         self.generation
@@ -102,7 +97,7 @@ impl WorkspaceIndex {
             .build();
         let mut files: Vec<IndexedFile> = Vec::new();
         for entry in walker {
-            if files.len() % 1024 == 0 && superseded() {
+            if files.len().is_multiple_of(1024) && superseded() {
                 return Err(ScanFailure::Superseded);
             }
             let Ok(entry) = entry else {
@@ -183,7 +178,6 @@ mod tests {
             ]
         );
         assert_eq!(index.len(), 5);
-        assert_eq!(index.root(), dir.as_path());
         assert_eq!(index.generation(), RootGeneration(1));
         std::fs::remove_dir_all(&dir).unwrap();
     }

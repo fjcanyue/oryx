@@ -115,9 +115,9 @@ pub enum SideClick {
     /// The Files caption's search entry was pressed.
     OpenSearch,
     /// A content result was pressed: open the file and land on the
-    /// match — its line, column and length in bytes, and the line as
-    /// the search read it.
-    SearchHit(PathBuf, u64, usize, usize, std::sync::Arc<str>),
+    /// match — its line and column in bytes, and the line as the
+    /// search read it.
+    SearchHit(PathBuf, u64, usize, std::sync::Arc<str>),
 }
 
 /// The magnifier's box at the right end of the Files caption.
@@ -589,15 +589,10 @@ impl Sidebar {
                         sidebar_search::ContentRow::Hit(at) => &self.search.content[at],
                         _ => unreachable!("the guard matched a hit row"),
                     };
-                    let (column, length) = hit
-                        .ranges
-                        .first()
-                        .map_or((0, 0), |r| (r.start, r.end - r.start));
                     SideClick::SearchHit(
                         sidebar_search::absolute(&self.root, &hit.relative_path),
                         hit.line_number,
-                        column,
-                        length,
+                        hit.ranges.first().map_or(0, |r| r.start),
                         hit.line_text.clone(),
                     )
                 }
@@ -1657,11 +1652,10 @@ mod tests {
         );
         let hit_y = sidebar_search::results_top() + ROW_H + 5.0;
         match side.click(50.0, hit_y, &mut outline) {
-            SideClick::SearchHit(path, line, column, length, expected) => {
+            SideClick::SearchHit(path, line, column, expected) => {
                 assert!(path.ends_with(dir.join("sub").join("inner.md")));
                 assert_eq!(line, 42);
                 assert_eq!(column, 11);
-                assert_eq!(length, 11);
                 assert_eq!(&*expected, "pub struct UserService {");
             }
             other => panic!("the hit row answered {other:?}"),

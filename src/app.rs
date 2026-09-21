@@ -80,6 +80,10 @@ const REHIGHLIGHT_REST: Duration = Duration::from_millis(400);
 /// enough to cover the click Windows synthesizes behind a lifted finger.
 const MOUSE_MUTE: Duration = Duration::from_millis(150);
 
+/// How old the workspace index may be before entering a search view
+/// rescans behind it: the old answers stand while the walk runs.
+const STALE_INDEX: Duration = Duration::from_secs(30);
+
 /// The window icon raster produced by the build script.
 const ICON_64: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/icon_64.rgba"));
 
@@ -950,10 +954,8 @@ struct PendingSearchJump {
     path: PathBuf,
     /// The match's line, one-based as the grep counted it.
     line: u64,
-    /// The match's column and length in bytes, within the decoded
-    /// line.
+    /// The match's column in bytes, within the decoded line.
     column: usize,
-    length: usize,
     /// The line as the search read it, so a file changed since tells
     /// itself apart from a stale offset.
     expected_line: Arc<str>,
@@ -967,9 +969,7 @@ fn line_offset(source: &str, line: u64) -> Option<usize> {
     }
     let mut at = 0;
     for _ in 1..line {
-        let Some(nl) = source[at..].find('\n') else {
-            return None;
-        };
+        let nl = source[at..].find('\n')?;
         at += nl + 1;
     }
     Some(at.min(source.len()))
@@ -3511,8 +3511,7 @@ impl App {
             // outside-click manner; the click still acts on what it hit,
             // and the document owns every key again.
             self.close_search();
-            if self.sidebar_edge_press() {
-            } else if self.sidebar_search_field_press() {
+            if self.sidebar_edge_press() || self.sidebar_search_field_press() {
             } else if (self.cursor.x as f32) < self.inset() && self.sidebar.is_some() {
                 let (x, y) = self.ui_cursor();
                 self.sidebar_click(x, y);
@@ -4125,12 +4124,11 @@ impl App {
             sidebar::SideClick::OpenSearch => {
                 self.open_sidebar_search(FilesView::FileSearch);
             }
-            sidebar::SideClick::SearchHit(path, line, column, length, expected) => {
+            sidebar::SideClick::SearchHit(path, line, column, expected) => {
                 self.open_search_hit(PendingSearchJump {
                     path,
                     line,
                     column,
-                    length,
                     expected_line: expected,
                 });
             }
@@ -4360,7 +4358,7 @@ impl App {
                 SearchEvent::Error {
                     token: asked,
                     message,
-                } if asked.map_or(true, |asked| asked == token) => {
+                } if asked.is_none_or(|asked| asked == token) => {
                     if let Some(side) = self.sidebar.as_mut() {
                         side.search.status = match asked {
                             Some(_) => SearchStatus::InvalidPattern,
@@ -4444,7 +4442,9 @@ impl App {
     }
 
     /// Enters one of the Files tab's search views, opening the panel
-    /// when it is closed and the keys moving to it.
+    /// when it is closed and the keys moving to it. An index grown
+    /// stale answers from what it holds while a fresh walk runs
+    /// behind it.
     fn open_sidebar_search(&mut self, view: FilesView) {
         if self.sidebar.is_none() {
             self.open_sidebar(true);
@@ -4456,6 +4456,7 @@ impl App {
             side.search.open(view);
         }
         self.sync_search_root();
+        self.workspace.refresh_if_stale(STALE_INDEX);
         self.move_ownership(PaneAct::ClickSidebar);
         self.run_current_search();
     }
@@ -4562,13 +4563,12 @@ impl App {
             Claimed,
             Close,
             Open(PathBuf),
-            /// A content result's landing: file, line, column, length
-            /// and the line as the search read it.
+            /// A content result's landing: file, line, column and the
+            /// line as the search read it.
             Jump {
                 path: PathBuf,
                 line: u64,
                 column: usize,
-                length: usize,
                 expected: Arc<str>,
             },
             Move(i32),
@@ -4590,19 +4590,12 @@ impl App {
                         Ask::Open(sidebar_search::absolute(side.root(), &hit.relative_path))
                     }
                     None => match side.search.selected_line() {
-                        Some(hit) => {
-                            let (column, length) = hit
-                                .ranges
-                                .first()
-                                .map_or((0, 0), |r| (r.start, r.end - r.start));
-                            Ask::Jump {
-                                path: sidebar_search::absolute(side.root(), &hit.relative_path),
-                                line: hit.line_number,
-                                column,
-                                length,
-                                expected: hit.line_text.clone(),
-                            }
-                        }
+                        Some(hit) => Ask::Jump {
+                            path: sidebar_search::absolute(side.root(), &hit.relative_path),
+                            line: hit.line_number,
+                            column: hit.ranges.first().map_or(0, |r| r.start),
+                            expected: hit.line_text.clone(),
+                        },
                         None => Ask::Claimed,
                     },
                 },
@@ -4645,14 +4638,12 @@ impl App {
                 path,
                 line,
                 column,
-                length,
                 expected,
             } => {
                 self.open_search_hit(PendingSearchJump {
                     path,
                     line,
                     column,
-                    length,
                     expected_line: expected,
                 });
                 true

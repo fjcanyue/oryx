@@ -83,6 +83,12 @@ pub struct SidebarSearchState {
     pub content_view: FieldView,
 }
 
+impl Default for SidebarSearchState {
+    fn default() -> SidebarSearchState {
+        SidebarSearchState::new()
+    }
+}
+
 impl SidebarSearchState {
     pub fn new() -> SidebarSearchState {
         SidebarSearchState {

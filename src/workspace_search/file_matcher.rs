@@ -64,7 +64,7 @@ impl FileMatcher {
         );
         // The first pass scores only; indices wait for the winners.
         for (at, file) in index.files().iter().enumerate() {
-            if at % 4096 == 0 && superseded() {
+            if at.is_multiple_of(4096) && superseded() {
                 return (Vec::new(), false);
             }
             let path = &*file.relative_path;
@@ -119,13 +119,11 @@ impl FileMatcher {
         // The matcher counts characters; the UI slices bytes.
         let mut wanted = indices.into_iter().peekable();
         let mut matched = Vec::with_capacity(wanted.len());
-        let mut char_no: u32 = 0;
-        for (byte, _) in path.char_indices() {
-            if wanted.peek() == Some(&char_no) {
+        for (char_no, (byte, _)) in path.char_indices().enumerate() {
+            if wanted.peek() == Some(&(char_no as u32)) {
                 wanted.next();
                 matched.push(byte as u32);
             }
-            char_no += 1;
         }
         FileHit {
             relative_path: Arc::from(&*file.relative_path),

@@ -64,6 +64,9 @@ pub struct WorkspaceSearch {
     token: SearchToken,
     /// The root last handed over, so a repeat `sync_root` is free.
     settled: Option<PathBuf>,
+    /// When the standing index was asked for; a search reopened on an
+    /// old index uses it at once and rescans behind it.
+    settled_at: Option<Instant>,
     handle: Option<JoinHandle<()>>,
 }
 
@@ -89,6 +92,7 @@ impl WorkspaceSearch {
             query: QueryGeneration(0),
             token: SearchToken::default(),
             settled: None,
+            settled_at: None,
             handle: Some(thread),
         }
     }
@@ -107,11 +111,23 @@ impl WorkspaceSearch {
             return;
         }
         self.settled = Some(root.to_path_buf());
+        self.settled_at = Some(Instant::now());
         self.bump_root();
         let _ = self.tx.send(SearchCommand::SetRoot {
             generation: self.root,
             root: root.to_path_buf(),
         });
+    }
+
+    /// Rebuilds the standing index when it is older than `age`, so a
+    /// search reopened on a stale index answers from it at once while
+    /// a fresh walk runs behind. Reports whether a rebuild started.
+    pub fn refresh_if_stale(&mut self, age: Duration) -> bool {
+        if self.settled_at.is_some_and(|at| at.elapsed() < age) || self.settled.is_none() {
+            return false;
+        }
+        self.refresh();
+        true
     }
 
     /// Rebuilds the index of the root already standing, under a fresh
@@ -120,6 +136,7 @@ impl WorkspaceSearch {
         let Some(root) = self.settled.clone() else {
             return;
         };
+        self.settled_at = Some(Instant::now());
         self.bump_root();
         let _ = self.tx.send(SearchCommand::SetRoot {
             generation: self.root,
@@ -498,10 +515,10 @@ mod tests {
         /// after a deadline the fastest machine never needs. Events
         /// nothing wants are kept for later awaits, since one drain can
         /// bring a whole answer at once.
-        fn await_event(&mut self, want: impl Fn(&SearchEvent) -> bool) -> SearchEvent {
+        fn await_event(&mut self, want: impl Fn(&SearchEvent) -> bool + Copy) -> SearchEvent {
             let deadline = Instant::now() + Duration::from_secs(10);
             loop {
-                if let Some(at) = self.seen.iter().position(|e| want(e)) {
+                if let Some(at) = self.seen.iter().position(want) {
                     return self.seen.remove(at);
                 }
                 assert!(Instant::now() < deadline, "the worker never answered");
