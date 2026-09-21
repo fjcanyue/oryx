@@ -17,6 +17,7 @@ use crate::style::theme::{Rgba, Theme, Ui};
 use crate::ui::outline::OutlineTree;
 use crate::ui::overlay::{accent_fill, dim, guide, hover_fill, soft};
 use crate::ui::scrollbar;
+use crate::ui::sidebar_search::{self, FilesView, SidebarSearchState};
 
 /// Panel width in pixels for a reader who has never dragged the edge.
 pub const DEFAULT_WIDTH: f32 = 260.0;
@@ -30,7 +31,7 @@ const MIN_DOC: f32 = 240.0;
 pub const GRAB: f32 = 4.0;
 
 pub const ROW_H: f32 = 30.0;
-const PAD: f32 = 10.0;
+pub const PAD: f32 = 10.0;
 const INDENT: f32 = 14.0;
 const TEXT_SIZE: f32 = 15.0;
 /// Room the type icon column takes before a row's name.
@@ -111,6 +112,36 @@ pub enum SideClick {
     Jump(usize),
     /// The press took the scrollbar thumb; the app drags it until release.
     Thumb,
+    /// The Files caption's search entry was pressed.
+    OpenSearch,
+    /// A content result was pressed: open the file and land on the
+    /// match — its line and column in bytes, and the line as the
+    /// search read it.
+    SearchHit(PathBuf, u64, usize, std::sync::Arc<str>),
+}
+
+/// The magnifier's box at the right end of the Files caption.
+fn search_icon_zone(width: f32) -> (f32, f32, f32, f32) {
+    let mid = width / 2.0;
+    (
+        mid - CAPTION_GAP - 18.0,
+        (CAPTION_H - 12.0) / 2.0,
+        12.0,
+        12.0,
+    )
+}
+
+/// Whether a press at panel coordinates lands on the search entry.
+fn search_icon_hit(width: f32, x: f32, y: f32) -> bool {
+    let (sx, sy, sw, sh) = search_icon_zone(width);
+    x >= sx && x < sx + sw + 4.0 && y >= sy - 3.0 && y < sy + sh + 3.0
+}
+
+/// The magnifier: a lens circle with a handle to the lower right,
+/// sized to the caption row.
+fn draw_search_icon(painter: &mut Painter, x: f32, y: f32, color: Rgba) {
+    painter.stroke(x + 0.5, y + 0.5, 7.0, 7.0, 4.5, 1.4, color);
+    painter.line(x + 7.5, y + 7.5, x + 10.5, y + 10.5, 1.6, color);
 }
 
 /// The tab a click at panel coordinates lands on; None outside the
@@ -224,20 +255,16 @@ pub struct Sidebar {
     hover: Option<Hover>,
     /// The cursor's offset from the thumb's top while the thumb is held.
     thumb_grab: Option<f32>,
+    /// The Files tab's search views, tree state untouched by entering
+    /// or leaving them.
+    pub search: SidebarSearchState,
 }
 
 /// Whether a directory entry belongs in the tree. Directories always do,
 /// and a file does when Oryx can display it, which for an extension the
 /// table does not name means reading the first bytes.
 fn recognized(path: &Path, is_dir: bool) -> bool {
-    if is_dir {
-        return true;
-    }
-    match load::detect(path) {
-        FileKind::Unknown => load::is_text_file(path),
-        FileKind::Undisplayable => false,
-        _ => true,
-    }
+    is_dir || load::is_displayable_file(path)
 }
 
 /// The recognized entries of one directory, directories first, both
@@ -304,6 +331,7 @@ impl Sidebar {
             list_h: 0.0,
             hover: None,
             thumb_grab: None,
+            search: SidebarSearchState::new(),
         }
     }
 
@@ -312,6 +340,10 @@ impl Sidebar {
     }
 
     pub fn set_tab(&mut self, tab: Tab) {
+        if tab != Tab::Files {
+            // Leaving the Files tab leaves its search with it.
+            self.search.close();
+        }
         self.tab = tab;
     }
 
@@ -348,6 +380,12 @@ impl Sidebar {
 
     pub fn root(&self) -> &Path {
         &self.root
+    }
+
+    /// Whether the Files tab is showing one of its search views rather
+    /// than the tree.
+    pub fn search_active(&self) -> bool {
+        self.tab == Tab::Files && self.search.active()
     }
 
     pub fn width(&self) -> f32 {
@@ -447,6 +485,7 @@ impl Sidebar {
     /// The active list's scroll and its full height.
     fn list_extent(&self, outline: &OutlineTree) -> (f32, f32) {
         match self.tab {
+            Tab::Files if self.search.active() => (self.search.scroll, self.search.content_h()),
             Tab::Files => (self.scroll, self.entries.len() as f32 * ROW_H),
             Tab::Outline => (outline.scroll, outline.rows().len() as f32 * ROW_H),
         }
@@ -463,7 +502,11 @@ impl Sidebar {
     /// the active tab, or the thumb. Reports whether it changed, so the
     /// caller redraws only then.
     pub fn hover_at(&mut self, x: f32, y: f32, outline: &OutlineTree) -> bool {
-        let top = PAD + CAPTION_H;
+        let top = if self.search_active() {
+            sidebar_search::results_top()
+        } else {
+            PAD + CAPTION_H
+        };
         let in_list = x >= 0.0 && x < self.width && y >= top && y < top + self.list_h;
         let hover = if !in_list {
             None
@@ -499,6 +542,7 @@ impl Sidebar {
             self.list_h,
         );
         match self.tab {
+            Tab::Files if self.search.active() => self.search.scroll = scroll,
             Tab::Files => self.scroll = scroll,
             Tab::Outline => outline.scroll = scroll,
         }
@@ -513,12 +557,47 @@ impl Sidebar {
     /// on the bar takes the thumb, a file row opens or expands, an
     /// outline row folds or jumps.
     pub fn click(&mut self, x: f32, y: f32, outline: &mut OutlineTree) -> SideClick {
+        // The Files caption's magnifier opens the file search; it sits
+        // inside that caption's zone, so it answers first.
+        if self.tab == Tab::Files && !self.search.active() && search_icon_hit(self.width, x, y) {
+            return SideClick::OpenSearch;
+        }
         if let Some(tab) = caption_hit(self.width, x, y) {
             if tab != self.tab {
-                self.tab = tab;
+                self.set_tab(tab);
                 return SideClick::Tab;
             }
             return SideClick::None;
+        }
+        // A search view answers its own clicks below the captions: a
+        // row selects and opens, never the tree.
+        if self.search_active() {
+            return match sidebar_search::row_at(&self.search, y) {
+                Some(row) if self.search.view == FilesView::FileSearch => {
+                    self.search.selected = row;
+                    let relative = self.search.files[row].relative_path.clone();
+                    SideClick::Open(sidebar_search::absolute(&self.root, &relative))
+                }
+                Some(row)
+                    if matches!(
+                        self.search.rows.get(row),
+                        Some(sidebar_search::ContentRow::Hit(_))
+                    ) =>
+                {
+                    self.search.selected = row;
+                    let hit = match self.search.rows[row] {
+                        sidebar_search::ContentRow::Hit(at) => &self.search.content[at],
+                        _ => unreachable!("the guard matched a hit row"),
+                    };
+                    SideClick::SearchHit(
+                        sidebar_search::absolute(&self.root, &hit.relative_path),
+                        hit.line_number,
+                        hit.ranges.first().map_or(0, |r| r.start),
+                        hit.line_text.clone(),
+                    )
+                }
+                _ => SideClick::None,
+            };
         }
         let top = PAD + CAPTION_H;
         if x >= self.width - STRIP_W && y >= top && y < top + self.list_h {
@@ -568,6 +647,10 @@ impl Sidebar {
 
     pub fn wheel(&mut self, lines: f32, outline: &mut OutlineTree) {
         match self.tab {
+            Tab::Files if self.search.active() => {
+                let max = (self.search.content_h() - self.list_h).max(0.0);
+                self.search.scroll = (self.search.scroll + lines * ROW_H).clamp(0.0, max);
+            }
             Tab::Files => {
                 self.scroll = (self.scroll + lines * ROW_H).clamp(0.0, self.max_scroll());
             }
@@ -595,17 +678,35 @@ impl Sidebar {
         let ui = &theme.ui;
         let width = self.width;
         painter.fill(0.0, 0.0, width, h, 0.0, ui.sidebar_bg);
-        self.list_h = h - 2.0 * PAD - CAPTION_H;
-        // The rows draw under a clip to the list viewport, between the
-        // caption row and the bottom pad, so a cut row ends there.
-        painter.clip(Some((0.0, PAD + CAPTION_H, width, self.list_h)));
+        let searching = self.search_active();
+        let list_top = if searching {
+            sidebar_search::results_top()
+        } else {
+            PAD + CAPTION_H
+        };
+        self.list_h = h - PAD - list_top;
+        // The rows draw under a clip to the list viewport — below the
+        // caption row, or below the query row while a search view is
+        // showing — so a cut row ends there.
+        painter.clip(Some((0.0, list_top, width, self.list_h)));
         match self.tab {
+            Tab::Files if searching => sidebar_search::draw_results(
+                painter,
+                theme,
+                width,
+                self.list_h,
+                &mut self.search,
+                owns_keys,
+            ),
             Tab::Files => self.draw_files(painter, theme, owns_keys),
             Tab::Outline => self.draw_outline(painter, theme, outline, current, owns_keys),
         }
         painter.clip(None);
         self.draw_thumb(painter, theme, outline);
         self.draw_captions(painter, theme, owns_keys);
+        if searching {
+            sidebar_search::draw_field_row(painter, theme, width, &mut self.search, owns_keys);
+        }
         painter.line(
             width - 0.5,
             0.0,
@@ -663,6 +764,11 @@ impl Sidebar {
             painter.text(tx, 7.0, &text, BODY_FAMILY, TEXT_SIZE, weight, color);
             if active {
                 painter.fill(x0, CAPTION_H - 2.0, x1 - x0, 2.0, 1.0, ui.sidebar_dir);
+            }
+            // The Files caption's right end carries the search entry.
+            if tab == Tab::Files {
+                let (sx, sy, _, _) = search_icon_zone(self.width);
+                draw_search_icon(painter, sx, sy, color);
             }
         }
     }
@@ -835,7 +941,7 @@ impl Sidebar {
 /// The row's ground: the accent fill and bar for the open file or the
 /// current heading, the hover fill for a row under attention, nothing
 /// otherwise. The accent look wins when both apply.
-fn draw_row_ground(
+pub(crate) fn draw_row_ground(
     painter: &mut Painter,
     width: f32,
     ry: f32,
@@ -1510,6 +1616,51 @@ mod tests {
             &mut outline,
         );
         assert_eq!(click, SideClick::Open(dir.join("zeta.md")));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Clicking a content result selects it and hands the app its
+    /// landing: the absolute path, the line, the match's place in it,
+    /// and the line as searched.
+    #[test]
+    fn a_content_result_click_hands_over_its_landing() {
+        use crate::ui::sidebar_search::{FilesView, SearchStatus};
+        use crate::workspace_search::ContentHit;
+        use std::ops::Range;
+        use std::sync::Arc;
+        let dir = temp_tree("content-click");
+        let mut side = Sidebar::new(&dir);
+        side.search.open(FilesView::ContentSearch);
+        side.search.status = SearchStatus::Done {
+            truncated: false,
+            skipped: 0,
+        };
+        side.search.content = vec![ContentHit {
+            relative_path: Arc::from("sub/inner.md"),
+            line_number: 42,
+            line_text: Arc::from("pub struct UserService {"),
+            ranges: vec![Range { start: 11, end: 22 }],
+        }];
+        side.search.refresh_rows();
+        let doc = markdown::parse("");
+        let mut outline = OutlineTree::build(&doc);
+        let header_y = sidebar_search::results_top() + 5.0;
+        assert_eq!(
+            side.click(50.0, header_y, &mut outline),
+            SideClick::None,
+            "the header row is not a landing"
+        );
+        let hit_y = sidebar_search::results_top() + ROW_H + 5.0;
+        match side.click(50.0, hit_y, &mut outline) {
+            SideClick::SearchHit(path, line, column, expected) => {
+                assert!(path.ends_with(dir.join("sub").join("inner.md")));
+                assert_eq!(line, 42);
+                assert_eq!(column, 11);
+                assert_eq!(&*expected, "pub struct UserService {");
+            }
+            other => panic!("the hit row answered {other:?}"),
+        }
+        assert_eq!(side.search.selected, 1, "the click selected the line");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

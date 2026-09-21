@@ -1,5 +1,21 @@
 # Changelog
 
+## Unreleased
+
+Workspace search in the sidebar's Files tab, built on ripgrep's own search crates — no external tool, everything off the UI thread.
+
+### Find files
+
+- Press `/` in the Files tab (or click the magnifier in the caption) and type: files match fuzzily across their whole path, ranked best first with the matched characters highlighted, smart about case like every Oryx search.
+- `Enter` opens the selection, `Up`/`Down` move it, `PageUp`/`PageDown` page, `Esc` returns to the tree; the mouse clicks, drags and scrolls the list. The tree's own selection and scroll come back exactly as they were left.
+- The walk respects `.gitignore` and `.ignore` and skips hidden folders, the way `fd` does, and a changed folder re-indexes behind the results rather than in front of them.
+
+### Search in files
+
+- `Ctrl+Shift+F` greps the folder the Files tab is rooted at, in the tab itself: results stream in grouped by file, with line numbers and the matched text highlighted.
+- Plain queries are literal; `Alt+R` (or the `.*` toggle) switches to regular expressions in ripgrep's Rust `regex` flavor — linear-time, without backreferences and lookarounds (the in-document `Ctrl+F` keeps `fancy-regex` with them).
+- `Enter` (or a click) opens the file at the match, verified against the line as the search read it; a file changed since lands on its line rather than nowhere. Binary files are skipped on their first NUL byte, and a file with unsaved edits is searched as it stands in the editor, not as it lies on disk.
+
 ## v1.1.1
 
 A small release for the first two reports from a user, issues #1 and #2 on GitHub. The details, by area:

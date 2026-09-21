@@ -28,6 +28,8 @@ pub enum Command {
     FindNext,
     FindPrev,
     Replace,
+    /// Search in files: the sidebar's Files tab, content view.
+    SearchInFiles,
     LineUp,
     LineDown,
     PaneLeft,
@@ -69,7 +71,7 @@ pub enum Command {
 
 impl Command {
     /// Every variant; the coverage test checks each one against the table.
-    pub const ALL: [Command; 60] = [
+    pub const ALL: [Command; 61] = [
         Command::OpenFile,
         Command::Reload,
         Command::Refetch,
@@ -90,6 +92,7 @@ impl Command {
         Command::FindNext,
         Command::FindPrev,
         Command::Replace,
+        Command::SearchInFiles,
         Command::LineUp,
         Command::LineDown,
         Command::PaneLeft,
@@ -300,6 +303,12 @@ pub const SHORTCUTS: &[Shortcut] = &[
         action: "Find in document",
         section: "Find",
         bindings: &[(Binding::Ctrl("f"), Command::Find)],
+    },
+    Shortcut {
+        keys: "Ctrl+Shift+F",
+        action: "Search in files",
+        section: "Find",
+        bindings: &[(Binding::CtrlShift("f"), Command::SearchInFiles)],
     },
     Shortcut {
         keys: "F3 / Shift+F3",
@@ -1093,6 +1102,12 @@ mod tests {
             command(&Key::Named(NamedKey::F3), false, true),
             Some(Command::FindPrev)
         );
+    }
+
+    #[test]
+    fn ctrl_shift_f_searches_in_files_and_plain_ctrl_f_finds() {
+        assert_eq!(command(&chr("F"), true, true), Some(Command::SearchInFiles));
+        assert_eq!(command(&chr("f"), true, false), Some(Command::Find));
     }
 
     #[test]

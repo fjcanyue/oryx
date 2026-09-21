@@ -46,10 +46,12 @@ use oryx::ui::search::{self, BarHit, ReplaceRow, SearchState};
 use oryx::ui::selection::{self, ModelPos, Selection};
 use oryx::ui::settings::{self, Settings};
 use oryx::ui::sidebar::{self, Sidebar};
+use oryx::ui::sidebar_search::{self, FilesView, SearchStatus};
 use oryx::ui::textfield::{Edit, TextField};
 use oryx::ui::theme_browser::ThemeBrowser;
 use oryx::ui::theme_editor::ThemeEditor;
 use oryx::ui::tooltip;
+use oryx::workspace_search::{self, SearchEvent};
 use winit::application::ApplicationHandler;
 use winit::dpi::{PhysicalPosition, PhysicalSize};
 use winit::event::{
@@ -77,6 +79,10 @@ const REHIGHLIGHT_REST: Duration = Duration::from_millis(400);
 /// How long after a touch pan the emulated mouse stays ignored, long
 /// enough to cover the click Windows synthesizes behind a lifted finger.
 const MOUSE_MUTE: Duration = Duration::from_millis(150);
+
+/// How old the workspace index may be before entering a search view
+/// rescans behind it: the old answers stand while the walk runs.
+const STALE_INDEX: Duration = Duration::from_secs(30);
 
 /// The window icon raster produced by the build script.
 const ICON_64: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/icon_64.rgba"));
@@ -180,6 +186,7 @@ pub fn run(launch: Launch, theme_name: Option<String>) -> anyhow::Result<()> {
         highlighter.start(pending, move || waker());
     }
     let mut parser = ParseWorker::new();
+    let workspace = workspace_search::WorkspaceSearch::new(waker.clone());
     // A book starts its worker through `start_book` once the app owns
     // the media cache; only the markdown prefix starts here.
     if streamed && book.is_none() {
@@ -246,6 +253,7 @@ pub fn run(launch: Launch, theme_name: Option<String>) -> anyhow::Result<()> {
         waker,
         highlighter,
         parser,
+        workspace,
         pending_recolor: Vec::new(),
         last_recolor: Instant::now(),
         parse_pending: streamed,
@@ -324,6 +332,7 @@ pub fn run(launch: Launch, theme_name: Option<String>) -> anyhow::Result<()> {
         note_file: None,
         note_from: None,
         pending_row: None,
+        pending_search_jump: None,
         disk_seen: None,
         disk_check_at: Instant::now(),
         crlf: opened_crlf,
@@ -666,6 +675,9 @@ struct App {
     highlighter: Highlighter,
     /// Background full-parse worker behind a streamed open.
     parser: ParseWorker,
+    /// Background workspace search worker: the Files tab's index,
+    /// fuzzy ranking and grep, woken through the shared waker.
+    workspace: workspace_search::WorkspaceSearch,
     /// Recolors owed to arrived highlights, applied in throttled waves.
     pending_recolor: Vec<(usize, std::ops::Range<usize>)>,
     /// When the last wave ran, pacing the next.
@@ -862,6 +874,9 @@ struct App {
     /// A row to seat at the top of the editor once the layout places
     /// it, the source view's counterpart to `pending_offset`.
     pending_row: Option<usize>,
+    /// A content search result whose file is opening; the jump lands
+    /// when the document stands.
+    pending_search_jump: Option<PendingSearchJump>,
     /// The open file's on-disk identity at last read or write, for the
     /// external-change check.
     disk_seen: Option<(std::time::SystemTime, u64)>,
@@ -931,6 +946,35 @@ fn owner_after(owner: KeyPane, act: PaneAct, sidebar_open: bool) -> KeyPane {
     }
 }
 
+/// A content search result waiting for its file to finish opening:
+/// once the document stands, the line is checked against the text the
+/// search read and the editor lands on the match.
+#[derive(Debug, Clone)]
+struct PendingSearchJump {
+    path: PathBuf,
+    /// The match's line, one-based as the grep counted it.
+    line: u64,
+    /// The match's column in bytes, within the decoded line.
+    column: usize,
+    /// The line as the search read it, so a file changed since tells
+    /// itself apart from a stale offset.
+    expected_line: Arc<str>,
+}
+
+/// The byte offset of a one-based line's start in `source`; the line
+/// past the end answers None.
+fn line_offset(source: &str, line: u64) -> Option<usize> {
+    if line == 0 {
+        return None;
+    }
+    let mut at = 0;
+    for _ in 1..line {
+        let nl = source[at..].find('\n')?;
+        at += nl + 1;
+    }
+    Some(at.min(source.len()))
+}
+
 /// A pointer gesture on the app's own chrome.
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum Drag {
@@ -940,6 +984,8 @@ enum Drag {
     SidebarEdge(f32),
     /// The sidebar's scrollbar thumb; the panel holds the grab.
     SidebarThumb,
+    /// The sidebar search's query field, selecting while dragged.
+    SidebarSearchField,
 }
 
 fn drag_is_edge(drag: Drag) -> bool {
@@ -1044,6 +1090,7 @@ impl App {
             Command::CopyText => self.copy_selection(false),
             Command::CopyMarkdown => self.copy_selection(true),
             Command::Find => self.open_search(),
+            Command::SearchInFiles => self.open_sidebar_search(FilesView::ContentSearch),
             Command::FindNext => self.step_search(true),
             Command::FindPrev => self.step_search(false),
             Command::Replace => self.open_replace(),
@@ -1925,6 +1972,9 @@ impl App {
                 self.pending_row = None;
                 self.pending_offset = None;
                 self.scroll_y = scroll;
+                // A file the app itself created or named is one the
+                // standing index has never walked.
+                self.workspace.refresh();
                 self.show_notice("Saved");
                 true
             }
@@ -1951,6 +2001,7 @@ impl App {
             return;
         }
         self.open_file(&target, true);
+        self.workspace.refresh();
         self.toggle_edit();
     }
 
@@ -3460,7 +3511,7 @@ impl App {
             // outside-click manner; the click still acts on what it hit,
             // and the document owns every key again.
             self.close_search();
-            if self.sidebar_edge_press() {
+            if self.sidebar_edge_press() || self.sidebar_search_field_press() {
             } else if (self.cursor.x as f32) < self.inset() && self.sidebar.is_some() {
                 let (x, y) = self.ui_cursor();
                 self.sidebar_click(x, y);
@@ -4045,6 +4096,9 @@ impl App {
         }
         self.config.last_dir = text;
         config::save(&self.config);
+        // Every root move lands here; the search worker follows the
+        // panel wherever it goes.
+        self.sync_search_root();
     }
 
     /// Routes a click inside the panel: a tab switch persists, a file
@@ -4066,6 +4120,17 @@ impl App {
                 if self.guard_unsaved(confirm::Pending::Open(path.clone(), false)) {
                     self.open_file(&path, false);
                 }
+            }
+            sidebar::SideClick::OpenSearch => {
+                self.open_sidebar_search(FilesView::FileSearch);
+            }
+            sidebar::SideClick::SearchHit(path, line, column, expected) => {
+                self.open_search_hit(PendingSearchJump {
+                    path,
+                    line,
+                    column,
+                    expected_line: expected,
+                });
             }
             sidebar::SideClick::Jump(block) => self.jump_to_heading(block),
             sidebar::SideClick::Tab => {
@@ -4233,6 +4298,433 @@ impl App {
         self.request_redraw();
     }
 
+    /// Folds the search worker's arrived events into the Files tab's
+    /// search state. An answer carries the token it was asked under;
+    /// one that no longer stands is dropped here, the second wall
+    /// after the worker's own cancellation.
+    fn fold_workspace_search(&mut self) {
+        let token = self.workspace.token();
+        let mut touched = false;
+        for event in self.workspace.drain() {
+            match event {
+                SearchEvent::IndexStarted { .. } => {
+                    if let Some(side) = self.sidebar.as_mut() {
+                        if side.search.active() {
+                            side.search.status = SearchStatus::Indexing;
+                            touched = true;
+                        }
+                    }
+                }
+                SearchEvent::IndexReady { files, .. } => {
+                    if let Some(side) = self.sidebar.as_mut() {
+                        side.search.status = SearchStatus::Idle { files };
+                        touched = true;
+                    }
+                    // A query typed while the walk ran never met an
+                    // index; it runs again now that one stands.
+                    self.run_current_search();
+                }
+                SearchEvent::FileResults {
+                    token: asked,
+                    results,
+                } if asked == token => {
+                    if let Some(side) = self.sidebar.as_mut() {
+                        side.search.files = results;
+                        side.search.selected = 0;
+                        side.search.scroll = 0.0;
+                        touched = true;
+                    }
+                }
+                SearchEvent::ContentBatch {
+                    token: asked,
+                    results,
+                } if asked == token => {
+                    if let Some(side) = self.sidebar.as_mut() {
+                        side.search.content.extend(results);
+                        side.search.refresh_rows();
+                        touched = true;
+                    }
+                }
+                SearchEvent::Finished {
+                    token: asked,
+                    truncated,
+                    skipped,
+                } if asked == token => {
+                    if let Some(side) = self.sidebar.as_mut() {
+                        side.search.status = SearchStatus::Done { truncated, skipped };
+                        touched = true;
+                    }
+                }
+                SearchEvent::Error {
+                    token: asked,
+                    message,
+                } if asked.is_none_or(|asked| asked == token) => {
+                    if let Some(side) = self.sidebar.as_mut() {
+                        side.search.status = match asked {
+                            Some(_) => SearchStatus::InvalidPattern,
+                            None => SearchStatus::Error(message),
+                        };
+                        touched = true;
+                    }
+                }
+                _ => {}
+            }
+        }
+        if touched {
+            self.request_redraw();
+        }
+    }
+
+    /// Hands the search worker the sidebar's root. The worker's own
+    /// repeat check makes this cheap to call on every root move.
+    fn sync_search_root(&mut self) {
+        if let Some(side) = self.sidebar.as_ref() {
+            self.workspace.sync_root(side.root());
+        }
+    }
+
+    /// Re-issues the active search view's standing query.
+    fn run_current_search(&mut self) {
+        let Some(side) = self.sidebar.as_mut() else {
+            return;
+        };
+        if !side.search.active() {
+            return;
+        }
+        let view = side.search.view;
+        match view {
+            FilesView::FileSearch => {
+                let query = side.search.file_query.text().to_string();
+                side.search.status = SearchStatus::Searching;
+                self.workspace
+                    .search_files(&query, workspace_search::MAX_FILE_RESULTS);
+            }
+            FilesView::ContentSearch => {
+                let query = side.search.content_query.text().to_string();
+                let regex = side.search.regex;
+                side.search.status = SearchStatus::Searching;
+                let buffer = self.dirty_buffer_override();
+                self.workspace.search_content(
+                    &query,
+                    regex,
+                    workspace_search::MAX_CONTENT_HITS,
+                    buffer,
+                );
+            }
+            FilesView::Tree => {}
+        }
+        self.request_redraw();
+    }
+
+    /// The current document's unsaved text, when it is dirty and lives
+    /// inside the workspace: the search answers against what the
+    /// reader sees. A clean or outside-the-root document contributes
+    /// nothing; an unsaved note has no disk file to shadow.
+    fn dirty_buffer_override(&mut self) -> Option<workspace_search::BufferOverride> {
+        if !self.edits_unsaved() {
+            return None;
+        }
+        // The ledger's emission is the same byte-exact text a save
+        // would write; only a file that read cleanly can edit, so it
+        // is UTF-8.
+        let bytes = self.ledger.as_ref()?.emit();
+        let text = String::from_utf8(bytes).ok()?;
+        let relative = self.path.as_ref().and_then(|path| {
+            let root = self.sidebar.as_ref()?.root();
+            let rel = path.strip_prefix(root).ok()?;
+            let text = rel.to_str()?.replace(std::path::MAIN_SEPARATOR, "/");
+            (!text.is_empty()).then(|| Arc::from(text))
+        });
+        Some(workspace_search::BufferOverride {
+            relative_path: relative,
+            text: Arc::from(text),
+        })
+    }
+
+    /// Enters one of the Files tab's search views, opening the panel
+    /// when it is closed and the keys moving to it. An index grown
+    /// stale answers from what it holds while a fresh walk runs
+    /// behind it.
+    fn open_sidebar_search(&mut self, view: FilesView) {
+        if self.sidebar.is_none() {
+            self.open_sidebar(true);
+        }
+        if let Some(side) = self.sidebar.as_mut() {
+            side.set_tab(sidebar::Tab::Files);
+            self.config.sidebar_tab = sidebar::Tab::Files;
+            config::save(&self.config);
+            side.search.open(view);
+        }
+        self.sync_search_root();
+        self.workspace.refresh_if_stale(STALE_INDEX);
+        self.move_ownership(PaneAct::ClickSidebar);
+        self.run_current_search();
+    }
+
+    /// Moves the search results' selection.
+    fn search_move(&mut self, delta: i32) {
+        if let Some(side) = self.sidebar.as_mut() {
+            let list_h = side.list_h();
+            side.search.move_selection(delta, list_h);
+        }
+        self.request_redraw();
+    }
+
+    /// Pages the search results' selection.
+    fn search_page(&mut self, down: bool) {
+        if let Some(side) = self.sidebar.as_mut() {
+            let list_h = side.list_h();
+            side.search.page(down, list_h);
+        }
+        self.request_redraw();
+    }
+
+    /// Opens the selected search result through the same guarded path
+    /// the tree's rows take. The search stays open for the next result.
+    fn open_search_result(&mut self, path: PathBuf) {
+        if self.guard_unsaved(confirm::Pending::Open(path.clone(), false)) {
+            self.open_file(&path, false);
+        }
+    }
+
+    /// Opens a content result's file and parks the jump to its match,
+    /// landing when the document stands. The search stays open for the
+    /// next result.
+    fn open_search_hit(&mut self, jump: PendingSearchJump) {
+        let path = jump.path.clone();
+        let same = self.path.as_deref() == Some(path.as_path());
+        self.pending_search_jump = Some(jump);
+        if same {
+            self.resolve_pending_search_jump();
+        } else if self.guard_unsaved(confirm::Pending::Open(path.clone(), false)) {
+            self.open_file(&path, false);
+        }
+    }
+
+    /// Lands a parked search jump once its file stands open. A line
+    /// the delivered source has not reached waits for the parse to
+    /// bring it; a line that no longer reads as the search saw it
+    /// still lands, at the line's head rather than the match's own
+    /// column. The landing is the editor at the match: the caret
+    /// marks it and the row seats under it.
+    fn resolve_pending_search_jump(&mut self) {
+        let Some(jump) = self.pending_search_jump.clone() else {
+            return;
+        };
+        if self.path.as_deref() != Some(jump.path.as_path()) {
+            self.pending_search_jump = None;
+            return;
+        }
+        let Some(at) = line_offset(&self.document.source, jump.line) else {
+            if self.parse_pending {
+                return;
+            }
+            self.pending_search_jump = None;
+            return;
+        };
+        self.pending_search_jump = None;
+        let rest = &self.document.source[at.min(self.document.source.len())..];
+        let line_text = rest.split_once('\n').map_or(rest, |(l, _)| l);
+        let line_text = line_text.trim_end_matches('\r');
+        // The file changed since the search read it: the line still
+        // lands, without trusting the old column.
+        let column = if line_text == &*jump.expected_line {
+            jump.column.min(line_text.len())
+        } else {
+            0
+        };
+        let start = at + column;
+        if self.mode != edit::Mode::Edit {
+            let path = self.path.clone().unwrap_or_default();
+            match edit::toggle(edit::Mode::Read, load::detect(&path), self.lossy) {
+                Ok(edit::Mode::Edit) => self.enter_edit(),
+                Ok(edit::Mode::Read) => return,
+                Err(refusal) => {
+                    self.show_notice(refusal.message());
+                    return;
+                }
+            }
+        }
+        self.caret = Some(Caret::at(start));
+        self.selection = None;
+        self.sel_anchor = None;
+        self.seat_editor_on(start);
+        self.wake_caret();
+        self.request_redraw();
+    }
+
+    /// The Files tab's search views' keys: the field takes the typing,
+    /// the arrows and Enter drive the results, Esc returns to the
+    /// tree. Reports whether the key was claimed so the ladder stops.
+    fn sidebar_search_key(&mut self, key: &Key, ctrl: bool, shift: bool, alt: bool) -> bool {
+        /// What a press asked for, computed under the panel's borrow.
+        enum Ask {
+            Pass,
+            Claimed,
+            Close,
+            Open(PathBuf),
+            /// A content result's landing: file, line, column and the
+            /// line as the search read it.
+            Jump {
+                path: PathBuf,
+                line: u64,
+                column: usize,
+                expected: Arc<str>,
+            },
+            Move(i32),
+            Page(bool),
+            Regex,
+            Rerun,
+        }
+        let ask = {
+            let Some(side) = self.sidebar.as_mut() else {
+                return false;
+            };
+            if !side.search.active() {
+                return false;
+            }
+            match key {
+                Key::Named(NamedKey::Escape) => Ask::Close,
+                Key::Named(NamedKey::Enter) => match side.search.selected_file() {
+                    Some(hit) => {
+                        Ask::Open(sidebar_search::absolute(side.root(), &hit.relative_path))
+                    }
+                    None => match side.search.selected_line() {
+                        Some(hit) => Ask::Jump {
+                            path: sidebar_search::absolute(side.root(), &hit.relative_path),
+                            line: hit.line_number,
+                            column: hit.ranges.first().map_or(0, |r| r.start),
+                            expected: hit.line_text.clone(),
+                        },
+                        None => Ask::Claimed,
+                    },
+                },
+                Key::Named(NamedKey::ArrowUp) => Ask::Move(-1),
+                Key::Named(NamedKey::ArrowDown) => Ask::Move(1),
+                Key::Named(NamedKey::PageUp) => Ask::Page(false),
+                Key::Named(NamedKey::PageDown) => Ask::Page(true),
+                // Alt with a character is the panel's own chord family,
+                // the find bar's Alt+R among them; anything else passes.
+                Key::Character(c) if alt => {
+                    let content = side.search.view == FilesView::ContentSearch;
+                    if content && c.eq_ignore_ascii_case("r") {
+                        Ask::Regex
+                    } else {
+                        Ask::Pass
+                    }
+                }
+                _ => match side.search.query_field_mut().key(key, ctrl, shift) {
+                    Edit::Changed => Ask::Rerun,
+                    Edit::Handled => Ask::Claimed,
+                    Edit::Ignored => Ask::Pass,
+                },
+            }
+        };
+        match ask {
+            Ask::Pass => false,
+            Ask::Claimed => true,
+            Ask::Close => {
+                if let Some(side) = self.sidebar.as_mut() {
+                    side.search.close();
+                }
+                self.request_redraw();
+                true
+            }
+            Ask::Open(path) => {
+                self.open_search_result(path);
+                true
+            }
+            Ask::Jump {
+                path,
+                line,
+                column,
+                expected,
+            } => {
+                self.open_search_hit(PendingSearchJump {
+                    path,
+                    line,
+                    column,
+                    expected_line: expected,
+                });
+                true
+            }
+            Ask::Move(delta) => {
+                self.search_move(delta);
+                true
+            }
+            Ask::Page(down) => {
+                self.search_page(down);
+                true
+            }
+            Ask::Regex => {
+                if let Some(side) = self.sidebar.as_mut() {
+                    side.search.regex = !side.search.regex;
+                }
+                self.run_current_search();
+                true
+            }
+            Ask::Rerun => {
+                self.run_current_search();
+                true
+            }
+        }
+    }
+
+    /// A press on the search row: the regex toggle flips, the query
+    /// field takes the caret (a word on the second click, everything
+    /// on the third) and a drag selects. Reports whether the press
+    /// belonged to the row.
+    fn sidebar_search_field_press(&mut self) -> bool {
+        let (ux, uy) = self.ui_cursor();
+        let pressed = {
+            let Some(side) = self.sidebar.as_mut() else {
+                return false;
+            };
+            if !side.search_active() {
+                return false;
+            }
+            let content = side.search.view == FilesView::ContentSearch;
+            if content {
+                let (tx, ty, tw, th) = sidebar_search::toggle_rect(side.width());
+                if ux >= tx && ux < tx + tw && uy >= ty && uy < ty + th {
+                    side.search.regex = !side.search.regex;
+                    true
+                } else {
+                    false
+                }
+            } else {
+                false
+            }
+        };
+        if pressed {
+            self.run_current_search();
+            return true;
+        }
+        let field = {
+            let Some(side) = self.sidebar.as_mut() else {
+                return false;
+            };
+            if !side.search_active() {
+                return false;
+            }
+            let content = side.search.view == FilesView::ContentSearch;
+            let (fx, fy, fw, fh) = sidebar_search::field_rect(side.width(), content);
+            if !(ux >= fx && ux < fx + fw && uy >= fy - 4.0 && uy < fy + fh + 4.0) {
+                return false;
+            }
+            let view = side.search.query_view().clone();
+            side.search
+                .query_field_mut()
+                .click(ux - view.left, &view.offsets, Instant::now());
+            true
+        };
+        if field {
+            self.drag = Some(Drag::SidebarSearchField);
+            self.request_redraw();
+        }
+        field
+    }
+
     /// Persists whether the panel is open and how wide, after a gesture
     /// ends or the panel is toggled, never per frame.
     fn save_sidebar_state(&mut self) {
@@ -4316,6 +4808,7 @@ impl App {
             .unwrap_or(f32::MAX);
         side.set_width(self.config.sidebar_width, window_w);
         self.sidebar = Some(side);
+        self.sync_search_root();
     }
 
     /// A file or folder dropped on the window: the folder roots the
@@ -4494,6 +4987,10 @@ impl App {
             }
             side.set_current(&path);
         }
+        // The reroot above does not pass through `sidebar_at`, and the
+        // remember-dir below can skip a repeat folder; the search
+        // worker follows the root whatever path moved it.
+        self.sync_search_root();
         if let Some(gfx) = self.gfx.as_ref() {
             gfx.window.set_title(&window_title(
                 self.document.title.as_deref(),
@@ -4516,6 +5013,10 @@ impl App {
                 }
             }
         }
+        // A search jump that opened this file lands now; one aimed at
+        // a line the streamed open has not delivered waits for the
+        // parse, which the pending row machinery carries.
+        self.resolve_pending_search_jump();
         self.request_redraw();
     }
 
@@ -6051,6 +6552,9 @@ impl ApplicationHandler for App {
         }
         self.fold_parse();
         self.fold_highlights();
+        self.fold_workspace_search();
+        // A jump held for the parse's delivery lands with it.
+        self.resolve_pending_search_jump();
     }
 
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
@@ -6194,6 +6698,9 @@ impl ApplicationHandler for App {
                         self.overlay_result(result);
                     }
                     _ if self.search_key(&logical_key, ctrl, shift) => {}
+                    // The Files tab's search views take the whole
+                    // keyboard next, the way the find bar does.
+                    _ if self.sidebar_search_key(&logical_key, ctrl, shift, alt) => {}
                     // A search field has the keyboard: what the bar did
                     // not claim acts only when it is app-wide. Nothing
                     // reaches the editor's own keys or the document's
@@ -6205,6 +6712,18 @@ impl ApplicationHandler for App {
                     }
                     _ if self.mode == edit::Mode::Edit
                         && self.edit_key(&logical_key, ctrl, shift) => {}
+                    // A plain slash over the Files tree, the panel
+                    // owning the keys, opens the file search.
+                    None if self.sidebar_owns_keys()
+                        && self.mode == edit::Mode::Read
+                        && self.sidebar.as_ref().is_some_and(|s| {
+                            s.tab() == sidebar::Tab::Files && !s.search.active()
+                        })
+                        && matches!(&logical_key, Key::Character(c)
+                            if c.as_str() == "/" && !ctrl && !alt) =>
+                    {
+                        self.open_sidebar_search(FilesView::FileSearch);
+                    }
                     Some(Command::LineUp) if self.sidebar_owns_keys() => {
                         self.sidebar_move(-1);
                     }
@@ -6324,6 +6843,17 @@ impl ApplicationHandler for App {
                     let y = position.y as f32 / self.scale;
                     if let Some(side) = self.sidebar.as_mut() {
                         side.drag_thumb(y, &mut self.outline);
+                    }
+                    self.request_redraw();
+                } else if matches!(self.drag, Some(Drag::SidebarSearchField)) {
+                    let ux = position.x as f32 / self.scale;
+                    if let Some(side) = self.sidebar.as_mut() {
+                        if side.search_active() {
+                            let view = side.search.query_view().clone();
+                            side.search
+                                .query_field_mut()
+                                .drag_to(ux - view.left, &view.offsets);
+                        }
                     }
                     self.request_redraw();
                 } else if self.drag.is_some() {
@@ -6749,6 +7279,24 @@ mod tests {
             super::window_title(None, Some(Path::new("/docs/notes.txt")), true, true),
             "● notes.txt · editing · oryx"
         );
+    }
+
+    #[test]
+    fn line_offset_walks_to_a_one_based_line() {
+        let text = "alpha\nbeta\ngamma";
+        assert_eq!(super::line_offset(text, 1), Some(0));
+        assert_eq!(super::line_offset(text, 2), Some(6));
+        assert_eq!(super::line_offset(text, 3), Some(11));
+        assert_eq!(super::line_offset(text, 4), None, "past the last line");
+        assert_eq!(super::line_offset(text, 0), None, "lines count from one");
+        assert_eq!(super::line_offset("", 1), Some(0));
+        assert_eq!(super::line_offset("", 2), None);
+    }
+
+    #[test]
+    fn a_trailing_newline_makes_one_more_empty_line() {
+        assert_eq!(super::line_offset("a\nb\n", 3), Some(4));
+        assert_eq!(super::line_offset("a\nb\n", 4), None);
     }
 
     #[test]
