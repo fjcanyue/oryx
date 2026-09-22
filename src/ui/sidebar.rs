@@ -1525,6 +1525,34 @@ mod tests {
         );
     }
 
+    /// A matched Chinese character is three bytes wide: highlighting
+    /// it must cut the segment at its boundary, not a byte into it.
+    #[test]
+    fn painting_a_chinese_matched_path_cuts_on_the_boundary() {
+        use crate::ui::sidebar_search::{FilesView, SearchStatus};
+        use crate::workspace_search::FileHit;
+        let dir = temp_tree("chinese-path");
+        let mut side = Sidebar::new(&dir);
+        side.search.open(FilesView::FileSearch);
+        side.search.status = SearchStatus::Done {
+            truncated: false,
+            skipped: 0,
+        };
+        side.search.files = vec![FileHit {
+            relative_path: std::sync::Arc::from("src/笔记.md"),
+            basename_start: 4,
+            score: 0,
+            // The byte offsets of 笔 and 记.
+            matched: vec![4, 7],
+        }];
+        let doc = markdown::parse("");
+        let mut outline = OutlineTree::build(&doc);
+        let mut fonts = FontStore::new();
+        let theme = Theme::default_dark();
+        let _pixmap = painted(&mut side, &mut outline, &mut fonts, &theme, 260, 300);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
     #[test]
     fn hover_follows_the_row_under_the_mouse_and_reports_changes() {
         let dir = temp_tree("hover");
