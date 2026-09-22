@@ -4465,16 +4465,16 @@ fn layout_mermaid(
     avail: f32,
     out: &mut LayoutDoc,
 ) -> f32 {
-    // The reading theme picks the palette, and the palette salts the
-    // cache key: a theme switch misses by construction.
-    let palette = mermaid::MermaidTheme::from_oryx(theme);
-    let uri = mermaid::cache_key(text, &palette).uri();
+    // The reading theme picks the presentation, and the palette salts
+    // the cache key: a theme switch misses by construction.
+    let presentation = mermaid::MermaidPresentation::from_oryx(theme);
+    let uri = mermaid::cache_key(text, &presentation).uri();
     // The export's pass reads pixels synchronously, so it renders in
     // place; the interactive path queues the render and holds the plain
     // placeholder in the seat until the arrival relayouts.
     if cfg.print {
         if media.generated(&uri).is_none() {
-            match mermaid::render(text, &palette) {
+            match mermaid::render(text, &presentation) {
                 Ok(rendered) => media.register_generated_svg(
                     uri.clone(),
                     rendered.svg,
@@ -4516,7 +4516,7 @@ fn layout_mermaid(
             }
             state => {
                 if state == MermaidState::Missing {
-                    media.queue_mermaid(uri.clone(), text.to_string(), palette);
+                    media.queue_mermaid(uri.clone(), text.to_string(), presentation);
                 }
                 return layout_mermaid_pending(fonts, theme, cfg, block_index, x0, y0, avail, out);
             }

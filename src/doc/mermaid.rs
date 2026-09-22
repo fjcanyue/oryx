@@ -11,8 +11,11 @@ use merman::render::{
     HostThemeRoles,
 };
 
+use crate::doc::mermaid_theme::MermaidAppearance;
 use crate::style::fonts::BODY_FAMILY;
-use crate::style::theme::{contrast, hex_string, Rgba, Theme};
+use crate::style::theme::hex_string;
+
+pub use crate::doc::mermaid_theme::MermaidPresentation;
 
 /// Oryx's Mermaid error. The renderer's own error type never crosses
 /// this module; `Parse` and `Render` carry its message, which reading
@@ -43,132 +46,51 @@ impl std::fmt::Display for MermaidError {
     }
 }
 
-/// The colors a diagram draws with, one role per reading surface.
-/// `Default` holds the renderer's own classic palette; the theme
-/// mapping lands in a later phase.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct MermaidTheme {
-    pub background: Rgba,
-    pub foreground: Rgba,
-    pub primary: Rgba,
-    pub border: Rgba,
-    pub line: Rgba,
-    pub accent: Rgba,
-}
-
-impl Default for MermaidTheme {
-    fn default() -> Self {
-        MermaidTheme {
-            background: Rgba {
-                r: 255,
-                g: 255,
-                b: 255,
-                a: 255,
-            },
-            foreground: Rgba {
-                r: 51,
-                g: 51,
-                b: 51,
-                a: 255,
-            },
-            primary: Rgba {
-                r: 0xEC,
-                g: 0xEC,
-                b: 0xFF,
-                a: 255,
-            },
-            border: Rgba {
-                r: 0x7B,
-                g: 0x88,
-                b: 0xA8,
-                a: 255,
-            },
-            line: Rgba {
-                r: 0x2F,
-                g: 0x3B,
-                b: 0x4D,
-                a: 255,
-            },
-            accent: Rgba {
-                r: 0xFF,
-                g: 0xFF,
-                b: 0xDE,
-                a: 255,
-            },
-        }
-    }
-}
-
-impl MermaidTheme {
-    /// The reading theme's palette as diagram roles: the page behind,
-    /// the body text, the code panel and its border, the rule line, and
-    /// the link accent. An adapter, not Theme fields: Mermaid owns
-    /// nothing in the core palette.
-    pub fn from_oryx(theme: &Theme) -> Self {
-        MermaidTheme {
-            background: theme.surface.background,
-            foreground: theme.text.body,
-            primary: theme.blocks.code_bg,
-            border: theme.blocks.code_border,
-            line: theme.surface.foreground,
-            accent: theme.text.link,
-        }
-    }
-
-    /// The renderer's theme: this palette's six roles as Merman host
-    /// roles, everything the six miss left for Merman to derive — note,
-    /// actor, cluster and series colors come from the base set, not
-    /// from twenty more Theme fields. The appearance the derivations
-    /// key on is the ground's own lightness; the diagram font is the
-    /// body font resvg's generic families already resolve to; the
-    /// output is the resvg-safe editor preset, because Oryx's consumer
-    /// of the svg is resvg/usvg, not a browser.
-    fn host_profile(&self) -> HostThemeProfile {
-        HostThemeProfile {
-            appearance: self.appearance(),
-            font_family: Some(format!("\"{BODY_FAMILY}\", sans-serif")),
-            roles: HostThemeRoles {
-                canvas: Some(hex_string(self.background)),
-                surface: Some(hex_string(self.primary)),
-                surface_alt: Some(hex_string(self.accent)),
-                text: Some(hex_string(self.foreground)),
-                border: Some(hex_string(self.border)),
-                line: Some(hex_string(self.line)),
-                // Labels sit where edges cross; the ground behind them
-                // keeps the text legible in both palettes.
-                edge_label_background: Some(hex_string(self.background)),
-                ..HostThemeRoles::default()
-            },
-            series_palette: [self.accent, self.line, self.border, self.primary]
-                .iter()
-                .map(|color| hex_string(*color))
-                .collect(),
-            output: HostThemeOutput::resvg_safe_editor(),
-            ..HostThemeProfile::default()
-        }
-    }
-
-    /// Which way Merman derives its unset roles: a ground lighter
-    /// against black than white reads light. The crate's own contrast
-    /// math answers, crossover at mid-gray.
-    fn appearance(&self) -> HostThemeAppearance {
-        let black = Rgba {
-            r: 0,
-            g: 0,
-            b: 0,
-            a: 255,
-        };
-        let white = Rgba {
-            r: 255,
-            g: 255,
-            b: 255,
-            a: 255,
-        };
-        if contrast(self.background, black) > contrast(self.background, white) {
-            HostThemeAppearance::Light
-        } else {
-            HostThemeAppearance::Dark
-        }
+/// The presentation as Merman's host theme: the palette's roles carry
+/// the host-level contract Merman derives its long tail from, the
+/// presentation's explicit theme variables pin the contract variables
+/// over those derivations, and the family config rides along as site
+/// config. The appearance the derivations key on is the palette's own;
+/// the diagram font is the body font resvg's generic families already
+/// resolve to; the output is the resvg-safe editor preset, because
+/// Oryx's consumer of the svg is resvg/usvg, not a browser.
+fn host_profile(presentation: &MermaidPresentation) -> HostThemeProfile {
+    let palette = &presentation.palette;
+    HostThemeProfile {
+        appearance: match palette.appearance {
+            MermaidAppearance::Light => HostThemeAppearance::Light,
+            MermaidAppearance::Dark => HostThemeAppearance::Dark,
+        },
+        font_family: Some(format!("\"{BODY_FAMILY}\", sans-serif")),
+        roles: HostThemeRoles {
+            canvas: Some(hex_string(palette.canvas)),
+            surface: Some(hex_string(palette.surface)),
+            surface_alt: Some(hex_string(palette.surface_alt)),
+            surface_muted: Some(hex_string(palette.surface_muted)),
+            text: Some(hex_string(palette.text)),
+            subtle_text: Some(hex_string(palette.muted_text)),
+            border: Some(hex_string(palette.border)),
+            line: Some(hex_string(palette.line)),
+            edge_label_background: Some(hex_string(palette.label_surface)),
+            cluster_background: Some(hex_string(palette.surface_muted)),
+            cluster_border: Some(hex_string(palette.border)),
+            note_background: Some(hex_string(palette.surface_alt)),
+            note_border: Some(hex_string(palette.border)),
+            note_text: Some(hex_string(palette.text)),
+            actor_background: Some(hex_string(palette.surface)),
+            actor_border: Some(hex_string(palette.border)),
+            actor_text: Some(hex_string(palette.text)),
+            activation_background: Some(hex_string(palette.surface_alt)),
+            activation_border: Some(hex_string(palette.border)),
+            error: Some(hex_string(palette.danger)),
+            warning: Some(hex_string(palette.warning)),
+            success: Some(hex_string(palette.success)),
+        },
+        series_palette: palette.series.iter().map(|color| hex_string(*color)).collect(),
+        output: HostThemeOutput::resvg_safe_editor(),
+        theme_variables: presentation.theme_variables.to_json(),
+        site_config: presentation.family_config.clone(),
+        ..HostThemeProfile::default()
     }
 }
 
@@ -180,13 +102,17 @@ pub struct MermaidRender {
     pub height: f32,
 }
 
-/// The cache namespace version: bump it when renderer behavior changes
-/// and every old entry misses. The renderer swap from
-/// mermaid-rs-renderer to Merman re-lays-out every diagram, so the old
-/// identity must not survive.
-pub const CACHE_VERSION: &str = "oryx-merman-0.7-v1";
+/// The renderer identity: bump it when the pinned Merman version or
+/// its output behavior changes and every old entry misses.
+pub const RENDERER_VERSION: &str = "oryx-merman-0.7-v1";
 
-/// A diagram's identity in the media cache: the version, the source,
+/// The theme policy identity: bump it when the palette projection or
+/// the theme-variable mapping changes, so every old entry misses. The
+/// font is part of the policy (one body family, one preset pipeline),
+/// so it needs no separate seat in the key.
+pub const THEME_POLICY_VERSION: &str = "oryx-merman-theme-v3";
+
+/// A diagram's identity in the media cache: the versions, the source,
 /// and the theme fingerprint hashed together. A typed key, not a bare
 /// String: same source under a different theme must not hit.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -206,9 +132,14 @@ impl MermaidCacheKey {
     }
 }
 
-/// FNV-1a, the hash the fetch cache already keys by, fed the version,
-/// the theme's six roles, then the source.
-pub fn cache_key(source: &str, theme: &MermaidTheme) -> MermaidCacheKey {
+/// FNV-1a, the hash the fetch cache already keys by, fed the renderer
+/// and policy versions, the whole semantic palette (the theme
+/// variables are a deterministic projection of it, so hashing the map
+/// too would hash the same colors twice), then the source. Only the
+/// palette salts, not the whole reading theme — retinting the sidebar
+/// must not re-render every diagram.
+pub fn cache_key(source: &str, presentation: &MermaidPresentation) -> MermaidCacheKey {
+    let palette = &presentation.palette;
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
     let mut feed = |bytes: &[u8]| {
         for byte in bytes {
@@ -216,15 +147,32 @@ pub fn cache_key(source: &str, theme: &MermaidTheme) -> MermaidCacheKey {
             hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
         }
     };
-    feed(CACHE_VERSION.as_bytes());
+    feed(RENDERER_VERSION.as_bytes());
+    feed(THEME_POLICY_VERSION.as_bytes());
+    feed(&[match palette.appearance {
+        MermaidAppearance::Light => 0,
+        MermaidAppearance::Dark => 1,
+    }]);
     for color in [
-        theme.background,
-        theme.foreground,
-        theme.primary,
-        theme.border,
-        theme.line,
-        theme.accent,
-    ] {
+        palette.canvas,
+        palette.text,
+        palette.muted_text,
+        palette.surface,
+        palette.surface_alt,
+        palette.surface_muted,
+        palette.label_surface,
+        palette.border,
+        palette.line,
+        palette.accent,
+        palette.info,
+        palette.success,
+        palette.warning,
+        palette.danger,
+    ]
+    .into_iter()
+    .chain(palette.series)
+    .chain(palette.on_series)
+    {
         feed(&[color.r, color.g, color.b, color.a]);
     }
     feed(source.as_bytes());
@@ -235,18 +183,19 @@ pub fn cache_key(source: &str, theme: &MermaidTheme) -> MermaidCacheKey {
 /// source arrives trimmed by the caller or here; empty never reaches
 /// the renderer. Strict parsing, so a bad diagram lands in the error
 /// panel instead of a guessed-at picture; the vendored text metrics
-/// Mermaid browsers run on; the host theme's resvg-safe editor output,
-/// because Oryx's consumer of the svg is resvg/usvg — the profile
-/// carries the pipeline, so the plain render call already runs it.
-pub fn render(source: &str, theme: &MermaidTheme) -> Result<MermaidRender, MermaidError> {
+/// Mermaid browsers run on; the presentation's resvg-safe editor
+/// output, because Oryx's consumer of the svg is resvg/usvg — the
+/// profile carries the pipeline, so the plain render call already runs
+/// it.
+pub fn render(source: &str, presentation: &MermaidPresentation) -> Result<MermaidRender, MermaidError> {
     let source = source.trim();
     if source.is_empty() {
         return Err(MermaidError::Empty);
     }
-    let key = cache_key(source, theme);
+    let key = cache_key(source, presentation);
     let renderer = HeadlessRenderer::new()
         .with_strict_parsing()
-        .with_host_theme(&theme.host_profile())
+        .with_host_theme(&host_profile(presentation))
         .with_vendored_text_measurer()
         .with_diagram_id(&key.svg_id());
     let svg = renderer
@@ -330,10 +279,59 @@ fn dimensions(svg: &str) -> Result<(f32, f32), MermaidError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::doc::mermaid_theme::SERIES_SLOTS;
+    use crate::style::theme::{parse_hex, Rgba, Theme};
 
     fn rendered(source: &str) -> MermaidRender {
-        render(source, &MermaidTheme::default())
+        render(source, &light_presentation())
             .unwrap_or_else(|err| panic!("a valid diagram renders: {err}"))
+    }
+
+    /// A light palette good enough to read, the readable counterpart
+    /// to the compiled-in dark one.
+    fn light_theme() -> Theme {
+        let mut theme = Theme::default_dark();
+        theme.surface.background = Rgba {
+            r: 0xFF,
+            g: 0xFF,
+            b: 0xFF,
+            a: 255,
+        };
+        theme.surface.foreground = Rgba {
+            r: 0x18,
+            g: 0x18,
+            b: 0x1D,
+            a: 255,
+        };
+        theme.text.body = Rgba {
+            r: 0x18,
+            g: 0x18,
+            b: 0x1D,
+            a: 255,
+        };
+        theme.text.link = Rgba {
+            r: 0x0B,
+            g: 0x5C,
+            b: 0xB8,
+            a: 255,
+        };
+        theme.blocks.code_bg = Rgba {
+            r: 0xF3,
+            g: 0xF4,
+            b: 0xF8,
+            a: 255,
+        };
+        theme.blocks.code_border = Rgba {
+            r: 0xC5,
+            g: 0xC9,
+            b: 0xD4,
+            a: 255,
+        };
+        theme
+    }
+
+    fn light_presentation() -> MermaidPresentation {
+        MermaidPresentation::from_oryx(&light_theme())
     }
 
     #[test]
@@ -390,11 +388,11 @@ mod tests {
     #[test]
     fn empty_source_is_rejected_before_the_renderer() {
         assert_eq!(
-            render("", &MermaidTheme::default()).unwrap_err(),
+            render("", &light_presentation()).unwrap_err(),
             MermaidError::Empty
         );
         assert_eq!(
-            render("  \n\t", &MermaidTheme::default()).unwrap_err(),
+            render("  \n\t", &light_presentation()).unwrap_err(),
             MermaidError::Empty
         );
     }
@@ -405,7 +403,7 @@ mod tests {
         // message reads as EOF where the closing `end` was expected.
         let err = render(
             "flowchart LR\n    subgraph X\n    A --> B",
-            &MermaidTheme::default(),
+            &light_presentation(),
         )
         .expect_err("an unclosed subgraph fails");
         assert!(
@@ -420,81 +418,22 @@ mod tests {
 
     #[test]
     fn an_unknown_diagram_kind_fails_without_panic() {
-        let err = render("notadiagram\n  A --> B", &MermaidTheme::default())
+        let err = render("notadiagram\n  A --> B", &light_presentation())
             .expect_err("an unknown kind fails");
         assert!(!err.to_string().is_empty());
     }
 
     #[test]
     fn the_theme_roles_reach_the_svg() {
-        let theme = MermaidTheme {
-            line: Rgba {
-                r: 0xAB,
-                g: 0xCD,
-                b: 0xEF,
-                a: 255,
-            },
-            ..MermaidTheme::default()
-        };
-        let out = render("flowchart LR\n    A --> B", &theme).expect("renders");
+        let mut theme = light_theme();
+        theme.blocks.rule = parse_hex("#ABCDEF").unwrap();
+        let presentation = MermaidPresentation::from_oryx(&theme);
+        let out = render("flowchart LR\n    A --> B", &presentation).expect("renders");
         let svg = std::str::from_utf8(&out.svg).unwrap();
-        assert!(svg.contains("#ABCDEF"), "the line role paints");
-    }
-
-    /// A reading theme's roles land one-to-one in the diagram palette.
-    #[test]
-    fn the_reading_theme_maps_to_the_diagram_roles() {
-        let theme = Theme::default_dark();
-        let mapped = MermaidTheme::from_oryx(&theme);
-        assert_eq!(mapped.background, theme.surface.background);
-        assert_eq!(mapped.foreground, theme.text.body);
-        assert_eq!(mapped.primary, theme.blocks.code_bg);
-        assert_eq!(mapped.border, theme.blocks.code_border);
-        assert_eq!(mapped.line, theme.surface.foreground);
-        assert_eq!(mapped.accent, theme.text.link);
-    }
-
-    /// A light palette good enough to read, the readable counterpart
-    /// to the compiled-in dark one.
-    fn light_theme() -> Theme {
-        let mut theme = Theme::default_dark();
-        theme.surface.background = Rgba {
-            r: 0xFF,
-            g: 0xFF,
-            b: 0xFF,
-            a: 255,
-        };
-        theme.surface.foreground = Rgba {
-            r: 0x18,
-            g: 0x18,
-            b: 0x1D,
-            a: 255,
-        };
-        theme.text.body = Rgba {
-            r: 0x18,
-            g: 0x18,
-            b: 0x1D,
-            a: 255,
-        };
-        theme.text.link = Rgba {
-            r: 0x0B,
-            g: 0x5C,
-            b: 0xB8,
-            a: 255,
-        };
-        theme.blocks.code_bg = Rgba {
-            r: 0xF3,
-            g: 0xF4,
-            b: 0xF8,
-            a: 255,
-        };
-        theme.blocks.code_border = Rgba {
-            r: 0xC5,
-            g: 0xC9,
-            b: 0xD4,
-            a: 255,
-        };
-        theme
+        assert!(
+            svg.contains(&hex_string(presentation.palette.line)),
+            "the line role paints"
+        );
     }
 
     /// Both palettes paint and hold reading contrast: the node text
@@ -502,29 +441,26 @@ mod tests {
     #[test]
     fn light_and_dark_diagrams_paint_readable_roles() {
         for theme in [light_theme(), Theme::default_dark()] {
-            let palette = MermaidTheme::from_oryx(&theme);
-            let out = render("flowchart LR\n    A --> B", &palette)
+            let presentation = MermaidPresentation::from_oryx(&theme);
+            presentation
+                .palette
+                .validate()
+                .expect("the palette holds reading contrast");
+            let out = render("flowchart LR\n    A --> B", &presentation)
                 .unwrap_or_else(|err| panic!("renders under the theme: {err}"));
             let svg = std::str::from_utf8(&out.svg).unwrap();
+            let palette = &presentation.palette;
             assert!(
                 svg.contains(&hex_string(palette.line)),
                 "the line role paints"
             );
             assert!(
-                svg.contains(&hex_string(palette.primary)),
+                svg.contains(&hex_string(palette.surface)),
                 "the node fill paints"
             );
             assert!(
-                svg.contains(&hex_string(palette.foreground)),
+                svg.contains(&hex_string(palette.text)),
                 "the node text paints"
-            );
-            assert!(
-                crate::style::theme::contrast(palette.foreground, palette.primary) >= 3.0,
-                "node text keeps contrast against its fill"
-            );
-            assert!(
-                crate::style::theme::contrast(palette.line, palette.background) >= 3.0,
-                "lines keep contrast against the ground"
             );
         }
     }
@@ -534,12 +470,15 @@ mod tests {
     #[test]
     fn a_theme_change_misses_the_cache() {
         let source = "flowchart LR\n    A --> B";
-        let dark = cache_key(source, &MermaidTheme::from_oryx(&Theme::default_dark()));
-        let light = cache_key(source, &MermaidTheme::from_oryx(&light_theme()));
+        let dark = cache_key(source, &MermaidPresentation::from_oryx(&Theme::default_dark()));
+        let light = cache_key(source, &light_presentation());
         assert_ne!(dark, light);
         assert_eq!(
             dark,
-            cache_key(source, &MermaidTheme::from_oryx(&Theme::default_dark())),
+            cache_key(
+                source,
+                &MermaidPresentation::from_oryx(&Theme::default_dark())
+            ),
             "the same theme keys stably"
         );
     }
@@ -547,12 +486,13 @@ mod tests {
     /// The host profile carries more than colors: the appearance read
     /// off the ground, the body font resvg's generic families resolve
     /// to, the canvas root background of the resvg-safe editor output,
-    /// and the label ground.
+    /// the label ground, the full series, and the explicit theme
+    /// variables overriding the role derivations.
     #[test]
     fn the_host_profile_carries_font_output_and_appearance() {
         use merman::render::HostThemeRootBackground;
-        let dark = MermaidTheme::from_oryx(&Theme::default_dark());
-        let profile = dark.host_profile();
+        let dark = MermaidPresentation::from_oryx(&Theme::default_dark());
+        let profile = host_profile(&dark);
         assert_eq!(profile.appearance, HostThemeAppearance::Dark);
         assert_eq!(
             profile.font_family.as_deref(),
@@ -564,11 +504,19 @@ mod tests {
         );
         assert_eq!(
             profile.roles.edge_label_background,
-            Some(hex_string(dark.background))
+            Some(hex_string(dark.palette.label_surface))
         );
-        assert_eq!(profile.series_palette.len(), 4);
-        let light = MermaidTheme::from_oryx(&light_theme());
-        assert_eq!(light.host_profile().appearance, HostThemeAppearance::Light);
+        assert_eq!(profile.series_palette.len(), SERIES_SLOTS);
+        assert_eq!(
+            profile
+                .theme_variables
+                .get("tertiaryColor")
+                .and_then(serde_json::Value::as_str),
+            Some(hex_string(dark.palette.label_surface).as_str()),
+            "the explicit projection overrides the role derivation"
+        );
+        let light = light_presentation();
+        assert_eq!(host_profile(&light).appearance, HostThemeAppearance::Light);
     }
 
     /// Both palettes rasterize through Oryx's own decode path, and the
@@ -578,15 +526,15 @@ mod tests {
     #[test]
     fn light_and_dark_diagrams_rasterize_on_a_painted_ground() {
         for theme in [light_theme(), Theme::default_dark()] {
-            let palette = MermaidTheme::from_oryx(&theme);
-            let out = render("flowchart LR\n    A --> B", &palette)
+            let presentation = MermaidPresentation::from_oryx(&theme);
+            let out = render("flowchart LR\n    A --> B", &presentation)
                 .unwrap_or_else(|err| panic!("renders under the theme: {err}"));
             let svg = std::str::from_utf8(&out.svg).unwrap();
             assert!(svg.contains(BODY_FAMILY), "the body font paints");
             let pixels = crate::doc::images::decode(&out.svg)
                 .expect("Oryx's own raster path accepts the svg");
             let corner = pixels.get_pixel(0, 0);
-            let ground = palette.background;
+            let ground = presentation.palette.canvas;
             for (got, want) in [
                 (corner[0], ground.r),
                 (corner[1], ground.g),

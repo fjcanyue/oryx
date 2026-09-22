@@ -6,7 +6,11 @@
 //! variables is a later stage in this module; the renderer itself never
 //! sees an Oryx `Theme`.
 
-use crate::style::theme::{contrast, Rgba, Theme};
+use std::collections::BTreeMap;
+
+use serde_json::{Map, Value};
+
+use crate::style::theme::{contrast, hex_string, Rgba, Theme};
 
 /// Which way the palette reads: a light canvas carries dark marks. The
 /// renderer derives every unset role from this, so it must agree with
@@ -491,6 +495,136 @@ fn hex_debug(color: Rgba) -> String {
     )
 }
 
+/// The Mermaid theme-variable names this adapter sets, in one place.
+/// The projection inserts through these constants and nothing else, so
+/// a typo is a compile error, not a silently ignored variable. The
+/// consumers of each name live in `docs/MERMAN_THEME_COVERAGE.md`.
+mod vars {
+    // common
+    pub const BACKGROUND: &str = "background";
+    pub const TEXT_COLOR: &str = "textColor";
+    pub const PRIMARY_COLOR: &str = "primaryColor";
+    pub const PRIMARY_TEXT_COLOR: &str = "primaryTextColor";
+    pub const PRIMARY_BORDER_COLOR: &str = "primaryBorderColor";
+    pub const MAIN_BKG: &str = "mainBkg";
+    pub const NODE_TEXT_COLOR: &str = "nodeTextColor";
+    pub const NODE_BORDER: &str = "nodeBorder";
+    pub const SECONDARY_COLOR: &str = "secondaryColor";
+    pub const SECONDARY_TEXT_COLOR: &str = "secondaryTextColor";
+    pub const SECONDARY_BORDER_COLOR: &str = "secondaryBorderColor";
+    pub const TERTIARY_COLOR: &str = "tertiaryColor";
+    pub const TERTIARY_TEXT_COLOR: &str = "tertiaryTextColor";
+    pub const TERTIARY_BORDER_COLOR: &str = "tertiaryBorderColor";
+    pub const LINE_COLOR: &str = "lineColor";
+    pub const EDGE_LABEL_BACKGROUND: &str = "edgeLabelBackground";
+    pub const TITLE_COLOR: &str = "titleColor";
+    pub const NOTE_BKG_COLOR: &str = "noteBkgColor";
+    pub const NOTE_TEXT_COLOR: &str = "noteTextColor";
+    pub const NOTE_BORDER_COLOR: &str = "noteBorderColor";
+    pub const CLUSTER_BKG: &str = "clusterBkg";
+    pub const CLUSTER_BORDER: &str = "clusterBorder";
+}
+
+/// The palette flattened into Mermaid's own knobs: every common theme
+/// variable the renderer reads, set to a semantic color. The map is
+/// sorted, so the projection is byte-stable for a given palette —
+/// which is what the cache keys on.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct MermaidThemeVariables {
+    values: BTreeMap<String, String>,
+}
+
+impl MermaidThemeVariables {
+    /// The common projection, design section "Common ThemeVariables":
+    /// the ground, the text, the three surfaces, and the two line-ish
+    /// roles. The load-bearing lines are `secondaryColor` and
+    /// `tertiaryColor` — surface alternates and label grounds, never
+    /// the accent.
+    pub fn from_palette(palette: &MermaidSemanticPalette) -> Self {
+        let mut vars = MermaidThemeVariables::default();
+        vars.set(vars::BACKGROUND, palette.canvas);
+        vars.set(vars::TEXT_COLOR, palette.text);
+        vars.set(vars::PRIMARY_COLOR, palette.surface);
+        vars.set(vars::MAIN_BKG, palette.surface);
+        vars.set(vars::PRIMARY_TEXT_COLOR, palette.text);
+        vars.set(vars::NODE_TEXT_COLOR, palette.text);
+        vars.set(vars::PRIMARY_BORDER_COLOR, palette.border);
+        vars.set(vars::NODE_BORDER, palette.border);
+        vars.set(vars::SECONDARY_COLOR, palette.surface_alt);
+        vars.set(vars::SECONDARY_TEXT_COLOR, palette.text);
+        vars.set(vars::SECONDARY_BORDER_COLOR, palette.border);
+        vars.set(vars::TERTIARY_COLOR, palette.label_surface);
+        vars.set(vars::TERTIARY_TEXT_COLOR, palette.text);
+        vars.set(vars::TERTIARY_BORDER_COLOR, palette.border);
+        vars.set(vars::LINE_COLOR, palette.line);
+        vars.set(vars::EDGE_LABEL_BACKGROUND, palette.label_surface);
+        vars.set(vars::TITLE_COLOR, palette.text);
+        vars.set(vars::NOTE_BKG_COLOR, palette.surface_alt);
+        vars.set(vars::NOTE_TEXT_COLOR, palette.text);
+        vars.set(vars::NOTE_BORDER_COLOR, palette.border);
+        vars.set(vars::CLUSTER_BKG, palette.surface_muted);
+        vars.set(vars::CLUSTER_BORDER, palette.border);
+        vars
+    }
+
+    fn set(&mut self, key: &str, color: Rgba) {
+        self.values.insert(key.to_string(), hex_string(color));
+    }
+
+    fn set_str(&mut self, key: &str, value: &str) {
+        self.values.insert(key.to_string(), value.to_string());
+    }
+
+    /// One projected variable, for the contract tests.
+    pub fn get(&self, key: &str) -> Option<&str> {
+        self.values.get(key).map(String::as_str)
+    }
+
+    /// The variables as Merman takes them: a JSON object under the
+    /// site config's `themeVariables`, merged over the host roles'
+    /// derivations so the explicit contract wins.
+    pub fn to_json(&self) -> Map<String, Value> {
+        self.values
+            .iter()
+            .map(|(key, value)| (key.clone(), Value::String(value.clone())))
+            .collect()
+    }
+
+    /// How many variables the projection sets, for the contract tests.
+    pub fn len(&self) -> usize {
+        self.values.len()
+    }
+
+    /// Whether the projection set nothing at all.
+    pub fn is_empty(&self) -> bool {
+        self.values.is_empty()
+    }
+}
+
+/// What the renderer receives: the palette, its projection into
+/// Mermaid's theme variables, and the family-level diagram config that
+/// does not ride through `themeVariables`. The adapter boundary —
+/// nothing past this type knows an Oryx `Theme`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MermaidPresentation {
+    pub palette: MermaidSemanticPalette,
+    pub theme_variables: MermaidThemeVariables,
+    pub family_config: Map<String, Value>,
+}
+
+impl MermaidPresentation {
+    /// The reading theme as a full presentation.
+    pub fn from_oryx(theme: &Theme) -> Self {
+        let palette = MermaidSemanticPalette::from_oryx(theme);
+        let theme_variables = MermaidThemeVariables::from_palette(&palette);
+        MermaidPresentation {
+            palette,
+            theme_variables,
+            family_config: Map::new(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -718,5 +852,71 @@ mod tests {
         assert_eq!(mix(BLACK, WHITE, 0.0), BLACK);
         assert_eq!(mix(BLACK, WHITE, 1.0), WHITE);
         assert_eq!(mix(hex("#101010"), hex("#F0F0F0"), 0.5), hex("#808080"));
+    }
+
+    /// The core projection contract, the one the ER bug fixed: the
+    /// three surface tiers land where the renderer reads them, and
+    /// none of them is the accent.
+    #[test]
+    fn the_common_projection_pins_the_surfaces() {
+        let presentation = MermaidPresentation::from_oryx(&Theme::default_dark());
+        let palette = &presentation.palette;
+        let vars = &presentation.theme_variables;
+        for (key, color) in [
+            (vars::BACKGROUND, palette.canvas),
+            (vars::PRIMARY_COLOR, palette.surface),
+            (vars::MAIN_BKG, palette.surface),
+            (vars::SECONDARY_COLOR, palette.surface_alt),
+            (vars::TERTIARY_COLOR, palette.label_surface),
+            (vars::CLUSTER_BKG, palette.surface_muted),
+            (vars::EDGE_LABEL_BACKGROUND, palette.label_surface),
+            (vars::LINE_COLOR, palette.line),
+            (vars::NODE_BORDER, palette.border),
+            (vars::NOTE_BKG_COLOR, palette.surface_alt),
+        ] {
+            assert_eq!(
+                vars.get(key),
+                Some(hex_string(color).as_str()),
+                "{key} projects its palette role"
+            );
+        }
+        for key in [
+            vars::TEXT_COLOR,
+            vars::PRIMARY_TEXT_COLOR,
+            vars::NODE_TEXT_COLOR,
+            vars::TITLE_COLOR,
+        ] {
+            assert_eq!(vars.get(key), Some(hex_string(palette.text).as_str()));
+        }
+    }
+
+    /// The tertiary is a structural label surface, never the accent —
+    /// the permanent guard for the green `contains` bug.
+    #[test]
+    fn the_tertiary_is_never_the_accent() {
+        for theme in [Theme::default_dark(), neon_theme(true), neon_theme(false)] {
+            let presentation = MermaidPresentation::from_oryx(&theme);
+            let vars = &presentation.theme_variables;
+            assert_eq!(
+                vars.get(vars::TERTIARY_COLOR),
+                Some(hex_string(presentation.palette.label_surface).as_str())
+            );
+            assert_ne!(
+                vars.get(vars::TERTIARY_COLOR),
+                Some(hex_string(presentation.palette.accent).as_str()),
+                "tertiaryColor must not carry the accent"
+            );
+        }
+    }
+
+    /// The projection is deterministic and sorted: the same theme
+    /// projects the same byte-for-byte map.
+    #[test]
+    fn the_projection_is_deterministic() {
+        let a = MermaidPresentation::from_oryx(&Theme::default_dark());
+        let b = MermaidPresentation::from_oryx(&Theme::default_dark());
+        assert_eq!(a, b);
+        assert!(!a.theme_variables.is_empty());
+        assert_eq!(a.theme_variables.len(), b.theme_variables.len());
     }
 }

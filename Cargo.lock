@@ -3140,6 +3140,7 @@ dependencies = [
  "rfd",
  "roxmltree",
  "serde",
+ "serde_json",
  "softbuffer",
  "subsetter",
  "syntect",
