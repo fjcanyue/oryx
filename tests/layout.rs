@@ -4435,11 +4435,13 @@ fn a_mermaid_diagram_reaches_the_pixels() {
 }
 
 /// A broken diagram draws the error panel and the valid one after it
-/// still renders: one bad block never poisons the next.
+/// still renders: one bad block never poisons the next. The valid one
+/// carries its `flowchart` header — mermaid.js itself, and Merman at
+/// parity with it, reject bare `C --> D` with no diagram type.
 #[test]
 fn a_broken_diagram_errors_without_poisoning_the_next() {
     let (_, l, ..) = lay_settled(
-        "```mermaid\nflowchart LR\n  subgraph X\n  A --> B\n```\n\n```mermaid\nC --> D\n```",
+        "```mermaid\nflowchart LR\n  subgraph X\n  A --> B\n```\n\n```mermaid\nflowchart LR\n  C --> D\n```",
         800.0,
     );
     assert_eq!(l.images.len(), 1, "only the valid diagram places");

@@ -24,7 +24,7 @@ fn large_flowchart() -> String {
     let mut source = String::from("flowchart LR\n");
     for i in 0..30 {
         source.push_str(&format!("    N{i} --> N{}\n", i + 1));
-        source.push_str(&format!("    N{i} --> F{i}: 分支处理\n"));
+        source.push_str(&format!("    N{i} -->|分支处理| F{i}\n"));
     }
     source
 }

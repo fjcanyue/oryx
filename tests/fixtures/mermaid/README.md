@@ -54,3 +54,24 @@ Remaining known imperfection, accepted: Merman spaces the labels of
 parallel back-and-forth state edges tightly; per the migration design
 no offset patching happens host-side. Fixtures judged 7–9/10 readable;
 `state_cjk_business_flow` 7/10, every other fixture 9–10/10.
+
+## Throughput (2026-09-22, Windows, release, one core of the dev box)
+
+`cargo test --release --test mermaid_perf -- --ignored --nocapture`:
+
+| case | latency | size |
+| --- | --- | --- |
+| simple flowchart | 4.4 ms | 86×174 |
+| real CJK state (`state_cjk_business_flow`) | 28.7 ms | 969×714 |
+| large state (40 states, third branching) | 168 ms | 105×4264 |
+| large sequence (6 actors × 40 messages) | 3.9 ms | 1250×1931 |
+| large flowchart (30 nodes + 30 branches) | 41 ms | 6117×1682 |
+| 10 diagrams | 201 ms total | ~20 ms each |
+| 50 diagrams | 1.05 s total | ~21 ms each |
+
+Per-diagram cost stays flat as the count grows, so the per-render
+`HeadlessRenderer` construction and host-theme compilation cost
+nothing worth caching — the pool workers (1–4, unchanged) absorb the
+load off the UI thread. Release binary: 33.0 MB with Merman against
+22.6 MB before (+10.4 MB, the parity layout stack). Memory is not
+instrumented; the MediaCache byte budget is unchanged.
