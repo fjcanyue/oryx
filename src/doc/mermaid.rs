@@ -200,11 +200,30 @@ pub fn render(source: &str, theme: &MermaidTheme) -> Result<MermaidRender, Merma
         }
     })?;
     let (width, height) = dimensions(&svg)?;
+    let key = cache_key(source, theme);
+    dump_debug(&key, svg.as_bytes());
     Ok(MermaidRender {
         svg: Arc::from(svg.into_bytes()),
         width,
         height,
     })
+}
+
+/// Writes a rendered svg under `target/mermaid-debug/` when
+/// `ORYX_DUMP_MERMAID` is set — the one debug affordance, for renderer
+/// comparison and regression digging; unset, which every normal run is,
+/// the product path stays pure memory. `ORYX_DUMP_MERMAID_DIR` moves
+/// the output (the migration's old-renderer baseline lives in
+/// `target/mermaid-baseline/`).
+fn dump_debug(key: &MermaidCacheKey, svg: &[u8]) {
+    if std::env::var_os("ORYX_DUMP_MERMAID").is_none() {
+        return;
+    }
+    let dir = std::env::var_os("ORYX_DUMP_MERMAID_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::PathBuf::from("target").join("mermaid-debug"));
+    let _ = std::fs::create_dir_all(&dir);
+    let _ = std::fs::write(dir.join(format!("{}.svg", key.0)), svg);
 }
 
 /// The svg's natural size from its own root: the viewBox first, the
