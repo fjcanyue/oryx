@@ -42,7 +42,7 @@
 
 #### Sidebar
 
-- A middle click on a file opens it in a second Oryx window, a step down and right of the first; the file you were editing stays as it is. `Ctrl+Enter` on the highlighted row does the same from the keyboard. The two windows share the settings and the book positions, and each saves only what it changed.
+- A middle click on a file opens it in a second Oryx window, a step down and right of the first (on Wayland your desktop places it); the file you were editing stays as it is. `Ctrl+Enter` on the highlighted row does the same from the keyboard. The two windows share the settings and the book positions, and each saves only what it changed.
 - Files and folders whose name starts with a dot are hidden. `Ctrl+Shift+H` shows them, dimmed, and hides them again; the choice is remembered. The file you are reading keeps its row either way.
 - The sidebar follows changes on disk: a file added, removed or renamed in a folder it shows appears or goes the next time you come back to the window or touch it.
 

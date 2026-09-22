@@ -100,7 +100,7 @@ Comic book contents are analyzed and files processed accordingly, not by name, s
 - **Find in document**: `Ctrl+F` searches text. The search is smart about case: `oryx` matches Oryx, ORYX and oryx, while `Oryx` performs an exact match. A match can cross styling, so `fast viewer` is found even when it was written as `**fast** *viewer*`, and it can cross a wrapped line. The whole document is searchable even while a big file is still loading. The `.*` button in the search bar (or `Alt+R`) switches to regular expressions, in the Rust `fancy-regex` flavor, so capture groups, backreferences and lookarounds are available. `^` and `$` match at line starts and ends, and on the rendered page each block counts as one line; `\n` matches a line break. While a pattern is incomplete, the bar's border changes color instead of showing a match count. Clicking anywhere in the document closes the search bar. The search field behaves like a text box: `Ctrl+Left` and `Ctrl+Right` jump by word, `Shift` selects, `Ctrl+Backspace` and `Ctrl+Delete` delete a word, a double click selects the word and a triple click selects everything. While the field has the keyboard, the document's editing keys stay quiet.
 - **Select and copy**: `Ctrl+C` copies a selection with its formatting, so it pastes into an email or a Word document with its headings, lists, tables, quotes, links and code, pictures and formulas included. A terminal or a text editor gets the plain text. `Ctrl+Shift+C` copies the original markdown of the selection. A double click selects the word and lights up every other place the same word appears, a triple click selects the paragraph, the code line or the table cell, and a click with `Shift` held extends the selection to that point. Select all is instant at any file size, a selection survives zooming, theme switches and window resizes, and both copies work before a big file has finished loading.
 - **Sidebar**: `Ctrl+Shift+B` shows and hides a two-tab panel: the folder tree around the open file, and an outline of the document's headings that tracks the reading position, folds its branches, and jumps on a click. For a book, the outline is its table of contents. Both tabs drive entirely from the keyboard. The sidebar is open at the first launch, on your home folder, and follows the disk: a file added, removed or renamed shows the next time you touch the window. Files and folders whose name starts with a dot are hidden; `Ctrl+Shift+H` shows them and Oryx remembers your choice. A folder reached through a symbolic link is listed too, and opening it moves the tree to the real folder. A folder Oryx cannot read shows one row saying so, under the `..` row, so you can climb back out.
-- **Second window**: a middle click on a file in the sidebar, or `Ctrl+Enter` on the highlighted row, opens it in a second Oryx window, a step down and right of the first. The two windows share the settings and your places in books, and each saves only what it changed.
+- **Second window**: a middle click on a file in the sidebar, or `Ctrl+Enter` on the highlighted row, opens it in a second Oryx window, a step down and right of the first (on Wayland your desktop places it). The two windows share the settings and your places in books, and each saves only what it changed.
 - **Open file**: `Ctrl+O` opens the native file dialog.
 - **Drag and drop**: drop a file on the window to open it, a folder to browse it in the sidebar, or a picture on a markdown file you are editing to add it.
 - **Live reload**: Oryx notices when the open file changes on disk and reloads it, as long as there are no unsaved edits. `F5` / `Ctrl+R` reload on demand. If the file is deleted or moved away outside Oryx, a notice says so, the title shows the unsaved dot, and `Ctrl+S` writes the text back.
@@ -332,17 +332,17 @@ The numbers below come from the last phase gate, release build, on a 2019 Linux 
 
 | File | Open | Parse | Highlight | Full pass | PDF export |
 |---|---|---|---|---|---|
-| 1 MB markdown | 40 ms | 32 ms | 0.7 s | 0.18 s | 0.95 s |
+| 1 MB markdown | 40 ms | 31 ms | 0.7 s | 0.18 s | 0.96 s |
 | 1 MB source file | 40 ms | 0 ms | 2.8 s | 0.11 s | 0.9 s |
-| 8 MB markdown | 40 ms | 265 ms | 5.7 s | 1.45 s | 9.2 s |
-| 8 MB source file | 40 ms | 0 ms | 23.4 s | 0.85 s | 8.2 s |
+| 8 MB markdown | 40 ms | 262 ms | 5.8 s | 1.5 s | 9.4 s |
+| 8 MB source file | 40 ms | 0 ms | 24.1 s | 0.86 s | 8.1 s |
 
 Memory: Settled is what the file takes once everything is loaded and laid out, Peak the most it takes on the way there, Export the extra during a PDF export.
 
 | File | Settled | Peak | Export |
 |---|---|---|---|
 | 1 MB markdown | 22 MB | 34 MB | +10 MB |
-| 1 MB source file | 11 MB | 12 MB | +10 MB |
+| 1 MB source file | 11 MB | 12 MB | +11 MB |
 | 8 MB markdown | 173 MB | 257 MB | +34 MB |
 | 8 MB source file | 88 MB | 95 MB | +11 MB |
 
