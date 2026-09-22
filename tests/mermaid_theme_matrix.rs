@@ -160,6 +160,51 @@ fn neon_theme(dark: bool) -> Theme {
     theme
 }
 
+/// The showcase guard: every mermaid block in
+/// `examples/mermaid-theme-showcase.md` renders under both the dark
+/// fallback and the shipped light theme, so the visual QA file can
+/// never rot into error panels after an upgrade.
+#[test]
+fn every_showcase_block_renders_under_both_palettes() {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("examples")
+        .join("mermaid-theme-showcase.md");
+    let text = std::fs::read_to_string(&path)
+        .unwrap_or_else(|err| panic!("the showcase reads: {err}"));
+    let mut blocks = 0;
+    let mut source = String::new();
+    let mut inside = false;
+    for line in text.lines() {
+        if line.trim_start().starts_with("```mermaid") {
+            inside = true;
+            source.clear();
+            continue;
+        }
+        if inside && line.trim() == "```" {
+            inside = false;
+            blocks += 1;
+            for (name, theme) in [
+                ("dark", Theme::default_dark()),
+                ("light", load_file(&themes_dir().join("oryx-light.toml")).unwrap()),
+            ] {
+                let presentation = MermaidPresentation::from_oryx(&theme);
+                render(&source, &presentation)
+                    .unwrap_or_else(|err| panic!("showcase block {blocks} renders under {name}: {err}"));
+            }
+            continue;
+        }
+        if inside {
+            source.push_str(line);
+            source.push('\n');
+        }
+    }
+    assert!(!inside, "the showcase closes every fence");
+    assert!(
+        blocks >= 20,
+        "the showcase still covers every family, found {blocks}"
+    );
+}
+
 /// The boundary guard: under a neon theme no structural figure shows
 /// the green, while the data figures keep their series colors — the
 /// adapter neither leaks the accent into structure nor bleaches the
