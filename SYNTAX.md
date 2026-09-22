@@ -231,7 +231,7 @@ def tilde_fences():
 
     an indented block renders as code too
 
-Fence languages cover the bundled grammar collection, from `rust` and `python` through `toml`, `kotlin`, `swift`, `typescript`, `dockerfile`, `zig`, `terraform`, `graphql` and `protobuf`. Oryx also opens source files directly and renders the whole file highlighted.
+Fence languages cover the bundled grammar collection, from `rust` and `python` through `toml`, `kotlin`, `swift`, `typescript`, `dockerfile`, `zig`, `terraform`, `graphql` and `protobuf`. A `diff` fence shows its added lines in green and its removed lines in red. Oryx also opens source files directly and renders the whole file highlighted.
 
 ## Tables
 
@@ -277,7 +277,7 @@ Angle brackets too: <https://example.com> and <someone@example.com>
 ![local image](examples/oryx-test.png)
 ![remote image](https://img.shields.io/badge/oryx-syntax-blue.svg)
 
-A link to another file opens it in Oryx. Remote images fetch in the background and cache on disk. SVG renders, badges included. A broken path becomes a placeholder with the alt text.
+A link to another file opens it in Oryx. Remote images fetch in the background and cache on disk. SVG renders, badges included. A broken path becomes a placeholder with the alt text. A path with a space or a parenthesis in it goes between angle brackets, `![a photo](<images/my photo.png>)`, which is what Oryx writes when you paste or drop a picture into a file.
 
 ## Footnotes
 

@@ -19,7 +19,8 @@ pub fn welcome(tip: usize) -> String {
          Press `{}` to open a file, or `{}` to start a markdown note.\n\n\
          `{}` shows or hides the folder sidebar, where you browse and open files.\n\n\
          `{}` opens the settings: fonts, sizes and the interface scale, \
-         if the page looks too small or too large on this screen.\n\n\
+         if the page looks too small or too large on this screen, and the \
+         line numbers, the word count and autosave.\n\n\
          `{}` lists the shortcuts and the markdown syntax.\n\n\
          {}\n\
          You can also drag and drop a file here.\n\n\

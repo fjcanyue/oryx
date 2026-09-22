@@ -248,7 +248,7 @@ pub const SHORTCUTS: &[Shortcut] = &[
     },
     Shortcut {
         keys: "Ctrl+Shift+S",
-        action: "Save as (editing)",
+        action: "Save as",
         section: "Files",
         bindings: &[(Binding::CtrlShift("s"), Command::SaveAs)],
     },
@@ -390,7 +390,7 @@ pub const SHORTCUTS: &[Shortcut] = &[
     },
     Shortcut {
         keys: "Ctrl+C",
-        action: "Copy selection as text, or the line (editing)",
+        action: "Copy the selection with its formatting, or the line (editing)",
         section: "Selection",
         bindings: &[(Binding::Ctrl("c"), Command::CopyText)],
     },
@@ -563,7 +563,7 @@ pub const SHORTCUTS: &[Shortcut] = &[
     },
     Shortcut {
         keys: "Ctrl+,",
-        action: "Settings: fonts, sizes and interface scale",
+        action: "Settings: fonts, sizes, interface scale, line numbers, word count and autosave",
         section: "View",
         bindings: &[(Binding::Ctrl(","), Command::Settings)],
     },

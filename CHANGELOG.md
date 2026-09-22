@@ -2,128 +2,130 @@
 
 ## v1.2.0
 
-### Search
+### New features
 
-- Searching for a space or a tab now highlights the ones at the end of a line, and the ones where a long line wraps. Before, the count was right but those matches had no box, and Enter could land on one you could not see. A selection that reaches the end of a line covers its trailing spaces too.
-- `\n` in regex mode now finds the line breaks. Before, a pattern made only of line breaks found nothing. Replace can join lines, collapse blank lines or add a line after every line, and copy gives the line breaks. A match never crosses from one block to the next, and the file's final line break stays.
-- In regex mode, the replace field understands `\n` for a line break, `\t` for a tab and `\\` for a backslash, as VS Code does. Any other escape is written as typed.
+#### Copy
 
-### Copy
+- `Ctrl+C` on the page copies the selection with its formatting, so it pastes into an email or a Word document with its headings, lists, tables, quotes, links and code. Pictures and formulas travel inside the copy as images; word processors and desktop mail programs show them, some web mail does not. A terminal or a text editor still gets the plain text. In the editor, `Ctrl+C` copies the text only.
 
-- `Ctrl+C` on the page now copies the selection with its formatting beside the plain text, so it pastes into an email or a Word document with its headings, lists, tables, quotes and links, and its code in a monospace face with the syntax colors of the export theme. Pictures and formulas go along as images inside the copy; a word processor and a desktop mail program show them, some web mail does not. A terminal or a text editor takes the plain text, as before. In the editor, `Ctrl+C` copies the text alone.
+#### macOS
 
-### macOS
+- A macOS build, one app for Apple Silicon and Intel Macs, shipped as a disk image. It is not signed with an Apple developer account, so the first open is blocked. Allow it once in System Settings, Privacy and Security, Open Anyway.
+- On a Mac, `Cmd+[` goes back and `Cmd+]` forward, since `Option+Left` and `Option+Right` move by a word there. The quick reference and the tips show these keys on a Mac.
 
-- Oryx has a macOS build: one app for Apple Silicon and Intel Macs, built on GitHub's Mac machines from the release tag and shipped as a disk image. It is signed without a developer account, so the first open is blocked with "Apple could not verify" until you allow it once in System Settings, Privacy and Security, Open Anyway.
-- On the Mac, `Cmd+[` goes back and `Cmd+]` forward, the browser's keys, since `Option+Left` and `Option+Right` move by a word in every Mac app. The quick reference and the tips show the Mac's keys there.
+#### Arch Linux
 
-### Editor
+- The release page has a package for Arch Linux, to install with `sudo pacman -U oryx-editor-bin-*.pkg.tar.zst`.
 
-- Empty lines added at the end of a file now get their rows. Before, each Enter at the end of a long file added a line the page did not show: the caret left the screen and the wheel could not reach it. The file's final line break still opens no empty row.
-- The page no longer moves by a pixel on every keystroke at a fractional display scale, such as 125%. Each frame now paints the page at a whole pixel, and the caret sits on the text it belongs to.
-- A file with nothing in it now opens in the editor, ready to type, from the command line, the sidebar or the open dialog. Before, it opened as a blank page and needed `Ctrl+E` first. A file with only spaces and empty lines counts as empty.
-- `Shift+Enter` in a markdown file adds a line break: Oryx types the two spaces markdown needs at the end of the line, and the next line stays in the same paragraph, list item or quote. In a code or text file it is `Enter`, as before.
-- In the editor, with nothing selected, `Ctrl+C` copies the line the caret is on and `Ctrl+X` cuts it, as in VS Code and Sublime Text. `Ctrl+V` then puts it back as a whole line above the line the caret is on, wherever the caret stands in it. Before, both keys did nothing without a selection.
-- `Ctrl+B`, `Ctrl+I` and `` Ctrl+` `` now work as in a word processor: press the key, type, press it again and go on in plain text. Before, the second press wrapped the last word once more and left stray stars. Pressed at the end of a word, the key now leaves the caret after the closing mark, so you can write on.
-- The same keys remove the marks around the caret whatever the number of words between them. Before, only a single marked word could be unmarked this way, and a longer one got a second pair of marks. Pressed twice on an empty spot, the key removes the empty pair it just made.
-- `Ctrl+K` with nothing selected now takes the word the caret is on as the link's text, and puts the caret in the parentheses for the address. On a web address, the address becomes the link's target. Before, it opened an empty link beside the word.
-- `Alt+Right` goes forward again after `Alt+Left`. The back and forward buttons of a mouse do the same. A search hit taken with `Enter`, a jump to a line, to the top or to the bottom, and another file you opened are now places to come back to. `Alt+Left` reopens the file you came from where you left it, and asks first if there are unsaved edits. Both keys now work in the editor, and move the caret.
-- In a markdown file, `Ctrl+V` now pastes a picture from the clipboard. Oryx saves it as a PNG in an `images` folder next to the file and adds the link, with the caret in the brackets for the description. Text on the clipboard is pasted as before.
-- An image file dropped on a markdown file you are editing is now added to it. Before, it was opened in place of your file. A picture already under the file's folder is linked where it is, and any other is copied into `images`. A note from `Ctrl+M` has to be saved first, and a notice says so.
-- A pasted or dropped picture larger than 2560 pixels on its longer side is made smaller, and a notice says so. A 4800 by 3200 photo added half a second and 130 MB each time its file opened; at 2560 it adds 70 ms and 19 MB. `Ctrl+Shift+V` pastes as-is without resizing. Pictures already in the file's folder are not resized, and neither are GIF, WebP and SVG files. The picture you drop stays as it is: Oryx resizes its own copy.
-- A double click on a word now lights up every other place the same word appears, as VS Code, Sublime Text and Kate do. It matches whole words in the same case, on a markdown page, in a code file, in a book and in the editor. The marks go away with the selection, and they do not show while the search bar is open.
-- A click with `Shift` held extends the selection to the click, as in every editor and browser: the start stays, the end moves. In the editor, with nothing selected, it selects from the caret to the click. Before, a click always started a new selection.
-- `Tab` in a new markdown file now inserts four spaces, which nest under every list marker. Before, it inserted a tab character. A file that already indents with tabs or with two spaces keeps its own, and a new code or text file still gets a tab.
-- In a markdown file, `Tab` no longer turns a list into a code block. A list item nests under the item above it, one level at a time. With no item above, or when the item is already nested, `Tab` leaves the list as it is and a notice says why. Before, `Tab` on a first-level list put four spaces in front of it, which markdown reads as code.
-- `Tab` on a list item inside a quote (`> - item`) now nests it inside the quote, and `Shift+Tab` brings it back. Before, the spaces went in front of the `>`, and markdown read the line as plain text of the item above.
-- In a markdown file, `Ctrl+E` and `Escape` now keep the line you are on at the same height on the screen, going into the editor and coming back. Before, the line jumped to the top of the window each time.
-- The caret now comes back on the line it left when that line is an image, an empty line or a rule. Before, it came back on the paragraph above, or on the first line of the file when a tall image filled the window.
-- `Up` on the first line now goes to the start of the line, and `Down` on the last line to its end, as other editors do. Before, the caret stayed where it was. With Shift, the selection follows.
-- Oryx no longer keeps a processor core busy after you leave the editor. Before, going back to reading with Escape left the caret's timer running with nothing to do, until the next notice in the corner had come and gone.
+#### Search
 
-### Files
+- In regex mode, the replace field understands `\n` for a line break, `\t` for a tab and `\\` for a backslash. Any other escape is written as typed.
 
-- When the connection to the display is lost (a compositor that crashes or drops the window), Oryx now closes in order, saves its settings and says why in the terminal. Before, it could crash on its way out, mostly while a big file was loading.
-- Fixed a rare crash while a big markdown file with many code blocks was still loading: syntax colors arriving at the wrong moment could leave the page's bookkeeping out of step, and Oryx quit. Seen on an 8 MB file opened straight at a far line.
-- When the open file is deleted or moved away outside Oryx, a notice says so, the title shows the unsaved dot, and Oryx asks before closing, as it does for unsaved edits. `Ctrl+S` writes the text back where the file was; if its folder went too, Save As writes it elsewhere. Before, nothing said anything and the text was gone at the next quit. A file missing for an instant while another editor saves it is not mistaken for a deleted one.
-- A code or text file you come back to in the same session now reopens at the line you were reading. Before, it reopened at the top, and only markdown files and books kept their place.
-- A diff now shows its added lines in green, its removed lines in red and its `@@` lines in blue, in every theme, from a `.diff` or `.patch` file or from a pipe. Before, the whole diff was in the text color. The colors are the theme's own, those of its tip, caution and note alerts.
-- Text can be piped into Oryx: `git diff | oryx`. Oryx reads it before the window opens and guesses what it is, a diff, JSON or a script. `--as md` shows it as another kind, and `oryx -` asks for standard input outright. The text is kept in a temporary file that goes when Oryx quits; `Ctrl+S` asks where to save it, in the folder where you typed the command.
-- The sidebar opened from a new note (`Ctrl+M`) now shows the folder you were in. Before, it showed Oryx's own folder for notes.
-- `Ctrl+Shift+S` now works on a file you are only reading. Before, it did nothing until the file had been in the editor once.
-- The file Oryx was started with now reloads when it changes on disk, like any file opened later. Before, only a file opened from the sidebar or the dialog did.
-- A file whose lines end in CR CR LF (an old Mac file converted to Windows, or converted twice) no longer breaks the editor. Before, each typed letter pushed its line down on screen, and Oryx soon crashed. Every return before a line break now leaves the text on load and is written back on save, so an untouched line keeps its bytes; a new line takes the file's usual ending. Pasted text is cleaned the same way. A classic Mac OS file, whose lines end in CR alone, now reads as lines too and saves with CR again, new lines included. Before, it opened as one long line.
-- A binary file whose first zero byte sits past the 8 KB Oryx reads is now refused, like any other binary. Before, a cartridge ROM opened as text, and its random characters made Oryx load every font on the system, 700 MB and ten seconds of freeze. A file is binary when its first 8 KB holds a zero byte or is more than 30% unreadable bytes. A text file in an encoding older than UTF-8 (Cyrillic in CP1251, Japanese in Shift-JIS) reads the same way, and the message says "is not UTF-8 text".
-- Control characters in a text file (the escape codes of a log, for example) no longer freeze Oryx. They show as spaces. Before, each one made the shaper search every font on the system for a glyph: a log of 190 KB took a minute and a half to open, it takes a fifth of a second now.
+#### Editor
 
-### Sidebar
+- A file with nothing in it opens in the editor, ready to type, from the command line, the sidebar or the open dialog. A file with only spaces and empty lines counts as empty.
+- `Shift+Enter` in a markdown file adds a line break: Oryx types the two spaces markdown needs at the end of the line, and the next line stays in the same paragraph, list item or quote. In a code or text file it is the same as `Enter`.
+- With nothing selected, `Ctrl+C` copies the line the caret is on and `Ctrl+X` cuts it. `Ctrl+V` puts it back as a whole line above the current one.
+- `Ctrl+K` with nothing selected takes the word under the caret as the link's text and puts the caret in the parentheses, ready for the address. On a web address, the address becomes the link's target.
+- `Alt+Right` goes forward again after `Alt+Left`. The back and forward buttons of a mouse do the same. A search hit taken with `Enter`, a jump to a line, to the top or to the bottom, and another file you opened are places you can come back to. `Alt+Left` reopens the file you came from where you left it, and asks first if it has unsaved edits. Both keys work in the editor too, and move the caret.
+- In a markdown file, `Ctrl+V` pastes a picture from the clipboard. Oryx saves it as a PNG in an `images` folder next to the file and adds the link, with the caret in the brackets for the description.
+- An image file dropped on a markdown file you are editing is added to it. A picture already under the file's folder is linked where it is, any other is copied into `images`. A note from `Ctrl+M` has to be saved first.
+- A pasted or dropped picture larger than 2560 pixels on its longer side is made smaller: a 4800 by 3200 photo added half a second and 130 MB each time its file opened, at 2560 it adds 70 ms and 19 MB. `Ctrl+Shift+V` pastes the picture as it is. Pictures already in the file's folder are not resized, GIF, WebP and SVG files neither. The file you drop is not changed, Oryx resizes its own copy.
+- A double click on a word lights up every other place the same word appears: whole words, same case, on a markdown page, in a code file, in a book and in the editor. The marks go away with the selection.
+- A click with `Shift` held extends the selection to the click. In the editor, with nothing selected, it selects from the caret to the click.
 
-- A fresh install now opens with the folder sidebar showing, rooted at your home folder. Before, the sidebar was closed, and once opened it stood in the folder Oryx was started from, which on Windows can be a system folder. Close it once and it stays closed, as before. The open and export dialogs fall back to your home folder the same way.
-- A folder Oryx cannot read now shows one row saying so, under the `..` row, so you can climb back out. Before, the panel went blank.
-- A middle click on a file in the sidebar opens it in a second Oryx window, a step down and right of the first, and the file you were editing stays as it is. `Ctrl+Enter` on the highlighted row does the same from the keyboard. The two windows share the settings file and the book positions, and each saves only what it changed: a setting changed in one window, or your place in a book, is still there after the other window closes.
-- Files and folders whose name starts with a dot stay out of the sidebar now, as in every file manager. `Ctrl+Shift+H` shows them, dimmed, and hides them again; the choice is remembered. The file you are reading keeps its row whatever the setting.
-- The welcome page says that the sidebar key shows and hides the panel.
-- The folder you are in reads in the accent color in the sidebar, its name and its icon: the folder of the open file, or, with no file open, the folder you last clicked. Before, the folder you had opened and the folder under the mouse looked the same. The accent fill stays on the open file.
-- The sidebar now follows changes on disk: a file added, removed or renamed in a folder it shows appears or goes the next time you come back to the window or touch it, the same way the open file reloads. Before, you had to leave the folder and come back.
+#### Files
 
-### Quick reference
+- When the open file is deleted or moved outside Oryx, a notice says so, the title shows the unsaved dot, and Oryx asks before closing. `Ctrl+S` writes the text back where the file was; if its folder is gone too, Save As writes it elsewhere. A file missing for an instant while another program saves it is not taken for a deleted one.
+- A diff shows its added lines in green, its removed lines in red and its `@@` lines in blue, in every theme, from a `.diff` or `.patch` file or from a pipe. The colors are the theme's own, those of its tip, caution and note alerts.
+- Text can be piped into Oryx: `git diff | oryx`. Oryx reads it before the window opens and guesses what it is, a diff, JSON or a script. `--as md` shows it as another kind, and `oryx -` reads standard input. The text is kept in a temporary file that goes when Oryx quits; `Ctrl+S` asks where to save it, starting in the folder you ran the command from.
+
+#### Sidebar
+
+- A middle click on a file opens it in a second Oryx window, a step down and right of the first; the file you were editing stays as it is. `Ctrl+Enter` on the highlighted row does the same from the keyboard. The two windows share the settings and the book positions, and each saves only what it changed.
+- Files and folders whose name starts with a dot are hidden. `Ctrl+Shift+H` shows them, dimmed, and hides them again; the choice is remembered. The file you are reading keeps its row either way.
+- The sidebar follows changes on disk: a file added, removed or renamed in a folder it shows appears or goes the next time you come back to the window or touch it.
+
+#### Quick reference
 
 - The F1 page is now the quick reference, in two parts: the shortcuts, then the whole markdown syntax reference, every construct Oryx understands shown as written and as rendered. Two links at the top jump to either part, and the outline in the sidebar lists both.
 
-### Embedded HTML
+#### Embedded HTML
 
-- `<p align="right">` and `<div align="right">` put their content against the right edge, as on GitHub. Before, only `center` was honored.
-- `align="left"` is read too, and when aligned blocks are nested the innermost one decides, as in HTML. Before, a left paragraph inside a centered block stayed centered.
-- In a right-to-left page, `align="center"` and `align="left"` now move the text. Before, it stayed on the right.
+- `<p align="right">` and `<div align="right">` put their content against the right edge. `align="left"` works too, and when aligned blocks are nested the innermost one decides.
 
-### Task lists
+#### Files without an extension
 
-- The checkboxes are a little bigger, and the check mark fills the box. The click target and the PDF follow.
+- A file without an extension gets syntax colors when it says what it is: a script by its shebang, a file with an editor modeline, a dotfile by its name (`.bashrc`, `.zshrc`, `.profile`, `.gitconfig`, `Gemfile`, `PKGBUILD` and the like), or a diff, a JSON, an XML or an INI file by the shape of its first lines. Anything else opens plain.
 
-### Files without an extension
+#### Source view
 
-- A file without an extension now gets syntax colors when it says what it is: a script by its shebang, a file with an editor modeline, a dotfile by its name (`.bashrc`, `.zshrc`, `.profile`, `.gitconfig`, `Gemfile`, `PKGBUILD` and the like), or a diff, a JSON, an XML or an INI file by the shape of its first lines. Anything else opens plain, as before.
+- Heading lines are bold in the source view, as they are on the page. A code font without a bold face shows no difference.
 
-### Source view
+#### Line numbers
 
-- Heading lines are bold, as they are on the page and in VS Code. A code font without a bold face shows no difference.
-
-### Line numbers
-
-- A new `line numbers` row in the settings (`Ctrl+,`) numbers the lines in the left margin: in code files, in text files, and in a markdown file while you edit it. It is off by default, and the choice is remembered. The rendered markdown page and the PDF stay without numbers.
+- A new `line numbers` row in the settings (`Ctrl+,`) numbers the lines in the left margin: in code files, in text files, and in a markdown file while you edit it. Off by default, remembered once set. The rendered markdown page and the PDF stay without numbers.
 - The numbers sit in the margin the page already has, so turning them on moves nothing. When the digits need more room (a very long file, a narrow window, a big zoom), the text steps right by what is missing.
-- A line that wraps gets its number on its first row only. Copy never takes the numbers. In the editor, the number of the caret's line reads brighter, as in other editors.
+- A line that wraps gets its number on its first row only. Copy never takes the numbers. In the editor, the number of the caret's line reads brighter.
 
-### Go to line
+#### Go to line
 
 - `Ctrl+G` opens a small field where the search bar stands. Type a line number and press Enter, and Oryx goes there. `412:10` lands on the tenth character of line 412. A number past the end goes to the last line.
-- In the editor the caret lands on the line. While reading a code or text file the line comes to the top, and on a rendered markdown page the block that holds that line of the source does. While reading, `Alt+Left` goes back to where you were. Books and comics have no lines, so the key does nothing there.
+- In the editor the caret lands on the line. While reading a code or text file the line comes to the top, and on a rendered markdown page the block that holds that line of the source does. `Alt+Left` goes back to where you were. Books and comics have no lines, so the key does nothing there.
 - From a terminal, `oryx main.rs:412` and `oryx main.rs:412:10` open the file at that place, the form compilers print. A file really named `notes:412` still opens as typed.
 
-### Word count
+#### Word count
 
-- A new `word count` row in the settings (`Ctrl+,`) shows the size of the file in the bottom right corner of the page: words, characters, lines and reading time. It is off by default, and the choice is remembered. Select some text and the line shows the figures of the selection.
+- A new `word count` row in the settings (`Ctrl+,`) shows the size of the file in the bottom right corner: words, characters, lines and reading time. Off by default, remembered once set. Select some text and the line shows the figures of the selection.
 - The count reads the text as the page shows it: markdown marks, link addresses, HTML tags and frontmatter are not counted. A line ending with two spaces counts as a line, a plain line break inside a paragraph does not. Reading time is 240 words a minute.
 - A code file shows its lines and characters only. Books and comics show nothing.
 
-### Autosave
+#### Autosave
 
 - Two new rows in the settings (`Ctrl+,`) save your file without `Ctrl+S`. `save on focus loss` writes it when you switch to another window. `save after a pause` writes it once you have stopped typing for the time you choose: 5, 15 or 30 seconds, or 1, 5, 10 or 15 minutes. Both are off by default. A burst of typing costs one write, and nothing runs while Oryx is idle.
-- An automatic save does not write over someone else's change: if the file changed or was deleted on disk, Oryx says so and waits for your `Ctrl+S`. It also waits while the unsaved-changes question is on screen. A note (`Ctrl+M`) has no file yet and is not autosaved.
-- The caret is hidden while the Oryx window is in the background, as in other editors.
+- An automatic save never writes over someone else's change: if the file changed or was deleted on disk, Oryx says so and waits for your `Ctrl+S`. It also waits while the unsaved-changes question is on screen. A note (`Ctrl+M`) has no file yet and is not autosaved.
+- The caret is hidden while the Oryx window is in the background.
 
-### Notes
+#### Notes
 
-- A note (`Ctrl+M`) now survives a crash, a power cut or a lost display. Oryx copies the note's text to a file of its own five seconds after you stop typing, and when the focus leaves the window. The copy is not a save: the unsaved dot stays, and Oryx still asks before closing.
+- A note (`Ctrl+M`) survives a crash, a power cut or a lost display. Oryx copies the note's text to a file of its own five seconds after you stop typing, and when the focus leaves the window. The copy is not a save: the unsaved dot stays, and Oryx still asks before closing.
 - If Oryx ended without asking, the next launch says "A note from your last session was not saved." `R` or Enter recovers the note, `D` discards it, and Escape leaves it for the next launch. The note comes back unsaved, in this window, or in a second window when Oryx was started on a file.
 
-### Settings
+#### Welcome page
 
+- The welcome page shows a tip, a different one at each launch, from a list that covers every feature of Oryx. The tips take turns between the areas (files, moving around, search, editing, themes, export, markdown, books), so ten launches show ten different kinds of things. A "more tips" link under it shows another. Nothing to close and nothing to switch off: the tips only live on the page you see when no file is open.
+
+### Fixes
+
+- Searching for a space or a tab now highlights the ones at the end of a line, and the ones where a long line wraps. Before, the count was right but those matches had no box, and Enter could land on one you could not see. A selection that reaches the end of a line covers its trailing spaces too.
+- `\n` in regex mode finds the line breaks. Before, a pattern made only of line breaks found nothing. Replace can join lines, collapse blank lines or add a line after every line, and copy gives the line breaks. A match never crosses from one block to the next, and the file's final line break stays.
+- Empty lines added at the end of a file get their rows. Before, each Enter at the end of a long file added a line the page did not show: the caret left the screen and the wheel could not reach it.
+- The page no longer moves by a pixel on every keystroke at a fractional display scale, such as 125%.
+- `Ctrl+B`, `Ctrl+I` and `` Ctrl+` `` work the way you expect: press the key, type, press it again and go on in plain text. Before, the second press wrapped the last word once more and left stray stars. At the end of a word, the key leaves the caret after the closing mark, so you can write on.
+- The same keys remove the marks around the caret whatever the number of words between them. Before, only a single marked word could be unmarked. Pressed twice on an empty spot, the key removes the empty pair it just made.
+- `Tab` in a new markdown file inserts four spaces, which nest under every list marker. Before, it inserted a tab character. A file that already indents with tabs or with two spaces keeps its own, and a new code or text file still gets a tab.
+- In a markdown file, `Tab` no longer turns a list into a code block. A list item nests under the item above it, one level at a time. With no item above, or when the item is already nested, `Tab` leaves the list alone. Before, `Tab` on a first-level list put four spaces in front of it, which markdown reads as code.
+- `Tab` on a list item inside a quote (`> - item`) nests it inside the quote, and `Shift+Tab` brings it back. Before, the spaces went in front of the `>`, and markdown read the line as plain text.
+- In a markdown file, `Ctrl+E` and `Escape` keep the line you are on at the same height on the screen. Before, the line jumped to the top of the window each time.
+- The caret comes back on the line it left when that line is an image, an empty line or a rule. Before, it came back on the paragraph above, or on the first line of the file when a tall image filled the window.
+- `Up` on the first line goes to the start of the line, and `Down` on the last line to its end. With Shift, the selection follows.
+- Oryx no longer keeps a processor core busy after you leave the editor with Escape.
+- When the connection to the display is lost (a compositor that crashes or drops the window), Oryx closes in order, saves its settings and says why in the terminal. Before, it could crash on its way out, mostly while a big file was loading.
+- Fixed a rare crash while a big markdown file with many code blocks was still loading: syntax colors arriving at the wrong moment could leave the page's bookkeeping out of step. Seen on an 8 MB file opened straight at a far line.
+- A code or text file you come back to in the same session reopens at the line you were reading. Before, only markdown files and books kept their place.
+- The sidebar opened from a new note (`Ctrl+M`) shows the folder you were in. Before, it showed Oryx's own folder for notes.
+- `Ctrl+Shift+S` works on a file you are only reading. Before, it did nothing until the file had been in the editor once.
+- The file Oryx was started with reloads when it changes on disk, like any file opened later.
+- A file whose lines end in CR CR LF (an old Mac file converted to Windows, or converted twice) no longer breaks the editor. Before, each typed letter pushed its line down on screen, and Oryx soon crashed. Every return before a line break is kept and written back on save, so an untouched line keeps its bytes; a new line takes the file's usual ending. Pasted text is cleaned the same way. A classic Mac OS file, whose lines end in CR alone, reads as lines too and saves with CR again. Before, it opened as one long line.
+- A binary file whose first zero byte sits past the 8 KB Oryx reads is refused, like any other binary. Before, a cartridge ROM opened as text, and its random characters made Oryx load every font on the system, 700 MB and ten seconds of freeze. A file is binary when its first 8 KB holds a zero byte or is more than 30% unreadable bytes. A text file in an encoding older than UTF-8 (Cyrillic in CP1251, Japanese in Shift-JIS) is refused the same way, with the message "is not UTF-8 text".
+- Control characters in a text file (the escape codes of a log, for example) no longer freeze Oryx. They show as spaces. Before, each one made Oryx search every font on the system for a glyph: a log of 190 KB took a minute and a half to open, it takes a fifth of a second now.
+- A fresh install opens with the sidebar showing, at your home folder. Before, the sidebar was closed, and once opened it showed the folder Oryx was started from, which on Windows can be a system folder. Close it once and it stays closed. The open and export dialogs start in your home folder the same way.
+- A folder Oryx cannot read shows one row saying so, under the `..` row, so you can climb back out. Before, the panel went blank.
+- The welcome page says that the sidebar key shows and hides the panel.
+- The folder you are in reads in the accent color in the sidebar, its name and its icon: the folder of the open file, or, with no file open, the folder you last clicked. Before, the folder you had opened and the folder under the mouse looked the same.
+- In a right-to-left page, `align="center"` and `align="left"` move the text. Before, it stayed on the right.
+- The checkboxes of task lists are a little bigger, and the check mark fills the box. The click target and the PDF follow.
 - In the font list of the settings, a click on the hint under the list no longer picks a font you could not see.
-
-### Welcome page
-
-- The welcome page shows a tip, a different one at each launch, from a list that covers every feature of Oryx. The tips take turns between the areas, files, moving around, search, editing, themes, export, markdown, books, so ten launches show ten different kinds of things. A "more tips" link under it shows another. Nothing to close and nothing to switch off: the tips only live on the page you see when no file is open.
 
 ## v1.1.1
 
