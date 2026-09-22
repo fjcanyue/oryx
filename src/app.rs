@@ -939,6 +939,9 @@ fn theme_dirs_from(xdg_data_dirs: Option<&std::ffi::OsStr>) -> Vec<PathBuf> {
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
             dirs.push(dir.join("themes"));
+            if cfg!(target_os = "macos") {
+                dirs.extend(bundle_themes(dir));
+            }
         }
     }
     if let Some(base) = directories::BaseDirs::new() {
@@ -955,6 +958,15 @@ fn theme_dirs_from(xdg_data_dirs: Option<&std::ffi::OsStr>) -> Vec<PathBuf> {
     );
     dirs.push(PathBuf::from("themes"));
     dirs
+}
+
+/// The themes of a Mac app bundle: `Contents/Resources/themes`, beside
+/// the `Contents/MacOS` folder the binary runs from. The data cannot
+/// sit beside the binary there, since `codesign` takes every file
+/// under `MacOS` for code and refuses the bundle over a theme file.
+fn bundle_themes(exe_dir: &Path) -> Option<PathBuf> {
+    let contents = exe_dir.parent()?;
+    Some(contents.join("Resources").join("themes"))
 }
 
 /// Resolves the launch theme by name, falling back to the dracula file,
@@ -8812,6 +8824,17 @@ mod tests {
         assert_eq!(dirs[at + 1], PathBuf::from("/usr/local/share/oryx/themes"));
         assert_eq!(dirs[at + 2], PathBuf::from("/usr/share/oryx/themes"));
         assert_eq!(dirs.last().unwrap(), &PathBuf::from("themes"));
+    }
+
+    #[test]
+    fn a_mac_bundle_keeps_its_themes_under_resources() {
+        let dir = std::path::Path::new("/Applications/Oryx.app/Contents/MacOS");
+        assert_eq!(
+            super::bundle_themes(dir),
+            Some(std::path::PathBuf::from(
+                "/Applications/Oryx.app/Contents/Resources/themes"
+            ))
+        );
     }
 
     #[test]

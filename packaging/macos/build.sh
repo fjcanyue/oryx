@@ -4,10 +4,12 @@
 # calls it, and a Mac at hand can too. Usage: build.sh [output dir]
 #
 # The app is a universal binary (Apple Silicon and Intel joined with
-# lipo) inside Oryx.app, with the themes beside the binary where Oryx
-# looks first, the icon rendered from the SVG at the sizes an icns
-# holds, Info.plist with the version and every file type Oryx opens,
-# and an ad-hoc signature, enough to run without a developer account.
+# lipo) inside Oryx.app, with the themes under Contents/Resources, where
+# a bundle keeps its data (codesign takes every file under MacOS for
+# code) and where Oryx looks on macOS, the icon rendered from the SVG
+# at the sizes an icns holds, Info.plist with the version and every
+# file type Oryx opens, and an ad-hoc signature, enough to run without
+# a developer account.
 # The disk image carries the app and a link to Applications. The output
 # folder receives the .dmg and its SHA-256 line.
 set -eu
@@ -37,7 +39,7 @@ lipo -create -output "$app/Contents/MacOS/oryx" \
     target/aarch64-apple-darwin/release/oryx \
     target/x86_64-apple-darwin/release/oryx
 lipo -info "$app/Contents/MacOS/oryx"
-cp -R themes "$app/Contents/MacOS/themes"
+cp -R themes "$app/Contents/Resources/themes"
 cp -R examples "$app/Contents/Resources/examples"
 cp LICENSE "$app/Contents/Resources/LICENSE"
 
