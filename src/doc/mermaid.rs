@@ -6,9 +6,13 @@
 
 use std::sync::Arc;
 
-use merman::render::{HeadlessError, HeadlessRenderer, HostThemeProfile, HostThemeRoles};
+use merman::render::{
+    HeadlessError, HeadlessRenderer, HostThemeAppearance, HostThemeOutput, HostThemeProfile,
+    HostThemeRoles,
+};
 
-use crate::style::theme::{hex_string, Rgba, Theme};
+use crate::style::fonts::BODY_FAMILY;
+use crate::style::theme::{contrast, hex_string, Rgba, Theme};
 
 /// Oryx's Mermaid error. The renderer's own error type never crosses
 /// this module; `Parse` and `Render` carry its message, which reading
@@ -114,9 +118,15 @@ impl MermaidTheme {
     /// The renderer's theme: this palette's six roles as Merman host
     /// roles, everything the six miss left for Merman to derive — note,
     /// actor, cluster and series colors come from the base set, not
-    /// from twenty more Theme fields.
+    /// from twenty more Theme fields. The appearance the derivations
+    /// key on is the ground's own lightness; the diagram font is the
+    /// body font resvg's generic families already resolve to; the
+    /// output is the resvg-safe editor preset, because Oryx's consumer
+    /// of the svg is resvg/usvg, not a browser.
     fn host_profile(&self) -> HostThemeProfile {
         HostThemeProfile {
+            appearance: self.appearance(),
+            font_family: Some(format!("\"{BODY_FAMILY}\", sans-serif")),
             roles: HostThemeRoles {
                 canvas: Some(hex_string(self.background)),
                 surface: Some(hex_string(self.primary)),
@@ -124,9 +134,40 @@ impl MermaidTheme {
                 text: Some(hex_string(self.foreground)),
                 border: Some(hex_string(self.border)),
                 line: Some(hex_string(self.line)),
+                // Labels sit where edges cross; the ground behind them
+                // keeps the text legible in both palettes.
+                edge_label_background: Some(hex_string(self.background)),
                 ..HostThemeRoles::default()
             },
+            series_palette: [self.accent, self.line, self.border, self.primary]
+                .iter()
+                .map(|color| hex_string(*color))
+                .collect(),
+            output: HostThemeOutput::resvg_safe_editor(),
             ..HostThemeProfile::default()
+        }
+    }
+
+    /// Which way Merman derives its unset roles: a ground lighter
+    /// against black than white reads light. The crate's own contrast
+    /// math answers, crossover at mid-gray.
+    fn appearance(&self) -> HostThemeAppearance {
+        let black = Rgba {
+            r: 0,
+            g: 0,
+            b: 0,
+            a: 255,
+        };
+        let white = Rgba {
+            r: 255,
+            g: 255,
+            b: 255,
+            a: 255,
+        };
+        if contrast(self.background, black) > contrast(self.background, white) {
+            HostThemeAppearance::Light
+        } else {
+            HostThemeAppearance::Dark
         }
     }
 }
@@ -194,8 +235,9 @@ pub fn cache_key(source: &str, theme: &MermaidTheme) -> MermaidCacheKey {
 /// source arrives trimmed by the caller or here; empty never reaches
 /// the renderer. Strict parsing, so a bad diagram lands in the error
 /// panel instead of a guessed-at picture; the vendored text metrics
-/// Mermaid browsers run on; the resvg-safe pipeline, because Oryx's
-/// consumer of the svg is resvg/usvg.
+/// Mermaid browsers run on; the host theme's resvg-safe editor output,
+/// because Oryx's consumer of the svg is resvg/usvg — the profile
+/// carries the pipeline, so the plain render call already runs it.
 pub fn render(source: &str, theme: &MermaidTheme) -> Result<MermaidRender, MermaidError> {
     let source = source.trim();
     if source.is_empty() {
@@ -208,7 +250,7 @@ pub fn render(source: &str, theme: &MermaidTheme) -> Result<MermaidRender, Merma
         .with_vendored_text_measurer()
         .with_diagram_id(&key.svg_id());
     let svg = renderer
-        .render_svg_resvg_safe_sync(source)
+        .render_svg_sync(source)
         .map_err(headless_error)?
         .ok_or_else(|| MermaidError::Parse("no Mermaid diagram detected".to_string()))?;
     let (width, height) = dimensions(&svg)?;
@@ -500,5 +542,62 @@ mod tests {
             cache_key(source, &MermaidTheme::from_oryx(&Theme::default_dark())),
             "the same theme keys stably"
         );
+    }
+
+    /// The host profile carries more than colors: the appearance read
+    /// off the ground, the body font resvg's generic families resolve
+    /// to, the canvas root background of the resvg-safe editor output,
+    /// and the label ground.
+    #[test]
+    fn the_host_profile_carries_font_output_and_appearance() {
+        use merman::render::HostThemeRootBackground;
+        let dark = MermaidTheme::from_oryx(&Theme::default_dark());
+        let profile = dark.host_profile();
+        assert_eq!(profile.appearance, HostThemeAppearance::Dark);
+        assert_eq!(
+            profile.font_family.as_deref(),
+            Some("\"DejaVu Sans\", sans-serif")
+        );
+        assert_eq!(
+            profile.output.root_background,
+            HostThemeRootBackground::Canvas
+        );
+        assert_eq!(
+            profile.roles.edge_label_background,
+            Some(hex_string(dark.background))
+        );
+        assert_eq!(profile.series_palette.len(), 4);
+        let light = MermaidTheme::from_oryx(&light_theme());
+        assert_eq!(light.host_profile().appearance, HostThemeAppearance::Light);
+    }
+
+    /// Both palettes rasterize through Oryx's own decode path, and the
+    /// resvg-safe editor output paints the canvas behind the diagram:
+    /// the corner pixel answers in the ground color, opaque, never
+    /// transparency the reading surface would show through.
+    #[test]
+    fn light_and_dark_diagrams_rasterize_on_a_painted_ground() {
+        for theme in [light_theme(), Theme::default_dark()] {
+            let palette = MermaidTheme::from_oryx(&theme);
+            let out = render("flowchart LR\n    A --> B", &palette)
+                .unwrap_or_else(|err| panic!("renders under the theme: {err}"));
+            let svg = std::str::from_utf8(&out.svg).unwrap();
+            assert!(svg.contains(BODY_FAMILY), "the body font paints");
+            let pixels = crate::doc::images::decode(&out.svg)
+                .expect("Oryx's own raster path accepts the svg");
+            let corner = pixels.get_pixel(0, 0);
+            let ground = palette.background;
+            for (got, want) in [
+                (corner[0], ground.r),
+                (corner[1], ground.g),
+                (corner[2], ground.b),
+            ] {
+                assert!(
+                    (i16::from(got) - i16::from(want)).abs() <= 2,
+                    "the corner paints the ground: {got} against {want}"
+                );
+            }
+            assert_eq!(corner[3], 255, "the ground is opaque");
+        }
     }
 }
