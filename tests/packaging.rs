@@ -1451,3 +1451,51 @@ fn the_mac_workflow_runs_the_script_and_uploads_what_it_writes() {
         result.expect("the script parses as POSIX shell");
     }
 }
+
+/// Runs the Arch package script on a release folder and returns what it
+/// said; the script refuses before any build when something is off.
+fn arch_script(version: &str, release: &Path) -> (bool, String) {
+    let out = Command::new("sh")
+        .arg(repo().join("packaging/arch.sh"))
+        .arg(version)
+        .arg(release)
+        .output()
+        .unwrap();
+    (
+        out.status.success(),
+        format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        ),
+    )
+}
+
+#[test]
+fn the_arch_script_refuses_until_the_release_files_and_the_checksums_exist() {
+    if let Some(result) = validate("sh", &["-n"], &repo().join("packaging/arch.sh")) {
+        result.expect("the script parses as POSIX shell");
+    }
+    let dir = std::env::temp_dir().join(format!("oryx-arch-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let text = pkgbuild("oryx-editor-bin");
+    let pkgver = pkgbuild_field(&text, "pkgver");
+    // A version the PKGBUILD does not carry: the checksums are not
+    // there yet, and the script names the step that writes them.
+    let (ok, said) = arch_script("0.0.0", &dir);
+    assert!(!ok);
+    assert!(said.contains("make channels"), "{said}");
+    // The PKGBUILD's own version, but no tarball beside it.
+    let (ok, said) = arch_script(pkgver, &dir);
+    assert!(!ok);
+    assert!(said.contains("make release"), "{said}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn the_makefile_builds_the_arch_package_after_the_channels() {
+    let makefile = std::fs::read_to_string(repo().join("Makefile")).unwrap();
+    assert!(makefile.contains("arch:\n\tsh packaging/arch.sh $(VERSION) release"));
+    assert!(makefile.contains(".PHONY: check audit release channels arch"));
+}

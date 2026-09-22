@@ -44,6 +44,11 @@ release: audit
 channels:
 	sh packaging/channels.sh $(VERSION)
 
+# The Arch package from the release tarball, after channels wrote the
+# checksums into the PKGBUILD; lands in release/ beside the other files.
+arch:
+	sh packaging/arch.sh $(VERSION) release
+
 bump:
 	sh packaging/bump.sh $(VERSION)
 
@@ -56,4 +61,4 @@ install:
 	cp -r examples ~/.local/share/oryx/examples
 	~/.local/bin/oryx --register
 
-.PHONY: check audit release channels bump install
+.PHONY: check audit release channels arch bump install
