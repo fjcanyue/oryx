@@ -28,9 +28,8 @@ ignore = "0.4.33"
 markup5ever_rcdom = "0.39"
 # SVG output only: the default features pull the `mmdc`-style CLI (clap)
 # and a PNG rasterizer (resvg/usvg) Oryx already has its own copy of.
-mermaid-rs-renderer = { version = "0.3.1", default-features = false }
-# The incoming renderer: parity-oriented Mermaid, SVG out. `render` only —
-# `raster` would drag a second resvg/usvg stack in beside Oryx's own.
+# The diagram renderer: parity-oriented Mermaid, SVG out. `render` only
+# — `raster` would drag a second resvg/usvg stack in beside Oryx's own.
 merman = { version = "=0.7.0", default-features = false, features = ["render"] }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "rayon"] }
 miniz_oxide = "0.8"
