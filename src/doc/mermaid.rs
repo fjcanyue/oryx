@@ -548,4 +548,194 @@ mod tests {
             assert_eq!(corner[3], 255, "the ground is opaque");
         }
     }
+
+    /// The neon regression theme from the design: every accent role is
+    /// eye-searing green, the structural roles stay neutral.
+    fn neon_presentation(dark: bool) -> MermaidPresentation {
+        let mut theme = if dark {
+            Theme::default_dark()
+        } else {
+            light_theme()
+        };
+        let green = parse_hex("#00FF00").unwrap();
+        theme.text.link = green;
+        theme.syntax.function = green;
+        theme.syntax.keyword = green;
+        theme.alerts.tip = green;
+        MermaidPresentation::from_oryx(&theme)
+    }
+
+    /// The ER bug that started the redesign: the relationship label
+    /// `contains` painted the accent green because the old host
+    /// profile fed `surface_alt = accent` into `tertiaryColor`. The
+    /// label box now paints the label surface, the entities the
+    /// surface, and no green appears anywhere in a structural figure.
+    #[test]
+    fn er_relationship_labels_paint_the_label_surface() {
+        for dark in [false, true] {
+            let presentation = neon_presentation(dark);
+            let out = render(
+                "erDiagram\n    TABLE_A ||--o{ TABLE_B : contains",
+                &presentation,
+            )
+            .expect("the ER diagram renders");
+            let svg = std::str::from_utf8(&out.svg).unwrap();
+            let palette = &presentation.palette;
+            assert!(
+                svg.contains(".relationshipLabelBox"),
+                "the renderer writes the fixed selector"
+            );
+            assert!(
+                svg.contains(&format!(
+                    ".relationshipLabelBox{{fill:{}",
+                    hex_string(palette.label_surface)
+                )),
+                "the relationship label paints the label surface"
+            );
+            assert!(
+                svg.contains(&format!(".entityBox{{fill:{}", hex_string(palette.surface))),
+                "the entity paints the surface"
+            );
+            assert!(
+                !svg.contains("#00FF00") && !svg.contains("#00ff00"),
+                "the neon accent never paints an ER figure (dark={dark})"
+            );
+        }
+    }
+
+    /// The sequence twin of the same bug: the actor box painted the
+    /// accent. Actors are boxes — the surface.
+    #[test]
+    fn sequence_actors_paint_the_surface() {
+        for dark in [false, true] {
+            let presentation = neon_presentation(dark);
+            let out = render(
+                "sequenceDiagram\n    Alice->>Bob: Hello",
+                &presentation,
+            )
+            .expect("the sequence diagram renders");
+            let svg = std::str::from_utf8(&out.svg).unwrap();
+            let palette = &presentation.palette;
+            assert!(
+                svg.contains(&format!("fill:{}", hex_string(palette.surface))),
+                "an actor box fills with the surface"
+            );
+            assert!(
+                !svg.contains("#00FF00") && !svg.contains("#00ff00"),
+                "the neon accent never paints a sequence figure (dark={dark})"
+            );
+        }
+    }
+
+    /// Requirement holds the same contract: boxes on the surface,
+    /// relation labels on the label ground.
+    #[test]
+    fn requirement_boxes_and_relation_labels_hold_the_contract() {
+        let presentation = neon_presentation(true);
+        let source = "requirementDiagram\n    requirement req {\n        id: 1\n        text: the requirement\n        risk: high\n        verifymethod: analysis\n    }\n    element entity {\n        type: simulation\n    }\n    entity - satisfies -> req";
+        let out = render(source, &presentation).expect("the requirement diagram renders");
+        let svg = std::str::from_utf8(&out.svg).unwrap();
+        let palette = &presentation.palette;
+        assert!(
+            svg.contains(&format!(".reqBox{{fill:{}", hex_string(palette.surface))),
+            "the requirement box paints the surface"
+        );
+        assert!(
+            svg.contains(&format!(".reqLabelBox{{fill:{}", hex_string(palette.label_surface))),
+            "the relation label paints the label surface"
+        );
+        assert!(
+            !svg.contains("#00FF00") && !svg.contains("#00ff00"),
+            "the neon accent never paints a requirement figure"
+        );
+    }
+
+    /// Data figures keep their color: pie slices take the series, not
+    /// the structural grays.
+    #[test]
+    fn pie_slices_paint_the_series() {
+        let presentation = MermaidPresentation::from_oryx(&Theme::default_dark());
+        let out = render("pie title Tasks\n    \"Done\" : 70\n    \"Todo\" : 30", &presentation)
+            .expect("the pie renders");
+        let svg = std::str::from_utf8(&out.svg).unwrap();
+        for index in 0..2 {
+            assert!(
+                svg.contains(&hex_string(presentation.palette.series[index])),
+                "pie slice {index} paints its series color"
+            );
+        }
+    }
+
+    /// GitGraph branches are categories: the branch color is a series
+    /// slot and its label the readable side of that slot.
+    #[test]
+    fn gitgraph_branches_paint_the_series() {
+        let presentation = MermaidPresentation::from_oryx(&Theme::default_dark());
+        let source = "gitGraph\n    commit id: \"INIT\"\n    branch develop\n    commit id: \"A\"\n    checkout main\n    commit id: \"B\"";
+        let out = render(source, &presentation).expect("the gitgraph renders");
+        let svg = std::str::from_utf8(&out.svg).unwrap();
+        assert!(
+            svg.contains(&hex_string(presentation.palette.series[0])),
+            "the first branch paints its series color"
+        );
+        assert!(
+            svg.contains(&hex_string(presentation.palette.on_series[0])),
+            "the branch label paints the readable side"
+        );
+    }
+
+    /// Gantt's semantics survive the structural palette: critical
+    /// tasks keep the danger border while their ground is repaired
+    /// toward readable.
+    #[test]
+    fn gantt_critical_tasks_keep_the_danger_border() {
+        let presentation = MermaidPresentation::from_oryx(&Theme::default_dark());
+        let source = "gantt\n    dateFormat YYYY-MM-DD\n    section Section\n    A task :a1, 2024-01-01, 30d\n    Critical task :crit, 2024-01-01, 10d";
+        let out = render(source, &presentation).expect("the gantt renders");
+        let svg = std::str::from_utf8(&out.svg).unwrap();
+        let palette = &presentation.palette;
+        assert!(
+            svg.contains(&hex_string(palette.danger)),
+            "the critical border keeps the danger color"
+        );
+        assert!(
+            svg.contains(&hex_string(palette.status_surface(palette.danger))),
+            "the critical ground is the repaired danger surface"
+        );
+    }
+
+    /// A user's explicit node style is their intent: the adapter must
+    /// not repaint a node the user colored.
+    #[test]
+    fn a_users_explicit_node_style_survives() {
+        let presentation = MermaidPresentation::from_oryx(&Theme::default_dark());
+        let out = render(
+            "flowchart LR\n    A --> B\n    style A fill:#00ff00",
+            &presentation,
+        )
+        .expect("the styled flowchart renders");
+        let svg = std::str::from_utf8(&out.svg).unwrap();
+        assert!(
+            svg.contains("#00ff00") || svg.contains("#00FF00"),
+            "the user's green paints"
+        );
+    }
+
+    /// A diagram's frontmatter config outranks the host defaults, the
+    /// same precedence Mermaid itself runs: user, then host, then
+    /// renderer. The variable is `mainBkg` — the one the flowchart
+    /// fill actually reads; `primaryColor` alone does not derive into
+    /// it under Merman 0.7's theme expansion.
+    #[test]
+    fn frontmatter_theme_variables_outrank_the_host() {
+        let presentation = MermaidPresentation::from_oryx(&Theme::default_dark());
+        let source =
+            "%%{init: {\"themeVariables\": {\"mainBkg\": \"#123456\"}}}%%\nflowchart LR\n    A --> B";
+        let out = render(source, &presentation).expect("the frontmatter flowchart renders");
+        let svg = std::str::from_utf8(&out.svg).unwrap();
+        assert!(
+            svg.contains("#123456"),
+            "the user's node fill paints, not the host surface"
+        );
+    }
 }

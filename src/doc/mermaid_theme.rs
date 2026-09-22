@@ -523,6 +523,67 @@ mod vars {
     pub const NOTE_BORDER_COLOR: &str = "noteBorderColor";
     pub const CLUSTER_BKG: &str = "clusterBkg";
     pub const CLUSTER_BORDER: &str = "clusterBorder";
+    // sequence
+    pub const ACTOR_BKG: &str = "actorBkg";
+    pub const ACTOR_BORDER: &str = "actorBorder";
+    pub const ACTOR_TEXT_COLOR: &str = "actorTextColor";
+    pub const ACTOR_LINE_COLOR: &str = "actorLineColor";
+    pub const SIGNAL_COLOR: &str = "signalColor";
+    pub const SIGNAL_TEXT_COLOR: &str = "signalTextColor";
+    pub const LABEL_BOX_BKG_COLOR: &str = "labelBoxBkgColor";
+    pub const LABEL_BOX_BORDER_COLOR: &str = "labelBoxBorderColor";
+    pub const LABEL_TEXT_COLOR: &str = "labelTextColor";
+    pub const LOOP_TEXT_COLOR: &str = "loopTextColor";
+    pub const ACTIVATION_BKG_COLOR: &str = "activationBkgColor";
+    pub const ACTIVATION_BORDER_COLOR: &str = "activationBorderColor";
+    pub const SEQUENCE_NUMBER_COLOR: &str = "sequenceNumberColor";
+    // requirement
+    pub const REQUIREMENT_BACKGROUND: &str = "requirementBackground";
+    pub const REQUIREMENT_BORDER_COLOR: &str = "requirementBorderColor";
+    pub const REQUIREMENT_TEXT_COLOR: &str = "requirementTextColor";
+    pub const RELATION_COLOR: &str = "relationColor";
+    pub const RELATION_LABEL_BACKGROUND: &str = "relationLabelBackground";
+    pub const RELATION_LABEL_COLOR: &str = "relationLabelColor";
+    pub const REQUIREMENT_EDGE_LABEL_BACKGROUND: &str = "requirementEdgeLabelBackground";
+    // gantt
+    pub const SECTION_BKG_COLOR: &str = "sectionBkgColor";
+    pub const SECTION_BKG_COLOR2: &str = "sectionBkgColor2";
+    pub const ALT_SECTION_BKG_COLOR: &str = "altSectionBkgColor";
+    pub const GRID_COLOR: &str = "gridColor";
+    pub const TODAY_LINE_COLOR: &str = "todayLineColor";
+    pub const TASK_BKG_COLOR: &str = "taskBkgColor";
+    pub const TASK_BORDER_COLOR: &str = "taskBorderColor";
+    pub const TASK_TEXT_COLOR: &str = "taskTextColor";
+    pub const TASK_TEXT_OUTSIDE_COLOR: &str = "taskTextOutsideColor";
+    pub const TASK_TEXT_DARK_COLOR: &str = "taskTextDarkColor";
+    pub const TASK_TEXT_CLICKABLE_COLOR: &str = "taskTextClickableColor";
+    pub const ACTIVE_TASK_BKG_COLOR: &str = "activeTaskBkgColor";
+    pub const ACTIVE_TASK_BORDER_COLOR: &str = "activeTaskBorderColor";
+    pub const DONE_TASK_BKG_COLOR: &str = "doneTaskBkgColor";
+    pub const DONE_TASK_BORDER_COLOR: &str = "doneTaskBorderColor";
+    pub const CRIT_BKG_COLOR: &str = "critBkgColor";
+    pub const CRIT_BORDER_COLOR: &str = "critBorderColor";
+    pub const EXCLUDE_BKG_COLOR: &str = "excludeBkgColor";
+    pub const VERT_LINE_COLOR: &str = "vertLineColor";
+    // gitgraph
+    pub const COMMIT_LABEL_COLOR: &str = "commitLabelColor";
+    pub const COMMIT_LABEL_BACKGROUND: &str = "commitLabelBackground";
+    pub const COMMIT_LINE_COLOR: &str = "commitLineColor";
+    pub const TAG_LABEL_COLOR: &str = "tagLabelColor";
+    pub const TAG_LABEL_BACKGROUND: &str = "tagLabelBackground";
+    pub const TAG_LABEL_BORDER: &str = "tagLabelBorder";
+    // pie
+    pub const PIE_STROKE_COLOR: &str = "pieStrokeColor";
+    pub const PIE_OUTER_STROKE_COLOR: &str = "pieOuterStrokeColor";
+    pub const PIE_TITLE_TEXT_COLOR: &str = "pieTitleTextColor";
+    pub const PIE_LEGEND_TEXT_COLOR: &str = "pieLegendTextColor";
+    pub const PIE_SECTION_TEXT_COLOR: &str = "pieSectionTextColor";
+    // architecture
+    pub const ARCH_EDGE_COLOR: &str = "archEdgeColor";
+    pub const ARCH_EDGE_ARROW_COLOR: &str = "archEdgeArrowColor";
+    pub const ARCH_GROUP_BORDER_COLOR: &str = "archGroupBorderColor";
+    // quadrant
+    pub const QUADRANT_POINT_FILL: &str = "quadrantPointFill";
 }
 
 /// The palette flattened into Mermaid's own knobs: every common theme
@@ -564,15 +625,145 @@ impl MermaidThemeVariables {
         vars.set(vars::NOTE_BORDER_COLOR, palette.border);
         vars.set(vars::CLUSTER_BKG, palette.surface_muted);
         vars.set(vars::CLUSTER_BORDER, palette.border);
+        vars.family(palette);
         vars
+    }
+
+    /// The family projection: the variables one diagram family reads
+    /// that the common names do not cover. Every mapping follows
+    /// `docs/MERMAN_THEME_COVERAGE.md` — structural families stay on
+    /// the structural surfaces, data families take the series, and the
+    /// status colors carry Gantt's semantics.
+    fn family(&mut self, palette: &MermaidSemanticPalette) {
+        self.sequence(palette);
+        self.requirement(palette);
+        self.gantt(palette);
+        self.gitgraph(palette);
+        self.pie(palette);
+        self.architecture(palette);
+        self.quadrant(palette);
+        self.categorical(palette);
+    }
+
+    /// Sequence: actors are boxes — the surface — lifelines and
+    /// signals are lines, control labels sit on the label ground, and
+    /// activations are the alternate surface. None of it is accent.
+    fn sequence(&mut self, palette: &MermaidSemanticPalette) {
+        self.set(vars::ACTOR_BKG, palette.surface);
+        self.set(vars::ACTOR_BORDER, palette.border);
+        self.set(vars::ACTOR_TEXT_COLOR, palette.text);
+        self.set(vars::ACTOR_LINE_COLOR, palette.line);
+        self.set(vars::SIGNAL_COLOR, palette.line);
+        self.set(vars::SIGNAL_TEXT_COLOR, palette.text);
+        self.set(vars::LABEL_BOX_BKG_COLOR, palette.label_surface);
+        self.set(vars::LABEL_BOX_BORDER_COLOR, palette.border);
+        self.set(vars::LABEL_TEXT_COLOR, palette.text);
+        self.set(vars::LOOP_TEXT_COLOR, palette.text);
+        self.set(vars::ACTIVATION_BKG_COLOR, palette.surface_alt);
+        self.set(vars::ACTIVATION_BORDER_COLOR, palette.border);
+        self.set(vars::SEQUENCE_NUMBER_COLOR, palette.text);
+    }
+
+    /// Requirement: boxes on the surface, relations as lines, relation
+    /// labels on the label ground — the same contract that fixed ER's
+    /// green `contains`.
+    fn requirement(&mut self, palette: &MermaidSemanticPalette) {
+        self.set(vars::REQUIREMENT_BACKGROUND, palette.surface);
+        self.set(vars::REQUIREMENT_BORDER_COLOR, palette.border);
+        self.set(vars::REQUIREMENT_TEXT_COLOR, palette.text);
+        self.set(vars::RELATION_COLOR, palette.line);
+        self.set(vars::RELATION_LABEL_BACKGROUND, palette.label_surface);
+        self.set(vars::RELATION_LABEL_COLOR, palette.text);
+        self.set(vars::REQUIREMENT_EDGE_LABEL_BACKGROUND, palette.label_surface);
+    }
+
+    /// Gantt: structural lanes and grid, categorical task bars with
+    /// their own readable text, done tasks as alternate surface, and
+    /// critical tasks as a repaired danger ground with the pure alert
+    /// on the border.
+    fn gantt(&mut self, palette: &MermaidSemanticPalette) {
+        self.set(vars::SECTION_BKG_COLOR, palette.surface_muted);
+        self.set(vars::SECTION_BKG_COLOR2, palette.surface_alt);
+        self.set(vars::ALT_SECTION_BKG_COLOR, palette.surface_muted);
+        self.set(vars::GRID_COLOR, palette.border);
+        self.set(vars::TODAY_LINE_COLOR, palette.accent);
+        self.set(vars::TASK_BKG_COLOR, palette.series[0]);
+        self.set(vars::TASK_BORDER_COLOR, palette.border);
+        self.set(vars::TASK_TEXT_COLOR, palette.on_series[0]);
+        self.set(vars::TASK_TEXT_OUTSIDE_COLOR, palette.text);
+        self.set(vars::TASK_TEXT_DARK_COLOR, palette.text);
+        self.set(vars::TASK_TEXT_CLICKABLE_COLOR, palette.accent);
+        self.set(vars::ACTIVE_TASK_BKG_COLOR, palette.series[1]);
+        self.set(vars::ACTIVE_TASK_BORDER_COLOR, palette.accent);
+        self.set(vars::DONE_TASK_BKG_COLOR, palette.surface_alt);
+        self.set(vars::DONE_TASK_BORDER_COLOR, palette.border);
+        self.set(vars::CRIT_BKG_COLOR, palette.status_surface(palette.danger));
+        self.set(vars::CRIT_BORDER_COLOR, palette.danger);
+        self.set(vars::EXCLUDE_BKG_COLOR, palette.surface_alt);
+        self.set(vars::VERT_LINE_COLOR, palette.warning);
+    }
+
+    /// GitGraph: branches are categories — the series — with the
+    /// readable side of each color for their labels; commits and tags
+    /// are structural.
+    fn gitgraph(&mut self, palette: &MermaidSemanticPalette) {
+        for index in 0..SERIES_SLOTS {
+            self.set(&format!("git{index}"), palette.series[index]);
+            self.set(&format!("gitInv{index}"), palette.on_series[index]);
+            self.set(&format!("gitBranchLabel{index}"), palette.on_series[index]);
+        }
+        self.set(vars::COMMIT_LABEL_COLOR, palette.text);
+        self.set(vars::COMMIT_LABEL_BACKGROUND, palette.label_surface);
+        self.set(vars::COMMIT_LINE_COLOR, palette.line);
+        self.set(vars::TAG_LABEL_COLOR, palette.text);
+        self.set(vars::TAG_LABEL_BACKGROUND, palette.surface_alt);
+        self.set(vars::TAG_LABEL_BORDER, palette.border);
+    }
+
+    /// Pie: slices are pure data — the series — with the canvas
+    /// separating them and structural text around them.
+    fn pie(&mut self, palette: &MermaidSemanticPalette) {
+        for index in 0..SERIES_SLOTS {
+            self.set(&format!("pie{}", index + 1), palette.series[index]);
+        }
+        self.set(vars::PIE_STROKE_COLOR, palette.canvas);
+        self.set(vars::PIE_OUTER_STROKE_COLOR, palette.border);
+        self.set(vars::PIE_TITLE_TEXT_COLOR, palette.text);
+        self.set(vars::PIE_LEGEND_TEXT_COLOR, palette.text);
+        self.set(vars::PIE_SECTION_TEXT_COLOR, palette.text);
+    }
+
+    /// Architecture: edges are lines, groups close with the border —
+    /// structure, not accents.
+    fn architecture(&mut self, palette: &MermaidSemanticPalette) {
+        self.set(vars::ARCH_EDGE_COLOR, palette.line);
+        self.set(vars::ARCH_EDGE_ARROW_COLOR, palette.line);
+        self.set(vars::ARCH_GROUP_BORDER_COLOR, palette.border);
+    }
+
+    /// Quadrant: the chart is structural; the points are categorical
+    /// marks and take the first series color.
+    fn quadrant(&mut self, palette: &MermaidSemanticPalette) {
+        self.set(vars::QUADRANT_POINT_FILL, palette.series[0]);
+    }
+
+    /// The indexed categorical scale the timeline, kanban, mindmap,
+    /// treemap, venn and journey renderers read: every slot is a
+    /// series color with its readable side alongside.
+    fn categorical(&mut self, palette: &MermaidSemanticPalette) {
+        for index in 0..SERIES_SLOTS {
+            self.set(&format!("cScale{index}"), palette.series[index]);
+            self.set(&format!("cScalePeer{index}"), palette.series[index]);
+            self.set(&format!("cScaleLabel{index}"), palette.on_series[index]);
+            self.set(&format!("cScaleInv{index}"), palette.on_series[index]);
+            self.set(&format!("venn{}", index + 1), palette.series[index]);
+            self.set(&format!("fillType{index}"), palette.series[index]);
+            self.set(&format!("actor{index}"), palette.series[index]);
+        }
     }
 
     fn set(&mut self, key: &str, color: Rgba) {
         self.values.insert(key.to_string(), hex_string(color));
-    }
-
-    fn set_str(&mut self, key: &str, value: &str) {
-        self.values.insert(key.to_string(), value.to_string());
     }
 
     /// One projected variable, for the contract tests.
@@ -918,5 +1109,66 @@ mod tests {
         assert_eq!(a, b);
         assert!(!a.theme_variables.is_empty());
         assert_eq!(a.theme_variables.len(), b.theme_variables.len());
+    }
+
+    /// The family contract, straight from the coverage matrix: the
+    /// sequence actor, the ER/requirement label grounds, the gitgraph
+    /// commit label, the gantt task bars, and the indexed categorical
+    /// scale all land where their renderers read them.
+    #[test]
+    fn the_family_projection_pins_the_contracts() {
+        let presentation = MermaidPresentation::from_oryx(&Theme::default_dark());
+        let palette = &presentation.palette;
+        let vars = &presentation.theme_variables;
+        for (key, color) in [
+            (vars::ACTOR_BKG, palette.surface),
+            (vars::LABEL_BOX_BKG_COLOR, palette.label_surface),
+            (vars::ACTIVATION_BKG_COLOR, palette.surface_alt),
+            (vars::RELATION_LABEL_BACKGROUND, palette.label_surface),
+            (vars::REQUIREMENT_BACKGROUND, palette.surface),
+            (vars::REQUIREMENT_EDGE_LABEL_BACKGROUND, palette.label_surface),
+            (vars::COMMIT_LABEL_BACKGROUND, palette.label_surface),
+            (vars::TAG_LABEL_BACKGROUND, palette.surface_alt),
+            (vars::TASK_BKG_COLOR, palette.series[0]),
+            (vars::TASK_TEXT_COLOR, palette.on_series[0]),
+            (vars::ACTIVE_TASK_BKG_COLOR, palette.series[1]),
+            (vars::CRIT_BORDER_COLOR, palette.danger),
+            (vars::PIE_STROKE_COLOR, palette.canvas),
+            (vars::ARCH_EDGE_COLOR, palette.line),
+            (vars::QUADRANT_POINT_FILL, palette.series[0]),
+        ] {
+            assert_eq!(
+                vars.get(key),
+                Some(hex_string(color).as_str()),
+                "{key} projects its palette role"
+            );
+        }
+        for index in 0..SERIES_SLOTS {
+            assert_eq!(
+                vars.get(&format!("git{index}")),
+                Some(hex_string(palette.series[index]).as_str()),
+                "git{index} takes its series color"
+            );
+            assert_eq!(
+                vars.get(&format!("gitBranchLabel{index}")),
+                Some(hex_string(palette.on_series[index]).as_str())
+            );
+            assert_eq!(
+                vars.get(&format!("pie{}", index + 1)),
+                Some(hex_string(palette.series[index]).as_str())
+            );
+            assert_eq!(
+                vars.get(&format!("cScaleLabel{index}")),
+                Some(hex_string(palette.on_series[index]).as_str())
+            );
+        }
+        // The critical-task ground is the danger repaired toward
+        // readable, never the raw alert.
+        let crit_ground = palette.status_surface(palette.danger);
+        assert_eq!(
+            vars.get(vars::CRIT_BKG_COLOR),
+            Some(hex_string(crit_ground).as_str())
+        );
+        assert_ne!(crit_ground, palette.danger);
     }
 }

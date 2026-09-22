@@ -22,6 +22,11 @@ HostThemeProfile.site_config    → 根级 diagram config（packet/treemap/radar
 classDef / style / inline style  → 最高（源码级样式）
 ```
 
+注意一个 0.7 契约细节：`%%{init}%%` 里只写 `primaryColor` 不会派生进
+flowchart 的节点填充——默认/base 主题展开时 `mainBkg` 是
+`set_if_missing(默认值)`，不从用户 `primaryColor` 推导。用户要改节点填充
+需直接写 `mainBkg`（Oryx 的 host 投影两个都设，故 host 侧无此问题）。
+
 Oryx 的投影：`MermaidPresentation`（`src/doc/mermaid_theme.rs`）= palette +
 显式 theme_variables（覆盖派生）+ family_config（site_config）。Oryx 显式
 设置的变量全部写入 `theme_variables`，因此对 Merman 派生值保持确定胜出。
@@ -148,7 +153,7 @@ Oryx 的投影：`MermaidPresentation`（`src/doc/mermaid_theme.rs`）= palette 
 | `pieOuterStrokeColor` | 外圈描边 | Structural | `border` |
 | `pieTitleTextColor` | 标题 | Structural | `text` |
 | `pieSectionTextColor` | 扇区文字 | Structural | `text` |
-| `pieLegendTextColor` | 图例文字 | Structural | `muted_text` |
+| `pieLegendTextColor` | 图例文字 | Structural | `text` |
 
 ## Categorical Scale（Timeline / Kanban / Mindmap / Treemap / Venn / Journey / XYChart / Radar）
 
