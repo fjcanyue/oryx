@@ -1,0 +1,8 @@
+flowchart TD
+    Start[Start] --> Input[Read input]
+    Input --> Check{Valid?}
+    Check -->|yes| Process[Process]
+    Check -->|no| Input
+    Process --> Store[(Database)]
+    Store --> Report[Write report]
+    Report --> End[Done]

@@ -8,7 +8,8 @@ description = "Fast editor for markdown and code, reader for ebooks and comics"
 edition = "2021"
 license = "GPL-3.0-only"
 repository = "https://github.com/wmahfoudh/oryx"
-rust-version = "1.88"
+# Merman 0.7 (edition 2024) sets the floor; Oryx itself stays on 2021.
+rust-version = "1.95"
 
 [dependencies]
 anyhow = "1"
@@ -27,7 +28,9 @@ ignore = "0.4.33"
 markup5ever_rcdom = "0.39"
 # SVG output only: the default features pull the `mmdc`-style CLI (clap)
 # and a PNG rasterizer (resvg/usvg) Oryx already has its own copy of.
-mermaid-rs-renderer = { version = "0.3.1", default-features = false }
+# The diagram renderer: parity-oriented Mermaid, SVG out. `render` only
+# — `raster` would drag a second resvg/usvg stack in beside Oryx's own.
+merman = { version = "=0.7.0", default-features = false, features = ["render"] }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "rayon"] }
 miniz_oxide = "0.8"
 noad = { path = "noad" }

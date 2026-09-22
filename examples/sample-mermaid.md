@@ -1,8 +1,8 @@
 # Mermaid diagrams
 
-Every diagram kind Oryx renders, in one file. The renderer is native
-Rust, not mermaid.js, so a few of the newest syntax forms may differ
-from the JavaScript library.
+Every diagram kind Oryx renders, in one file. The renderer is Merman,
+native Rust tracking mermaid.js 11.15; as a separate implementation,
+the newest syntax forms may still differ from the JavaScript library.
 
 ## Flowchart
 

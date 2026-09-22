@@ -251,7 +251,7 @@ flowchart LR
     B -->|No| D[Stop]
 ```
 
-A fenced `mermaid` block renders as the diagram itself, off the UI thread and cached per source and theme. The renderer is native Rust, not mermaid.js, so a few of the newest syntax forms may differ from the JavaScript library. Flowcharts, sequence, class, state, ER, mindmap, pie, timeline, gantt and git diagrams are recognized, along with the renderer's other kinds. A diagram too wide for the column shrinks to fit, keeping its proportions; an invalid one shows an error panel and the document reads on. See `examples/sample-mermaid.md` for one of every kind.
+A fenced `mermaid` block renders as the diagram itself, off the UI thread and cached per source and theme. The renderer is Merman, native Rust tracking mermaid.js 11.15; as a separate implementation, the newest syntax forms may still differ from the JavaScript library. Flowcharts, sequence, class, state, ER, mindmap, pie, timeline, gantt and git diagrams are recognized, along with the renderer's other kinds. A diagram too wide for the column shrinks to fit, keeping its proportions; an invalid one shows an error panel and the document reads on. See `examples/sample-mermaid.md` for one of every kind.
 
 ## Tables
 
