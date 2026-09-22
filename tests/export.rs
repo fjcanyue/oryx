@@ -570,6 +570,38 @@ fn math_mermaid_and_image_export_together() {
     assert!(text.contains('='), "the math stands: {text}");
 }
 
+/// The hard case end to end: Chinese state diagrams spread over many
+/// pages — the export pass renders them synchronously in the print
+/// (dark) theme, every one embeds, and the pages flow past them.
+#[test]
+fn chinese_state_diagrams_export_across_a_multi_page_document() {
+    let diagram = std::fs::read_to_string("tests/fixtures/mermaid/state_cjk_business_flow.mmd")
+        .expect("the fixture reads");
+    let mut source = String::from("# 业务状态流转\n\n");
+    for section in 1..=6 {
+        // One extra state per section keeps each diagram — and its
+        // media-cache key, and its pdf xobject — its own.
+        source.push_str(&format!(
+            "## 第{section}节\n\n{}\n\n```mermaid\n{diagram}    正常运行 --> 扩展态{section}: 扩展场景{section}\n```\n\n",
+            "跨页填充段落。".repeat(120)
+        ));
+    }
+    let doc = markdown::parse(source.as_str());
+    let pdf = Pdf::load_mem(&export_to_bytes(&doc, PageSize::A4)).unwrap();
+    assert!(
+        image_xobjects(&pdf) >= 6,
+        "every diagram embeds, got {}",
+        image_xobjects(&pdf)
+    );
+    assert!(
+        pdf.get_pages().len() >= 6,
+        "the document flows past the diagrams, got {} pages",
+        pdf.get_pages().len()
+    );
+    let text = pdf.extract_text(&[1]).unwrap();
+    assert!(text.contains("业务状态流转"), "the heading stands: {text}");
+}
+
 fn image_sample_widths(pdf: &Pdf) -> Vec<i64> {
     pdf.objects
         .values()
