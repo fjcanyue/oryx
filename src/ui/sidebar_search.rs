@@ -540,10 +540,14 @@ fn draw_hit_path(
         let (end, this_accent) = match matched.peek() {
             Some(m) if *m as usize == at => {
                 matched.next();
-                let mut end = at + 1;
+                // The run of matched characters walks character
+                // boundaries, not bytes: a matched Chinese character
+                // is three bytes wide, and cutting it at one would
+                // slice the string mid-character.
+                let mut end = next_boundary(&shown, at);
                 while matched.peek() == Some(&(end as u32)) {
                     matched.next();
-                    end += 1;
+                    end = next_boundary(&shown, end);
                 }
                 (end, true)
             }
@@ -733,6 +737,15 @@ fn draw_hit_line(
 /// The one-line word the results area shows while there is nothing to
 /// list: the state of the index, of the running query, or of the
 /// pattern that would not compile.
+/// The byte offset of the character after the one starting at `at`,
+/// which must be a boundary; past the last character, the text's end.
+fn next_boundary(text: &str, at: usize) -> usize {
+    text[at..]
+        .chars()
+        .next()
+        .map_or(text.len(), |c| at + c.len_utf8())
+}
+
 fn draw_status(painter: &mut Painter, theme: &Theme, width: f32, state: &SidebarSearchState) {
     let ui = &theme.ui;
     let fg = dim(ui.sidebar_fg);

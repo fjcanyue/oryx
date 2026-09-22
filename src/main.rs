@@ -125,6 +125,23 @@ fn parse_args(args: impl Iterator<Item = OsString>) -> Cli {
 fn main() -> ExitCode {
     #[cfg(windows)]
     attach_parent_console();
+    // A windowed app's panics are otherwise invisible: park them in a
+    // file so a field report carries its own stack.
+    std::panic::set_hook(Box::new(|info| {
+        let path = std::env::temp_dir().join("oryx-panic.log");
+        if let Ok(mut file) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+        {
+            use std::io::Write;
+            let _ = writeln!(
+                file,
+                "{info}\nbacktrace:\n{}\n---",
+                std::backtrace::Backtrace::force_capture()
+            );
+        }
+    }));
     match parse_args(std::env::args_os().skip(1)) {
         Cli::Version => {
             println!("{}", version_line(option_env!("ORYX_COMMIT")));
