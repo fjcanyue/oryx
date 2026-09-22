@@ -63,7 +63,7 @@ The command vocabulary is KaTeX compatible: Greek, binary operators, relations a
 
 ### Diagrams
 
-A fenced `mermaid` block renders as the diagram itself: flowcharts, sequence, class, state, ER, mindmap, pie, timeline, gantt and git graphs, drawn by a native Rust renderer — no browser engine, no JavaScript, no network. Diagrams follow the active theme, render off the UI thread and cache per source, so scrolling back to one costs nothing. A diagram wider than the column shrinks to fit, keeping its proportions, and PDF export includes it. An invalid diagram shows an error panel in its place and the document reads on. The renderer aims for mermaid.js compatibility but is a separate implementation, so a few of the newest syntax forms may differ. [SYNTAX.md](SYNTAX.md#diagrams) shows the syntax and [examples/sample-mermaid.md](examples/sample-mermaid.md) one of every kind.
+A fenced `mermaid` block renders as the diagram itself: flowcharts, sequence, class, state, ER, mindmap, pie, timeline, gantt and git graphs, drawn by [Merman](https://github.com/Latias94/merman), a parity-oriented native Rust renderer — no browser engine, no JavaScript, no network. Diagrams follow the active theme, render off the UI thread and cache per source, so scrolling back to one costs nothing. A diagram wider than the column shrinks to fit, keeping its proportions, and PDF export includes it. An invalid diagram shows an error panel in its place and the document reads on. The renderer tracks mermaid.js 11.15 as its compatibility baseline; as a separate implementation, the newest syntax forms may still differ. [SYNTAX.md](SYNTAX.md#diagrams) shows the syntax and [examples/sample-mermaid.md](examples/sample-mermaid.md) one of every kind.
 
 ## Books
 
