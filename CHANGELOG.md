@@ -12,6 +12,11 @@
 
 - `Ctrl+C` on the page now copies the selection with its formatting beside the plain text, so it pastes into an email or a Word document with its headings, lists, tables, quotes and links, and its code in a monospace face with the syntax colors of the export theme. Pictures and formulas go along as images inside the copy; a word processor and a desktop mail program show them, some web mail does not. A terminal or a text editor takes the plain text, as before. In the editor, `Ctrl+C` copies the text alone.
 
+### macOS
+
+- Oryx has a macOS build: one app for Apple Silicon and Intel Macs, built on GitHub's Mac machines from the release tag and shipped as a disk image. It is signed without a developer account, so the first open is blocked with "Apple could not verify" until you allow it once in System Settings, Privacy and Security, Open Anyway.
+- On the Mac, `Cmd+[` goes back and `Cmd+]` forward, the browser's keys, since `Option+Left` and `Option+Right` move by a word in every Mac app. The quick reference and the tips show the Mac's keys there.
+
 ### Editor
 
 - Empty lines added at the end of a file now get their rows. Before, each Enter at the end of a long file added a line the page did not show: the caret left the screen and the wheel could not reach it. The file's final line break still opens no empty row.

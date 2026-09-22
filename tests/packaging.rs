@@ -1365,3 +1365,89 @@ fn the_flathub_cargo_sources_match_the_lock_file() {
         "packaging/flathub/cargo-sources.json is stale: regenerate it with make channels"
     );
 }
+
+/// The Mac's Info.plist: the values under a key, as `<string>` items of
+/// the array that follows it, from every occurrence of the key.
+fn plist_strings_under(xml: &str, key: &str) -> Vec<String> {
+    // The parser refuses a document type declaration; the plist keeps
+    // its own for macOS, and the line goes for the read here.
+    let xml: String = xml
+        .lines()
+        .filter(|line| !line.starts_with("<!DOCTYPE"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let doc = roxmltree::Document::parse(&xml).expect("the plist parses as XML");
+    let mut out = Vec::new();
+    for node in doc.descendants().filter(|n| n.has_tag_name("key")) {
+        if node.text() != Some(key) {
+            continue;
+        }
+        let value = node.next_sibling_element().expect("a value after the key");
+        if value.has_tag_name("array") {
+            out.extend(
+                value
+                    .children()
+                    .filter(|n| n.has_tag_name("string"))
+                    .filter_map(|n| n.text())
+                    .map(str::to_string),
+            );
+        } else if let Some(text) = value.text() {
+            out.push(text.to_string());
+        }
+    }
+    out
+}
+
+#[test]
+fn the_mac_plist_claims_every_extension_the_code_opens() {
+    let xml = packaging("macos/Info.plist");
+    let mut listed = plist_strings_under(&xml, "CFBundleTypeExtensions");
+    listed.sort_unstable();
+    listed.dedup();
+    let mut expected: Vec<String> = oryx::doc::load::recognized_extensions()
+        .into_iter()
+        .map(str::to_string)
+        .collect();
+    expected.sort_unstable();
+    assert_eq!(listed, expected);
+}
+
+#[test]
+fn the_mac_plist_names_the_app_and_takes_its_version_from_the_build() {
+    let xml = packaging("macos/Info.plist");
+    assert_eq!(
+        plist_strings_under(&xml, "CFBundleIdentifier"),
+        [APP_ID.to_string()]
+    );
+    assert_eq!(plist_strings_under(&xml, "CFBundleExecutable"), ["oryx"]);
+    assert_eq!(plist_strings_under(&xml, "CFBundleIconFile"), ["oryx"]);
+    // The script fills the version in from Cargo.toml, so a bump never
+    // edits the plist and the two cannot drift apart.
+    assert_eq!(
+        plist_strings_under(&xml, "CFBundleShortVersionString"),
+        ["@VERSION@"]
+    );
+    assert_eq!(plist_strings_under(&xml, "CFBundleVersion"), ["@VERSION@"]);
+    assert!(!xml.contains("@VERSION@ "), "the placeholder stands alone");
+}
+
+#[test]
+fn the_mac_workflow_runs_the_script_and_uploads_what_it_writes() {
+    let workflow = std::fs::read_to_string(repo().join(".github/workflows/macos.yml")).unwrap();
+    assert!(workflow.contains("workflow_dispatch"), "started by hand");
+    assert!(workflow.contains("sh packaging/macos/build.sh release"));
+    assert!(workflow.contains("release/*.dmg"));
+    assert!(workflow.contains("release/*.sha256"));
+    assert!(
+        !workflow.contains("softprops") && !workflow.contains("gh release"),
+        "the workflow publishes nothing"
+    );
+    let script = packaging("macos/build.sh");
+    assert!(script.contains("aarch64-apple-darwin") && script.contains("x86_64-apple-darwin"));
+    assert!(script.contains("lipo -create"));
+    assert!(script.contains("codesign --force --sign -"));
+    assert!(script.contains("-macos-universal.dmg"));
+    if let Some(result) = validate("sh", &["-n"], &repo().join("packaging/macos/build.sh")) {
+        result.expect("the script parses as POSIX shell");
+    }
+}
