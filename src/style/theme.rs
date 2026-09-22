@@ -583,6 +583,13 @@ pub fn is_bundled(name: &str) -> bool {
     BUNDLED.contains(&name)
 }
 
+/// The shipped collection's names, in file order — the one list the
+/// all-theme test matrices iterate, so a new theme joins every gate
+/// the day its file lands.
+pub fn bundled_names() -> &'static [&'static str] {
+    BUNDLED
+}
+
 pub fn load_file(path: &Path) -> Option<Theme> {
     let text = match std::fs::read_to_string(path) {
         Ok(text) => text,
