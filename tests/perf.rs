@@ -1177,3 +1177,46 @@ fn pictures_measured() {
     }
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Two walks over the blocks, measured at the far end of the 8 MB
+/// fixtures: what stands at the top of the view, asked at every jump,
+/// at F1, at an open and at the quit, which `scroll::top_offset` finds
+/// by walking the blocks from the first; and the editor's landing with
+/// a remembered offset on a blank line of a code file, a line with no
+/// row of its own, whose row the line table answers.
+#[test]
+#[ignore = "timing probe, release mode"]
+fn top_offset_measured() {
+    use oryx::edit::caret;
+    use oryx::paint::scroll;
+    let best = |run: &dyn Fn() -> usize| {
+        (0..5)
+            .map(|_| {
+                let started = Instant::now();
+                let answer = run();
+                (started.elapsed().as_secs_f64() * 1000.0, answer)
+            })
+            .min_by(|a, b| a.0.total_cmp(&b.0))
+            .unwrap()
+    };
+    let (_, _, page) = measure_open(&large_gen::generate(8 * 1024 * 1024), "md");
+    let (_, page_lay) = measure_layout(&page, None);
+    let (_, _, code) = measure_open(&large_gen::generate_code(8 * 1024 * 1024), "rs");
+    let (_, code_lay) = measure_layout(&code, None);
+    let (page_ms, page_top) =
+        best(&|| scroll::top_offset(&page_lay, &page, page_lay.height - VIEWPORT_H));
+    let (code_ms, code_top) =
+        best(&|| scroll::top_offset(&code_lay, &code, code_lay.height - VIEWPORT_H));
+    let blank = code
+        .source
+        .rfind("\n\n")
+        .map(|at| at + 1)
+        .expect("a blank line");
+    let (land_ms, landed) =
+        best(&|| caret::landing(&code_lay, &code, None, Some(blank), 0.0, VIEWPORT_H));
+    println!(
+        "top offset at the end of 8 MB: markdown page {page_ms:.2}ms (offset {page_top}), \
+         code {code_ms:.2}ms (offset {code_top}); landing with a blank line remembered near \
+         the end of 8 MB code: {land_ms:.2}ms (offset {landed})"
+    );
+}

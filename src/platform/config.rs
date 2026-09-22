@@ -207,6 +207,11 @@ impl Positions {
     /// read.
     fn read(path: &Path) -> Option<Positions> {
         let text = std::fs::read_to_string(path).ok()?;
+        // A file cut down to nothing, by a full disk or by hand, is no
+        // empty list: it reads as a file that does not read.
+        if text.trim().is_empty() {
+            return None;
+        }
         toml::from_str(&text).ok()
     }
 
@@ -237,11 +242,13 @@ impl Positions {
         offset: usize,
         direction: crate::layout::DirectionMode,
     ) {
-        if let Some(fresh) = Self::read(path) {
-            *self = fresh;
-        }
-        self.remember(key, offset, direction);
-        self.save_to(path);
+        with_lock(path, || {
+            if let Some(fresh) = Self::read(path) {
+                *self = fresh;
+            }
+            self.remember(key, offset, direction);
+            self.save_to(path);
+        });
     }
 
     pub fn save(&self) {
@@ -381,6 +388,23 @@ pub fn save(config: &Config) {
 /// file that is missing or does not read is written whole. Keys this
 /// version does not know stay in the file.
 pub fn save_changes(path: &Path, config: &Config, seen: &toml::Table) -> toml::Table {
+    with_lock(path, || merge_changes(path, config, seen))
+}
+
+/// Holds the lock file beside `path` while `write` runs, so two windows
+/// merging into one file never read it in the same moment and drop
+/// each other's change. A lock that cannot be taken, in a folder that
+/// refuses the file, lets the write go on as before.
+fn with_lock<T>(path: &Path, write: impl FnOnce() -> T) -> T {
+    let held = std::fs::File::create(path.with_extension("lock"))
+        .and_then(|file| file.lock().map(|()| file))
+        .ok();
+    let out = write();
+    drop(held);
+    out
+}
+
+fn merge_changes(path: &Path, config: &Config, seen: &toml::Table) -> toml::Table {
     let current = table_of(config);
     let on_disk = std::fs::read_to_string(path)
         .ok()
@@ -472,6 +496,52 @@ mod tests {
         assert_eq!(on_disk.lookup("kept"), Some(12));
         assert_eq!(on_disk.lookup("new"), Some(7));
         std::fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn an_empty_positions_file_keeps_the_places_in_memory() {
+        use crate::layout::DirectionMode;
+        let path = temp_path("empty-books.toml");
+        let mut held = Positions::default();
+        held.remember("kept", 12, DirectionMode::default());
+        std::fs::write(&path, "").unwrap();
+        held.file_to(&path, "new", 7, DirectionMode::default());
+        let on_disk = Positions::load_from(&path);
+        assert_eq!(on_disk.lookup("kept"), Some(12));
+        assert_eq!(on_disk.lookup("new"), Some(7));
+        std::fs::remove_file(&path).unwrap();
+        std::fs::remove_file(path.with_extension("lock")).ok();
+    }
+
+    /// Two windows writing in the same moment: each read of the file
+    /// happens under the lock, so neither merge is built on a file the
+    /// other is about to replace.
+    #[test]
+    fn two_windows_saving_at_once_lose_nothing() {
+        let path = temp_path("two-windows-at-once.toml");
+        save_to(&path, &Config::default());
+        let writer = |path: PathBuf, tips: bool| {
+            std::thread::spawn(move || {
+                let (mut config, mut seen) = load_with_baseline(&path);
+                for round in 0..150u32 {
+                    if tips {
+                        config.tip = round + 1;
+                    } else {
+                        config.show_hidden = round % 2 == 1;
+                    }
+                    seen = save_changes(&path, &config, &seen);
+                }
+            })
+        };
+        let a = writer(path.clone(), true);
+        let b = writer(path.clone(), false);
+        a.join().unwrap();
+        b.join().unwrap();
+        let on_disk = load_from(&path);
+        assert_eq!(on_disk.tip, 150, "the first window's last change");
+        assert!(on_disk.show_hidden, "and the second window's");
+        std::fs::remove_file(&path).unwrap();
+        std::fs::remove_file(path.with_extension("lock")).ok();
     }
 
     /// Two windows share the file. Each wrote its whole memory, so the

@@ -378,7 +378,7 @@ impl CodeBody {
         if self.owned.is_some() {
             return None;
         }
-        let range = &self.lines[index];
+        let range = self.lines.get(index)?;
         Some(range.start as usize..range.end as usize)
     }
 

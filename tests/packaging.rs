@@ -1447,6 +1447,10 @@ fn the_mac_workflow_runs_the_script_and_uploads_what_it_writes() {
     assert!(script.contains("lipo -create"));
     assert!(script.contains("codesign --force --sign -"));
     assert!(script.contains("-macos-universal.dmg"));
+    assert!(
+        script.contains("trap 'rm -rf \"$stage\"' EXIT"),
+        "the staging folder goes on a failure too"
+    );
     if let Some(result) = validate("sh", &["-n"], &repo().join("packaging/macos/build.sh")) {
         result.expect("the script parses as POSIX shell");
     }
@@ -1454,6 +1458,18 @@ fn the_mac_workflow_runs_the_script_and_uploads_what_it_writes() {
 
 /// Runs the Arch package script on a release folder and returns what it
 /// said; the script refuses before any build when something is off.
+/// Whether every tool `packaging/arch.sh` gates on answers; the tests
+/// that drive the script skip without them.
+fn arch_tools_present() -> bool {
+    for tool in ["makepkg", "fakeroot", "rsvg-convert", "git"] {
+        if Command::new(tool).arg("--version").output().is_err() {
+            eprintln!("{tool} is not installed, skipped");
+            return false;
+        }
+    }
+    true
+}
+
 fn arch_script(version: &str, release: &Path) -> (bool, String) {
     let out = Command::new("sh")
         .arg(repo().join("packaging/arch.sh"))
@@ -1476,6 +1492,12 @@ fn the_arch_script_refuses_until_the_release_files_and_the_checksums_exist() {
     if let Some(result) = validate("sh", &["-n"], &repo().join("packaging/arch.sh")) {
         result.expect("the script parses as POSIX shell");
     }
+    // The script names a missing tool before anything else, so its
+    // refusals are reachable only where the tools are; the AUR source
+    // package's own check runs this test in a build chroot without git.
+    if !arch_tools_present() {
+        return;
+    }
     let dir = std::env::temp_dir().join(format!("oryx-arch-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
@@ -1490,6 +1512,57 @@ fn the_arch_script_refuses_until_the_release_files_and_the_checksums_exist() {
     let (ok, said) = arch_script(pkgver, &dir);
     assert!(!ok);
     assert!(said.contains("make release"), "{said}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A tarball of the PKGBUILD's version that is not the release's fails
+/// makepkg's checksum, past the point where the script made its work
+/// folder; the folder must be gone all the same. TMPDIR aims mktemp at
+/// a folder of the test's own, so what is left there is the script's.
+#[test]
+fn the_arch_script_leaves_no_work_folder_behind_a_failure() {
+    if !arch_tools_present() {
+        return;
+    }
+    let text = pkgbuild("oryx-editor-bin");
+    let pkgver = pkgbuild_field(&text, "pkgver");
+    let tag = format!("v{pkgver}");
+    let tagged = Command::new("git")
+        .args([
+            "-C",
+            &repo().display().to_string(),
+            "rev-parse",
+            "--verify",
+            "--quiet",
+        ])
+        .arg(format!("{tag}^{{commit}}"))
+        .output()
+        .is_ok_and(|out| out.status.success());
+    if !tagged {
+        eprintln!("the tag {tag} is not in this checkout, skipped");
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("oryx-arch-fail-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let release = dir.join("release");
+    let tmp = dir.join("tmp");
+    std::fs::create_dir_all(&release).unwrap();
+    std::fs::create_dir_all(&tmp).unwrap();
+    std::fs::write(
+        release.join(format!("oryx-{pkgver}-linux-x86_64.tar.gz")),
+        b"not the release tarball",
+    )
+    .unwrap();
+    let out = Command::new("sh")
+        .arg(repo().join("packaging/arch.sh"))
+        .arg(pkgver)
+        .arg(&release)
+        .env("TMPDIR", &tmp)
+        .output()
+        .unwrap();
+    assert!(!out.status.success(), "the checksum refuses the tarball");
+    let left: Vec<_> = std::fs::read_dir(&tmp).unwrap().flatten().collect();
+    assert!(left.is_empty(), "left behind: {left:?}");
     let _ = std::fs::remove_dir_all(&dir);
 }
 

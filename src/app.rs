@@ -134,6 +134,7 @@ pub enum Launch {
 pub fn run(
     launch: Launch,
     theme_name: Option<String>,
+    second: bool,
     beside: Option<(i32, i32)>,
 ) -> anyhow::Result<()> {
     let recover_at_start = match &launch {
@@ -373,6 +374,7 @@ pub fn run(
         disk_check_at: Instant::now(),
         disk_misses: 0,
         file_deleted: false,
+        second,
         beside,
         crlf: opened_crlf,
         cr: opened_cr,
@@ -803,17 +805,23 @@ impl Wake {
     }
 }
 
-/// The arguments a second copy is started with: the position to open at
-/// through the private `--beside` flag when the first knows its own,
-/// then the file.
+/// The arguments a second copy is started with: the private `--beside`
+/// flag, carrying the position to open at when the first window knows
+/// its own and `none` when it does not (Wayland tells no window where
+/// it stands), then the file. The flag is what makes the copy a second
+/// window, whatever it carries.
 fn beside_args(path: &Path, at: Option<(i32, i32)>) -> Vec<std::ffi::OsString> {
-    let mut args = Vec::new();
-    if let Some((x, y)) = at {
-        args.push("--beside".into());
-        args.push(format!("{x},{y}").into());
-    }
+    let mut args = beside_flag(at);
     args.push(path.as_os_str().to_owned());
     args
+}
+
+fn beside_flag(at: Option<(i32, i32)>) -> Vec<std::ffi::OsString> {
+    let value = match at {
+        Some((x, y)) => format!("{x},{y}"),
+        None => "none".to_string(),
+    };
+    vec!["--beside".into(), value.into()]
 }
 
 /// A step down and right of a window's corner, where its second window
@@ -892,11 +900,7 @@ const RECOVER_LINE: &str = "A note from your last session was not saved.";
 /// the position through `--beside` when the first knows its own, then
 /// the note's folder through the private `--recover`.
 fn recover_args(folder: &Path, at: Option<(i32, i32)>) -> Vec<std::ffi::OsString> {
-    let mut args = Vec::new();
-    if let Some((x, y)) = at {
-        args.push("--beside".into());
-        args.push(format!("{x},{y}").into());
-    }
+    let mut args = beside_flag(at);
     args.push("--recover".into());
     args.push(folder.as_os_str().to_owned());
     args
@@ -1234,8 +1238,12 @@ struct App {
     /// file Oryx can write back it is the unsaved mark too: the title's
     /// dot, the question before closing, `Ctrl+S` writing the text back.
     file_deleted: bool,
-    /// Where to open, when a running copy started this one beside
-    /// itself: taken over the saved position, and never maximized.
+    /// Started by a running copy as its second window: it never asks
+    /// about leftover notes, the first window's question.
+    second: bool,
+    /// Where to open, when the copy that started this one knew its own
+    /// place: taken over the saved position, and never maximized. On
+    /// Wayland the desktop places every window and this stays None.
     beside: Option<(i32, i32)>,
     /// Normalized-text offsets of the open file's CRLF endings, for the
     /// ledger's byte-exact emission.
@@ -2629,6 +2637,11 @@ impl App {
             self.ensure_ledger();
         }
         let Some(ledger) = self.ledger.as_ref() else {
+            if self.document.book_id.is_some() {
+                self.show_notice("A book cannot be saved as a text file");
+            } else if self.path.is_some() {
+                self.show_notice("This file did not read cleanly, so Oryx will not write it back");
+            }
             return false;
         };
         let bytes = ledger.emit();
@@ -2701,7 +2714,10 @@ impl App {
     /// to its folder, and edit mode entered on the blank page.
     fn new_file(&mut self) {
         let mut dialog = rfd::FileDialog::new().set_file_name("untitled.txt");
-        if let Some(dir) = self.path.as_ref().and_then(|p| p.parent()) {
+        // The document's folder, which for the note and piped text is
+        // the one they came from, never Oryx's own folder that goes at
+        // quit with anything saved into it.
+        if let Some(dir) = self.document_dir() {
             dialog = dialog.set_directory(dir);
         }
         let Some(target) = dialog.save_file() else {
@@ -2818,11 +2834,9 @@ impl App {
             return;
         }
         if !self.on_note() {
-            self.note_from = self
-                .path
-                .as_deref()
-                .and_then(Path::parent)
-                .map(Path::to_path_buf);
+            // Piped text keeps the folder its command was typed in, so
+            // the note's dialog opens there too, never in the seat.
+            self.note_from = self.document_dir();
         }
         // A fresh note starts on its first line, whatever an earlier
         // one left under the same path.
@@ -3829,12 +3843,17 @@ impl App {
     /// picture above `attach::LIMIT` is reduced to it; Ctrl+Shift+V asks
     /// for every pixel with `full`.
     fn paste_picture(&mut self, full: bool) {
-        if !self.markdown_source() {
-            return;
-        }
+        // The clipboard offers a picture as PNG or not at all: a program
+        // that puts only a JPEG there gives nothing here, and the reader
+        // is told rather than left with a key that did nothing.
         let Some(picture) = self.clipboard.as_mut().and_then(|c| c.get_image().ok()) else {
+            self.show_notice("The clipboard holds no text and no picture Oryx can paste");
             return;
         };
+        if !self.markdown_source() {
+            self.show_notice("A picture pastes into a markdown file");
+            return;
+        }
         let Some(file) = self.pictures_home() else {
             return;
         };
@@ -5597,11 +5616,23 @@ impl App {
     /// file reopens it, through the unsaved question when there are
     /// edits, and the history moves only once the file really opens.
     fn step_history(&mut self, forward: bool) {
-        self.history
-            .retain(|place| place.file.as_deref().is_none_or(Path::exists));
         let here = self.here();
-        let Some(target) = self.history.peek(forward, here.as_ref()).cloned() else {
-            return;
+        // A place whose file is gone is dropped, with every other place
+        // of that file, and the walk goes on to the next; only the one
+        // stepped to is looked up on disk, since a stat of every place
+        // held is slow on a network folder.
+        let target = loop {
+            let Some(target) = self.history.peek(forward, here.as_ref()).cloned() else {
+                return;
+            };
+            match target.file.as_deref() {
+                Some(file) if !file.exists() => {
+                    let gone = file.to_path_buf();
+                    self.history
+                        .retain(|place| place.file.as_deref() != Some(gone.as_path()));
+                }
+                _ => break target,
+            }
         };
         if target.file == self.path {
             self.history.step(forward, here);
@@ -7985,7 +8016,7 @@ impl ApplicationHandler for App {
                 Some(leftover) => self.recover_here(leftover),
                 None => self.show_notice("The note could not be recovered"),
             }
-        } else if self.beside.is_none() {
+        } else if !self.second {
             self.offer_leftovers();
         }
         if let Some((bytes, kind)) = self.piped_at_start.take() {
@@ -8725,7 +8756,8 @@ mod tests {
         );
         assert_eq!(
             super::recover_args(folder, None),
-            ["--recover", "/state/oryx/notes/7-1-0"]
+            ["--beside", "none", "--recover", "/state/oryx/notes/7-1-0"],
+            "no place known, a second window still"
         );
     }
 
@@ -8994,8 +9026,12 @@ mod tests {
         );
         assert_eq!(
             super::beside_args(Path::new("/docs/notes.md"), None),
-            vec![OsString::from("/docs/notes.md")],
-            "on Wayland the compositor places it"
+            vec![
+                OsString::from("--beside"),
+                OsString::from("none"),
+                OsString::from("/docs/notes.md")
+            ],
+            "on Wayland the compositor places it, and the copy is still a second window"
         );
         assert_eq!(super::beside_step((100, 200)), (140, 240));
     }

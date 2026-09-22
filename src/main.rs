@@ -107,8 +107,10 @@ enum Cli {
     Run {
         path: Option<PathBuf>,
         theme: Option<String>,
-        /// Where to open, from a running copy that opens a second
-        /// window beside itself; private, absent from the usage.
+        /// Started by a running copy as a second window; private,
+        /// absent from the usage. `beside` is where to open when the
+        /// first window knew its own place, which Wayland never tells.
+        second: bool,
         beside: Option<(i32, i32)>,
         /// The folder of a leftover note to take over, from a running
         /// copy that recovers it in a second window; private too.
@@ -158,6 +160,7 @@ fn piped_bytes() -> Option<Vec<u8>> {
 fn parse_args(args: impl Iterator<Item = OsString>) -> Cli {
     let mut path: Option<PathBuf> = None;
     let mut theme: Option<String> = None;
+    let mut second = false;
     let mut beside: Option<(i32, i32)> = None;
     let mut recover: Option<PathBuf> = None;
     let mut piped = Piped::default();
@@ -173,20 +176,22 @@ fn parse_args(args: impl Iterator<Item = OsString>) -> Cli {
                 None => return Cli::Refused("--theme takes a theme name".to_string()),
             },
             Some("--beside") => {
-                let position = args
-                    .next()
-                    .and_then(|value| value.into_string().ok())
-                    .and_then(|value| {
-                        let (x, y) = value.split_once(',')?;
-                        Some((x.parse().ok()?, y.parse().ok()?))
-                    });
-                match position {
-                    Some(at) => beside = Some(at),
-                    None => return Cli::Refused("--beside takes a position as X,Y".to_string()),
+                let value = args.next().and_then(|value| value.into_string().ok());
+                let position = value.as_deref().and_then(|value| {
+                    let (x, y) = value.split_once(',')?;
+                    Some((x.parse().ok()?, y.parse().ok()?))
+                });
+                match (value.as_deref(), position) {
+                    (_, Some(at)) => beside = Some(at),
+                    (Some("none"), None) => {}
+                    _ => return Cli::Refused("--beside takes a position as X,Y".to_string()),
                 }
+                second = true;
             }
             Some("--as") => match args.next().and_then(|kind| kind.into_string().ok()) {
-                Some(kind) if oryx::doc::load::kind_is_plain(&kind) => piped.kind = Some(kind),
+                Some(kind) if !kind.starts_with('-') && oryx::doc::load::kind_is_plain(&kind) => {
+                    piped.kind = Some(kind);
+                }
                 _ => return Cli::Refused(AS_REFUSAL.to_string()),
             },
             Some("-") => piped.explicit = true,
@@ -200,9 +205,20 @@ fn parse_args(args: impl Iterator<Item = OsString>) -> Cli {
             _ => path = Some(PathBuf::from(&arg)),
         }
     }
+    // A lone - and --as are about the piped text; beside a file name
+    // one of the two would be dropped without a word.
+    if path.is_some() && piped.explicit {
+        return Cli::Refused(
+            "a lone - reads standard input and takes no file beside it".to_string(),
+        );
+    }
+    if path.is_some() && piped.kind.is_some() {
+        return Cli::Refused("--as goes with piped text, not with a file".to_string());
+    }
     Cli::Run {
         path,
         theme,
+        second,
         beside,
         recover,
         piped,
@@ -236,6 +252,7 @@ fn main() -> ExitCode {
         Cli::Run {
             path,
             theme,
+            second,
             beside,
             recover,
             piped,
@@ -245,7 +262,7 @@ fn main() -> ExitCode {
                 return ExitCode::FAILURE;
             }
             use std::io::IsTerminal;
-            let second_window = beside.is_some() || recover.is_some();
+            let second_window = second || recover.is_some();
             let terminal = std::io::stdin().is_terminal();
             let text = reads_stdin(&piped, path.is_some(), terminal, second_window)
                 .then(piped_bytes)
@@ -255,15 +272,20 @@ fn main() -> ExitCode {
                 (None, Some(bytes)) => app::Launch::Piped(bytes, piped.kind),
                 (None, None) => launch(path),
             };
-            run(launch, theme, beside)
+            run(launch, theme, second, beside)
         }
     }
 }
 
 /// The window's whole life; an error that ends it is named in the
 /// terminal.
-fn run(launch: app::Launch, theme: Option<String>, beside: Option<(i32, i32)>) -> ExitCode {
-    match app::run(launch, theme, beside) {
+fn run(
+    launch: app::Launch,
+    theme: Option<String>,
+    second: bool,
+    beside: Option<(i32, i32)>,
+) -> ExitCode {
+    match app::run(launch, theme, second, beside) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("oryx: {error}");
@@ -323,6 +345,48 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    #[test]
+    fn a_dash_or_a_kind_beside_a_file_is_refused() {
+        for line in [
+            &["notes.md", "-"][..],
+            &["-", "notes.md"],
+            &["--as", "md", "notes.md"],
+        ] {
+            assert!(
+                matches!(parse_args(args(line)), Cli::Refused(_)),
+                "{line:?}: the file or the piped text would be dropped without a word"
+            );
+        }
+    }
+
+    #[test]
+    fn as_refuses_an_option_as_its_kind() {
+        assert_eq!(
+            parse_args(args(&["--as", "--theme", "dracula"])),
+            Cli::Refused(AS_REFUSAL.to_string())
+        );
+        assert_eq!(
+            parse_args(args(&["--as", "-"])),
+            Cli::Refused(AS_REFUSAL.to_string())
+        );
+    }
+
+    #[test]
+    fn beside_none_marks_a_second_window_with_no_place() {
+        assert_eq!(
+            parse_args(args(&["--beside", "none", "notes.md"])),
+            Cli::Run {
+                path: Some(PathBuf::from("notes.md")),
+                theme: None,
+                second: true,
+                beside: None,
+                recover: None,
+                piped: Piped::default(),
+            },
+            "Wayland tells no window where it stands, and the copy is a second window still"
+        );
+    }
+
     fn args(list: &[&str]) -> impl Iterator<Item = OsString> {
         list.iter()
             .map(OsString::from)
@@ -370,6 +434,7 @@ mod tests {
             Cli::Run {
                 path: Some(PathBuf::from("notes.md")),
                 theme: Some("dracula".to_string()),
+                second: false,
                 beside: None,
                 recover: None,
                 piped: Piped::default(),
@@ -380,6 +445,7 @@ mod tests {
             Cli::Run {
                 path: None,
                 theme: None,
+                second: false,
                 beside: None,
                 recover: None,
                 piped: Piped::default(),
@@ -390,6 +456,7 @@ mod tests {
             Cli::Run {
                 path: Some(PathBuf::from("./--odd.md")),
                 theme: None,
+                second: false,
                 beside: None,
                 recover: None,
                 piped: Piped::default(),
@@ -429,6 +496,7 @@ mod tests {
             Cli::Run {
                 path: None,
                 theme: None,
+                second: true,
                 beside: Some((40, 60)),
                 recover: Some(PathBuf::from("/state/notes/7-1")),
                 piped: Piped::default(),
@@ -447,6 +515,7 @@ mod tests {
             Cli::Run {
                 path: Some(PathBuf::from("notes.md")),
                 theme: None,
+                second: true,
                 beside: Some((40, 60)),
                 recover: None,
                 piped: Piped::default(),
@@ -457,6 +526,7 @@ mod tests {
             Cli::Run {
                 path: None,
                 theme: None,
+                second: true,
                 beside: Some((-10, 7)),
                 recover: None,
                 piped: Piped::default(),
@@ -490,6 +560,7 @@ mod tests {
         let run = |piped: Piped| Cli::Run {
             path: None,
             theme: None,
+            second: false,
             beside: None,
             recover: None,
             piped,

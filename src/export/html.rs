@@ -10,6 +10,7 @@
 //! a bar on the left.
 
 use std::cmp::Ordering;
+use std::collections::HashMap;
 use std::fmt::Write;
 use std::ops::Range;
 
@@ -26,6 +27,7 @@ use crate::ui::selection::Selection;
 
 /// An encoded picture for an `<img>`, with the size it shows at in CSS
 /// pixels.
+#[derive(Clone)]
 pub struct Picture {
     pub mime: &'static str,
     pub bytes: Vec<u8>,
@@ -78,6 +80,7 @@ pub fn selection_html(
         notes: Vec::new(),
         quotes: Vec::new(),
         lists: Vec::new(),
+        seen: HashMap::new(),
     };
     for index in a.block..=b.block.min(doc.blocks.len() - 1) {
         let cut = Cut {
@@ -177,9 +180,21 @@ struct Writer<'a> {
     /// opened for.
     quotes: Vec<Option<AlertKind>>,
     lists: Vec<ListLevel>,
+    /// The pictures asked for so far, by source: a picture a page
+    /// shows twice is read and encoded once.
+    seen: HashMap<String, Option<Picture>>,
 }
 
 impl Writer<'_> {
+    fn picture(&mut self, src: &str) -> Option<Picture> {
+        if let Some(known) = self.seen.get(src) {
+            return known.clone();
+        }
+        let picture = self.pictures.image(src);
+        self.seen.insert(src.to_string(), picture.clone());
+        picture
+    }
+
     fn block(&mut self, index: usize, cut: &Cut) {
         let doc = self.doc;
         let block = &doc.blocks[index];
@@ -255,7 +270,13 @@ impl Writer<'_> {
                         body.push('\n');
                     }
                     any = true;
-                    let start = kept.as_ptr() as usize - line.as_ptr() as usize;
+                    // A blank line strictly inside the cut comes back as
+                    // an empty piece of its own, not a slice of the line.
+                    let start = if kept.is_empty() {
+                        0
+                    } else {
+                        kept.as_ptr() as usize - line.as_ptr() as usize
+                    };
                     let segments = highlights.get(i).map_or(&[][..], Vec::as_slice);
                     self.code_line(&mut body, kept, start, segments);
                 }
@@ -352,7 +373,7 @@ impl Writer<'_> {
             }
             BlockKind::Image { path, alt } => {
                 self.enter(block);
-                match self.pictures.image(path) {
+                match self.picture(path) {
                     Some(picture) => {
                         let _ = write!(self.out, "<p>{}</p>", img(&picture, alt, "", (None, None)));
                     }
@@ -391,10 +412,11 @@ impl Writer<'_> {
         }
         self.close_quotes_to(depth);
         while self.quotes.len() < depth {
-            let titled = block
-                .alert
-                .filter(|_| self.quotes.last().is_none_or(|a| *a != block.alert));
-            let bar = match block.alert {
+            // The alert is the innermost quote's: a `> > [!NOTE]` opens
+            // a plain quote around a note, as the page draws it.
+            let alert = block.alert.filter(|_| self.quotes.len() + 1 == depth);
+            let titled = alert.filter(|_| self.quotes.last().is_none_or(|a| *a != alert));
+            let bar = match alert {
                 Some(kind) => alert_color(self.theme, kind),
                 None => self.theme.blocks.quote_bar,
             };
@@ -411,7 +433,7 @@ impl Writer<'_> {
                     alert_title(kind)
                 );
             }
-            self.quotes.push(block.alert);
+            self.quotes.push(alert);
         }
     }
 
@@ -496,7 +518,7 @@ impl Writer<'_> {
             if let Some(href) = &link {
                 let _ = write!(out, "<a href=\"{}\">", escape(href));
             }
-            match self.pictures.image(&image.src) {
+            match self.picture(&image.src) {
                 Some(picture) => {
                     out.push_str(&img(&picture, text, "", (image.width, image.height)));
                 }

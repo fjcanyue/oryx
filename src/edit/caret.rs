@@ -374,10 +374,13 @@ impl Rowless {
 fn rowless(lay: &LayoutDoc, doc: &Document, offset: usize) -> Option<Rowless> {
     let block = doc.block_at_offset(offset)?;
     if doc.code_file || doc.plain_file {
-        let start = doc.blocks[block].range.start;
-        let end = offset.min(doc.source.len()).max(start);
-        let line = doc.source[start..end].matches('\n').count();
-        if let Some(seat) = lay.code_line_seat(block, line) {
+        // The line table answers by a binary search; a count of the
+        // newlines from the top grew with the file on every crossing.
+        let line = match &doc.blocks[block].kind {
+            BlockKind::CodeBlock { lines, .. } => lines.row_at(&doc.source, offset),
+            _ => None,
+        };
+        if let Some(seat) = line.and_then(|line| lay.code_line_seat(block, line)) {
             return Some(Rowless::Line(seat.y..seat.y + seat.height));
         }
     }

@@ -72,6 +72,27 @@ fn html_of_markdown(md: &str) -> Page {
     html_of(&markdown::parse(md))
 }
 
+/// Answers every picture and remembers what it was asked for.
+struct Counting {
+    asked: Vec<String>,
+}
+
+impl Pictures for Counting {
+    fn image(&mut self, src: &str) -> Option<Picture> {
+        self.asked.push(src.to_string());
+        Some(Picture {
+            mime: "image/png",
+            bytes: vec![1, 2, 3],
+            width: 4,
+            height: 4,
+        })
+    }
+
+    fn math(&mut self, _tex: &str, _display: bool) -> Option<Picture> {
+        None
+    }
+}
+
 fn walk(node: &Handle, out: &mut Vec<Handle>) {
     for child in node.children.borrow().iter() {
         out.push(child.clone());
@@ -712,4 +733,38 @@ fn a_local_picture_travels_as_its_own_bytes() {
         std::fs::read("examples/oryx-test.png").unwrap()
     );
     assert!(pictures.image("missing.png").is_none());
+}
+
+#[test]
+fn a_blank_line_inside_a_selected_code_block_is_kept() {
+    let html = html_of_markdown("```\none\n\nthree\n```\n");
+    assert_eq!(html.texts("pre"), ["one\n\nthree"]);
+}
+
+#[test]
+fn a_picture_shown_twice_is_asked_for_once() {
+    let doc = markdown::parse("![one](pic.png)\n\ntext\n\n![two](pic.png)\n");
+    let sel = selection::all(&doc).expect("something to select");
+    let mut pictures = Counting { asked: Vec::new() };
+    let html = Page::parse(selection_html(
+        &sel,
+        &doc,
+        &Theme::default_dark(),
+        &mut pictures,
+    ));
+    assert_eq!(html.elements("img").len(), 2);
+    assert_eq!(pictures.asked, ["pic.png"]);
+}
+
+#[test]
+fn a_nested_alert_marks_the_inner_quote() {
+    let html = html_of_markdown("> > [!NOTE]\n> > careful\n");
+    let quotes = html.elements("blockquote");
+    assert_eq!(quotes.len(), 2, "{html}");
+    assert_eq!(
+        children_tags(&quotes[0]),
+        ["blockquote"],
+        "the outer quote holds only the inner one: {html}"
+    );
+    assert_eq!(html.texts("strong"), ["Note"]);
 }

@@ -531,13 +531,18 @@ impl Parser {
         let mut tokens: Vec<Token> = Vec::new();
         let mut last = 0usize;
         let markdown = self.markdown;
+        // A diff's line is added, removed or a range whole, its scope
+        // pushed at the line's start: the first token answers for the
+        // line, and the other tokens never look.
+        let mut line_role: Option<Option<SyntaxRole>> = None;
         let mut push = |from: usize, to: usize, stack: &ScopeStack| {
             let to = to.min(line.len());
             if from < to {
                 let role = if markdown {
                     markdown_role(stack, hashes)
                 } else {
-                    role_for(stack)
+                    let diff = *line_role.get_or_insert_with(|| diff_role(stack));
+                    diff.unwrap_or_else(|| role_for(stack))
                 };
                 tokens.push(Token {
                     role,
@@ -867,21 +872,35 @@ fn markdown_role(stack: &ScopeStack, hashes: u8) -> SyntaxRole {
     SyntaxRole::Plain
 }
 
-/// The innermost scope with a known mapping wins. A diff's lines are
-/// the exception: a line marked as inserted, deleted or as a range is
-/// that from its first character to its last, its `+`, `-` or `@@`
-/// included, since a diff is read by whole lines of one color.
-fn role_for(stack: &ScopeStack) -> SyntaxRole {
+/// The whole-line role of a diff's line, from its first token's stack:
+/// a line marked as inserted, deleted or as a range is that from its
+/// first character to its last, its `+`, `-` or `@@` included, since a
+/// diff is read by whole lines of one color. The scopes are compared
+/// as scopes, outermost first, and asked once per line: as a string
+/// per scope per token it was a second allocation pass over every
+/// colored line, 14% on the 8 MB code highlight at Gate 3.
+fn diff_role(stack: &ScopeStack) -> Option<SyntaxRole> {
+    static DIFF_ROLES: OnceLock<[(Scope, SyntaxRole); 3]> = OnceLock::new();
+    let diff_roles = DIFF_ROLES.get_or_init(|| {
+        let scope = |name: &str| Scope::new(name).expect("a fixed scope name parses");
+        [
+            (scope("markup.inserted"), SyntaxRole::Added),
+            (scope("markup.deleted"), SyntaxRole::Removed),
+            (scope("meta.diff.range"), SyntaxRole::Range),
+        ]
+    });
     for scope in stack.as_slice() {
-        let name = scope.build_string();
-        if name.starts_with("markup.inserted") {
-            return SyntaxRole::Added;
-        } else if name.starts_with("markup.deleted") {
-            return SyntaxRole::Removed;
-        } else if name.starts_with("meta.diff.range") {
-            return SyntaxRole::Range;
+        for (prefix, role) in diff_roles {
+            if prefix.is_prefix_of(*scope) {
+                return Some(*role);
+            }
         }
     }
+    None
+}
+
+/// The innermost scope with a known mapping wins.
+fn role_for(stack: &ScopeStack) -> SyntaxRole {
     for scope in stack.as_slice().iter().rev() {
         let name = scope.build_string();
         let role = if name.starts_with("comment") {

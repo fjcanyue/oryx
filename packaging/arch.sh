@@ -27,6 +27,8 @@ tag="v$version"
 git -C "$root" rev-parse --verify --quiet "$tag^{commit}" >/dev/null || refuse "tag $tag is not in this checkout"
 
 work=$(mktemp -d)
+# The work folder goes on every exit, a failed makepkg included.
+trap 'rm -rf "$work"' EXIT
 start="$work/start"
 mkdir -p "$start" "$work/build"
 cp "$pkgbuild" "$start/PKGBUILD"
@@ -47,7 +49,6 @@ done
 # configuration compresses with.
 (cd "$start" && SRCDEST="$start" PKGDEST="$out" BUILDDIR="$work/build" LOGDEST="$work/build" \
     PKGEXT=.pkg.tar.zst makepkg -f --noconfirm)
-rm -rf "$work"
 package="$out/oryx-editor-bin-$version-1-x86_64.pkg.tar.zst"
 [ -f "$package" ] || refuse "makepkg wrote no package into $out"
 if command -v namcap >/dev/null 2>&1; then

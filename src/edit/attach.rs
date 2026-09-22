@@ -89,14 +89,34 @@ pub fn free_name(dir: &Path, name: &str) -> String {
     if !dir.join(name).exists() {
         return name.to_string();
     }
-    let (stem, ext) = match name.rsplit_once('.') {
-        Some((stem, ext)) => (stem, format!(".{ext}")),
-        None => (name, String::new()),
-    };
+    let (stem, ext) = split_extension(name);
     (2u32..)
         .map(|n| format!("{stem}-{n}{ext}"))
         .find(|candidate| !dir.join(candidate).exists())
         .unwrap_or_else(|| name.to_string())
+}
+
+/// A free name taken at once: the file is created empty under `dir`,
+/// so two windows saving a picture of the same name in the same moment
+/// get two names, and the caller writes over its own.
+pub fn claim_name(dir: &Path, name: &str) -> io::Result<String> {
+    let (stem, ext) = split_extension(name);
+    let later = (2u32..).map(|n| format!("{stem}-{n}{ext}"));
+    for candidate in std::iter::once(name.to_string()).chain(later) {
+        match std::fs::File::create_new(dir.join(&candidate)) {
+            Ok(_) => return Ok(candidate),
+            Err(err) if err.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(err) => return Err(err),
+        }
+    }
+    unreachable!("the numbered names never run out")
+}
+
+fn split_extension(name: &str) -> (&str, String) {
+    match name.rsplit_once('.') {
+        Some((stem, ext)) => (stem, format!(".{ext}")),
+        None => (name, String::new()),
+    }
 }
 
 /// The path of `image` from `dir` when it lies under it, the case of a
@@ -189,10 +209,14 @@ pub fn save_pasted(
     let dir = folder_of(file);
     let images = dir.join(FOLDER);
     std::fs::create_dir_all(&images)?;
-    let name = free_name(&images, &pasted_name(file, stamp));
-    picture
+    let name = claim_name(&images, &pasted_name(file, stamp))?;
+    let written = picture
         .save_with_format(images.join(&name), image::ImageFormat::Png)
-        .map_err(io::Error::other)?;
+        .map_err(io::Error::other);
+    if let Err(err) = written {
+        std::fs::remove_file(images.join(&name)).ok();
+        return Err(err);
+    }
     Ok(Saved {
         relative: Path::new(FOLDER).join(name),
         resized: target.map(|to| ((width, height), to)),
@@ -221,15 +245,18 @@ pub fn adopt_dropped(file: &Path, image: &Path) -> io::Result<Saved> {
         .ok_or_else(|| io::Error::other("the picture has no name"))?;
     let images = dir.join(FOLDER);
     std::fs::create_dir_all(&images)?;
-    let name = free_name(&images, &name);
-    let resized = match reduced(&image) {
-        Some(reduced) => {
-            reduced.write(&images.join(&name))?;
-            Some((reduced.from, reduced.to))
-        }
-        None => {
-            std::fs::copy(&image, images.join(&name))?;
-            None
+    let name = claim_name(&images, &name)?;
+    let written = match reduced(&image) {
+        Some(reduced) => reduced
+            .write(&images.join(&name))
+            .map(|()| Some((reduced.from, reduced.to))),
+        None => std::fs::copy(&image, images.join(&name)).map(|_| None),
+    };
+    let resized = match written {
+        Ok(resized) => resized,
+        Err(err) => {
+            std::fs::remove_file(images.join(&name)).ok();
+            return Err(err);
         }
     };
     Ok(Saved {
@@ -308,6 +335,22 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir.canonicalize().unwrap()
+    }
+
+    #[test]
+    fn a_claimed_name_is_taken_at_once() {
+        let dir = scratch("claim");
+        std::fs::create_dir_all(&dir).unwrap();
+        assert_eq!(claim_name(&dir, "dog.jpg").unwrap(), "dog.jpg");
+        assert!(
+            dir.join("dog.jpg").exists(),
+            "the name is held by an empty file"
+        );
+        assert_eq!(claim_name(&dir, "dog.jpg").unwrap(), "dog-2.jpg");
+        assert_eq!(claim_name(&dir, "dog.jpg").unwrap(), "dog-3.jpg");
+        assert_eq!(claim_name(&dir, "plain").unwrap(), "plain");
+        assert_eq!(claim_name(&dir, "plain").unwrap(), "plain-2");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

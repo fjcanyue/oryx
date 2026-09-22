@@ -262,6 +262,68 @@ fn item_columns(text: &str) -> Option<usize> {
         .then(|| indent_columns(&text[..indent]))
 }
 
+/// The column a list item's own text starts at: its indent, its marker
+/// and the space after, the column a nested item has to reach. A
+/// bullet's is two, `1.` has three, `10.` four.
+fn item_content_column(text: &str) -> Option<usize> {
+    let (indent, quote) = marker_seat(text);
+    if quote != indent {
+        return None;
+    }
+    let rest = &text[indent..];
+    list_marker(rest)?;
+    let head = if rest.starts_with(['-', '*', '+']) {
+        1
+    } else {
+        rest.bytes().take_while(u8::is_ascii_digit).count() + 1
+    };
+    let space = rest[head..]
+        .bytes()
+        .take_while(|c| *c == b' ' || *c == b'\t')
+        .count();
+    Some(indent_columns(&text[..indent]) + head + space)
+}
+
+/// The fence a line opens or closes, given the line's text after its
+/// quote marks: a backtick or a tilde run of three at the margin, up to
+/// three spaces in.
+fn fence_mark(text: &str) -> Option<char> {
+    let at_margin = text.trim_start_matches(' ');
+    if text.len() - at_margin.len() > 3 {
+        return None;
+    }
+    if at_margin.starts_with("```") {
+        Some('`')
+    } else if at_margin.starts_with("~~~") {
+        Some('~')
+    } else {
+        None
+    }
+}
+
+/// Where a YAML frontmatter ends: the offset past its closing `---`
+/// line, for a file that opens with one.
+fn frontmatter_end(source: &str) -> Option<usize> {
+    let mut at = 0;
+    for (index, line) in source.split_inclusive('\n').enumerate() {
+        let text = line.trim_end_matches(['\n', '\r']);
+        if index == 0 {
+            if text != "---" {
+                return None;
+            }
+        } else if text == "---" {
+            return Some(at + line.len());
+        }
+        at += line.len();
+    }
+    None
+}
+
+/// How far up the item above is looked for. Past this much text that
+/// ended no list there is none, and a Tab held down stays free: the
+/// cap `indent_unit` keeps, for the same reason.
+const ABOVE_CAP: usize = 64 * 1024;
+
 /// The outliner's rule, which is markdown's too: a list item sits at
 /// most one level below the item above it. Indented any further, or
 /// with no item above, it stops being a list item: after a blank line
@@ -293,9 +355,39 @@ pub fn nest_refusal(source: &str, start: usize, end: usize) -> Option<NestRefusa
         return None;
     }
     let mut margin_run = false;
-    for line in source[..start].lines().rev() {
+    let frontmatter = frontmatter_end(source);
+    let head = &source[..start];
+    let mut cursor = head.len();
+    let mut fence = None;
+    for raw in head.rsplit('\n') {
+        let line_start = cursor - raw.len();
+        cursor = line_start.saturating_sub(1);
+        if line_start == start {
+            continue;
+        }
+        // The frontmatter is the document's own, like a paragraph at
+        // the margin: nothing in it is the item above.
+        if start - line_start > ABOVE_CAP || frontmatter.is_some_and(|end| line_start < end) {
+            return Some(NestRefusal::NoItemAbove);
+        }
+        let line = raw.strip_suffix('\r').unwrap_or(raw);
         let (d, seat) = quote_seat(line);
         let text = &line[seat..];
+        // A fenced code block is skipped whole, whatever its lines look
+        // like; going up, its closing fence comes first. It ended the
+        // list above it as a paragraph at the margin does.
+        if let Some(mark) = fence_mark(text) {
+            fence = match fence {
+                Some(open) if open == mark => None,
+                Some(open) => Some(open),
+                None => Some(mark),
+            };
+            margin_run = true;
+            continue;
+        }
+        if fence.is_some() {
+            continue;
+        }
         let blank = text.trim().is_empty();
         if d != depth {
             if blank && d < depth {
@@ -306,8 +398,10 @@ pub fn nest_refusal(source: &str, start: usize, end: usize) -> Option<NestRefusa
             if margin_run {
                 return Some(NestRefusal::NoItemAbove);
             }
-        } else if let Some(above) = item_columns(text) {
-            return (current > above).then_some(NestRefusal::AlreadyNested);
+        } else if let Some(above) = item_content_column(text) {
+            // Nested once the item's indent reaches the text of the
+            // item above: two columns under a bullet, three under `1.`.
+            return (current >= above).then_some(NestRefusal::AlreadyNested);
         } else if !text.starts_with([' ', '\t']) {
             margin_run = true;
         }
@@ -2322,6 +2416,68 @@ mod tests {
     fn refusal_in(source: &str, region: &str) -> Option<NestRefusal> {
         let start = source.find(region).expect("the region is in the source");
         nest_refusal(source, start, start + region.len())
+    }
+
+    #[test]
+    fn a_numbered_item_two_columns_in_is_a_sibling_and_may_nest() {
+        assert_eq!(
+            refusal_in("1. a\n  1. b\n", "  1. b"),
+            None,
+            "`1.` has three columns"
+        );
+        assert_eq!(
+            refusal_in("1. a\n   1. b\n", "   1. b"),
+            Some(NestRefusal::AlreadyNested)
+        );
+        assert_eq!(
+            refusal_in("- a\n  - b\n", "  - b"),
+            Some(NestRefusal::AlreadyNested)
+        );
+        assert_eq!(
+            refusal_in("- [ ] a\n  - [ ] b\n", "  - [ ] b"),
+            Some(NestRefusal::AlreadyNested),
+            "the task box is the item's text"
+        );
+        assert_eq!(
+            refusal_in("10. a\n   10. b\n", "   10. b"),
+            None,
+            "`10.` has four"
+        );
+    }
+
+    #[test]
+    fn a_fenced_block_and_the_frontmatter_hold_no_item_above() {
+        assert_eq!(
+            refusal_in("a\n\n```\n- one\n- two\n```\n\n- real\n", "- real"),
+            Some(NestRefusal::NoItemAbove),
+            "a markdown file showing markdown"
+        );
+        assert_eq!(
+            refusal_in("---\ntags:\n  - a\n  - b\n---\n\n- item\n", "- item"),
+            Some(NestRefusal::NoItemAbove),
+            "a YAML frontmatter"
+        );
+        assert_eq!(
+            refusal_in("- a\n\n~~~\ntext\n~~~\n\n- b\n", "- b"),
+            Some(NestRefusal::NoItemAbove),
+            "a fence between two items ended the first list"
+        );
+        assert_eq!(
+            refusal_in("- a\n  ```\n  - not one\n  ```\n- b\n", "- b"),
+            None,
+            "a fence inside the item above is the item's own text"
+        );
+    }
+
+    #[test]
+    fn the_look_for_the_item_above_stops_after_sixty_four_kilobytes() {
+        let quoted = "> text\n".repeat(20);
+        assert_eq!(refusal_in(&format!("- a\n{quoted}- b\n"), "- b"), None);
+        let quoted = "> text\n".repeat(ABOVE_CAP / 7 + 2);
+        assert_eq!(
+            refusal_in(&format!("- a\n{quoted}- b\n"), "- b"),
+            Some(NestRefusal::NoItemAbove)
+        );
     }
 
     #[test]

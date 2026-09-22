@@ -4552,3 +4552,13 @@ fn a_paragraph_with_thousands_of_inline_spans_keeps_every_span_in_order() {
         "every span's text reaches the runs once"
     );
 }
+
+/// An empty fenced block is a code block with no line: what stands at
+/// the top of the page is asked of its line table, which has nothing.
+#[test]
+fn an_empty_fence_at_the_top_answers_the_page_start() {
+    use oryx::paint::scroll;
+    let (doc, l) = lay2("```\n```\n\nText after the empty fence.\n", 400.0);
+    assert_eq!(scroll::top_offset(&l, &doc, 0.0), 0);
+    assert_eq!(scroll::top_offset(&l, &doc, 1.0), 0);
+}

@@ -33,6 +33,8 @@ cargo build --release --locked --target aarch64-apple-darwin
 cargo build --release --locked --target x86_64-apple-darwin
 
 stage=$(mktemp -d)
+# The staging folder goes on every exit, a failed signing or image included.
+trap 'rm -rf "$stage"' EXIT
 app="$stage/Oryx.app"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
 lipo -create -output "$app/Contents/MacOS/oryx" \
@@ -66,5 +68,4 @@ ln -s /Applications "$dmgroot/Applications"
 rm -f "$out/$name"
 hdiutil create -volname "Oryx $version" -srcfolder "$dmgroot" -ov -format UDZO "$out/$name"
 (cd "$out" && shasum -a 256 "$name" > "$name.sha256" && cat "$name.sha256")
-rm -rf "$stage"
 echo "$out/$name"
