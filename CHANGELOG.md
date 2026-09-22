@@ -8,6 +8,10 @@
 - `\n` in regex mode now finds the line breaks. Before, a pattern made only of line breaks found nothing. Replace can join lines, collapse blank lines or add a line after every line, and copy gives the line breaks. A match never crosses from one block to the next, and the file's final line break stays.
 - In regex mode, the replace field understands `\n` for a line break, `\t` for a tab and `\\` for a backslash, as VS Code does. Any other escape is written as typed.
 
+### Copy
+
+- `Ctrl+C` on the page now copies the selection with its formatting beside the plain text, so it pastes into an email or a Word document with its headings, lists, tables, quotes and links, and its code in a monospace face with the syntax colors of the export theme. Pictures and formulas go along as images inside the copy; a word processor and a desktop mail program show them, some web mail does not. A terminal or a text editor takes the plain text, as before. In the editor, `Ctrl+C` copies the text alone.
+
 ### Editor
 
 - Empty lines added at the end of a file now get their rows. Before, each Enter at the end of a long file added a line the page did not show: the caret left the screen and the wheel could not reach it. The file's final line break still opens no empty row.

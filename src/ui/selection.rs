@@ -152,22 +152,16 @@ fn span_pieces<'a>(out: &mut Vec<Piece<'a>>, spans: &'a [Span], base: usize, sou
     }
 }
 
-/// The whole document as a selection, from its first addressable piece
-/// to its last. None when nothing is selectable.
+/// The whole document as a selection: from its first block to its
+/// last, so a picture at either end goes with a copy that carries
+/// pictures, the end sitting after the last addressable piece. None
+/// when nothing is selectable, a document of pictures alone.
 pub fn all(doc: &Document) -> Option<Selection> {
-    let mut start: Option<ModelPos> = None;
+    let last = doc.blocks.len().checked_sub(1)?;
     let mut end: Option<ModelPos> = None;
     for index in 0..doc.blocks.len() {
         for piece in block_pieces(doc, index) {
             if let Piece::Addr { span, text } = piece {
-                let here = ModelPos {
-                    block: index,
-                    span,
-                    byte: 0,
-                };
-                if start.is_none() {
-                    start = Some(here);
-                }
                 end = Some(ModelPos {
                     block: index,
                     span,
@@ -176,9 +170,22 @@ pub fn all(doc: &Document) -> Option<Selection> {
             }
         }
     }
+    let end = end?;
     Some(Selection {
-        start: start?,
-        end: end?,
+        start: ModelPos {
+            block: 0,
+            span: 0,
+            byte: 0,
+        },
+        end: if end.block == last {
+            end
+        } else {
+            ModelPos {
+                block: last,
+                span: 0,
+                byte: 0,
+            }
+        },
     })
 }
 
@@ -1701,6 +1708,22 @@ mod tests {
     #[test]
     fn all_of_empty_document_is_none() {
         assert!(all(&Document::default()).is_none());
+    }
+
+    #[test]
+    fn all_spans_the_pictures_at_both_ends() {
+        let source = "![a](a.png)\n\ntext\n\n![b](b.png)";
+        let (doc, _, _) = lay_doc(source);
+        let sel = all(&doc).unwrap();
+        assert_eq!((sel.start.block, sel.end.block), (0, 2));
+        assert_eq!(plain_text(&sel, &doc), "text");
+        assert_eq!(markdown(&sel, &doc), source);
+    }
+
+    #[test]
+    fn all_of_pictures_alone_is_none() {
+        let (doc, _, _) = lay_doc("![a](a.png)\n\n![b](b.png)");
+        assert!(all(&doc).is_none());
     }
 
     #[test]

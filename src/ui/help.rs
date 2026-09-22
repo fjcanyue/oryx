@@ -389,7 +389,7 @@ pub const TIPS: &[Tip] = &[
     Tip {
         kind: TipKind::Tip,
         area: Area::Selecting,
-        text: r#"`Ctrl+C` copies your selection as plain text. `Ctrl+Shift+C` copies the markdown behind it, exactly as it was written."#,
+        text: r#"`Ctrl+C` copies your selection with its formatting, so it pastes nicely into an email or a Word document. A terminal or a text editor gets the plain text instead. `Ctrl+Shift+C` copies the markdown behind it, exactly as it was written."#,
     },
     Tip {
         kind: TipKind::Tip,

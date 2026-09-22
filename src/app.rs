@@ -6825,10 +6825,36 @@ impl App {
         if text.is_empty() {
             return;
         }
-        self.set_clipboard(text);
+        // The page copies with an HTML version beside the text, so a
+        // mail client or a word processor pastes it with its
+        // formatting and a terminal takes the text; the editor copies
+        // the bytes it shows, text alone.
+        let html =
+            (!as_markdown && self.mode == edit::Mode::Read).then(|| self.selection_html(&sel));
+        self.set_clipboard_with(text, html);
+    }
+
+    /// The selection as HTML in the export theme, its pictures from the
+    /// image cache and its formulas painted by the layout.
+    fn selection_html(&mut self, sel: &Selection) -> String {
+        let settings = self.export_settings();
+        let (theme, _) = export::resolve_theme(&theme_dirs(), &settings.theme, &self.theme);
+        let mut pictures = export::html::PagePictures {
+            theme: &theme,
+            cfg: &self.cfg,
+            fonts: &mut self.fonts,
+            media: &mut self.media,
+        };
+        export::html::selection_html(sel, &self.document, &theme, &mut pictures)
     }
 
     fn set_clipboard(&mut self, text: String) {
+        self.set_clipboard_with(text, None);
+    }
+
+    /// Puts the text on the clipboard, with an HTML version beside it
+    /// when there is one; the receiving program picks.
+    fn set_clipboard_with(&mut self, text: String, html: Option<String>) {
         self.line_clip = None;
         if self.clipboard.is_none() {
             self.clipboard = arboard::Clipboard::new()
@@ -6836,7 +6862,11 @@ impl App {
                 .ok();
         }
         if let Some(clipboard) = self.clipboard.as_mut() {
-            if let Err(err) = clipboard.set_text(text) {
+            let result = match html {
+                Some(html) => clipboard.set().html(html, Some(text)),
+                None => clipboard.set_text(text),
+            };
+            if let Err(err) = result {
                 eprintln!("oryx: clipboard copy failed: {err}");
             }
         }

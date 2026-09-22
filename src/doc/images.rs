@@ -689,6 +689,31 @@ impl MediaCache {
         self.sizes[src]
     }
 
+    /// The encoded bytes of an image as they are stored, for a copy
+    /// that carries the picture along unchanged: a local file's, a
+    /// book's raster entry inflated, a fetched image's cached file.
+    /// None for svg, which only its pixels represent, and for anything
+    /// not on hand.
+    pub fn stored_bytes(&self, src: &str) -> Option<Vec<u8>> {
+        if let Some(entry) = self.book.get(src) {
+            return match &entry.source {
+                BookSource::Raster(bytes) => Some(bytes.clone()),
+                BookSource::Deflated(raw) => {
+                    miniz_oxide::inflate::decompress_to_vec_with_limit(raw, INFLATE_CEILING).ok()
+                }
+                BookSource::Svg(_) => None,
+            };
+        }
+        if Self::is_remote(src) {
+            return self.cached_entry(src).map(|(bytes, _)| bytes);
+        }
+        let path = local_path(&self.doc_dir, src)?;
+        if is_svg_path(&path) {
+            return None;
+        }
+        std::fs::read(path).ok()
+    }
+
     /// Drops the resized buffers. A new layout pass changes the placed
     /// sizes, so every entry is dead weight the moment one begins.
     pub fn clear_scaled(&mut self) {

@@ -1,6 +1,7 @@
 //! PDF export: page geometry, the resumable pass, and the settings that
 //! drive them. Pagination and emission live in the two child modules.
 
+pub mod html;
 pub mod paginate;
 pub mod pdf;
 

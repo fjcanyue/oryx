@@ -4752,7 +4752,7 @@ fn math_scripts(tex: &str) -> Vec<(String, Script)> {
     out
 }
 
-fn alert_title(kind: AlertKind) -> &'static str {
+pub(crate) fn alert_title(kind: AlertKind) -> &'static str {
     match kind {
         AlertKind::Note => "Note",
         AlertKind::Tip => "Tip",
@@ -4762,7 +4762,7 @@ fn alert_title(kind: AlertKind) -> &'static str {
     }
 }
 
-fn alert_color(theme: &Theme, kind: AlertKind) -> Rgba {
+pub(crate) fn alert_color(theme: &Theme, kind: AlertKind) -> Rgba {
     match kind {
         AlertKind::Note => theme.alerts.note,
         AlertKind::Tip => theme.alerts.tip,
@@ -6493,7 +6493,7 @@ fn shape_code_chunk(
     height
 }
 
-fn role_color(theme: &Theme, role: SyntaxRole) -> Rgba {
+pub(crate) fn role_color(theme: &Theme, role: SyntaxRole) -> Rgba {
     let s = &theme.syntax;
     match role {
         SyntaxRole::Keyword => s.keyword,
