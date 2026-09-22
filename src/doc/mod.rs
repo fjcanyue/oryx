@@ -8,5 +8,6 @@ pub mod kindle;
 pub mod load;
 pub mod markdown;
 pub mod mermaid;
+pub mod mermaid_theme;
 pub mod model;
 pub mod stream;

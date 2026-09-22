@@ -5,7 +5,7 @@
 
 use std::time::Instant;
 
-use oryx::doc::mermaid::{render, MermaidTheme};
+use oryx::doc::mermaid::{render, MermaidPresentation};
 
 fn business_flow() -> String {
     std::fs::read_to_string(
@@ -62,7 +62,7 @@ fn large_sequence() -> String {
 
 fn timed(label: &str, source: &str) {
     let start = Instant::now();
-    let out = render(source, &MermaidTheme::default()).expect("renders");
+    let out = render(source, &MermaidPresentation::from_oryx(&oryx::style::theme::Theme::default_dark())).expect("renders");
     println!(
         "{label}: {:?} ({} x {})",
         start.elapsed(),
@@ -83,7 +83,7 @@ fn renderer_throughput() {
         let source = business_flow();
         let start = Instant::now();
         for _ in 0..count {
-            render(&source, &MermaidTheme::default()).expect("renders");
+            render(&source, &MermaidPresentation::from_oryx(&oryx::style::theme::Theme::default_dark())).expect("renders");
         }
         let total = start.elapsed();
         println!("{count} diagrams: {total:?} ({:?} each)", total / count);

@@ -7,10 +7,10 @@
 //! Editor.
 
 use oryx::doc::images::decode;
-use oryx::doc::mermaid::{cache_key, render, MermaidTheme};
-use oryx::style::theme::Theme;
+use oryx::doc::mermaid::{cache_key, render, MermaidPresentation};
+use oryx::style::theme::{load_file, Theme};
 
-const FIXTURES: [&str; 10] = [
+const FIXTURES: [&str; 11] = [
     "flowchart_basic.mmd",
     "flowchart_cjk_long.mmd",
     "state_basic.mmd",
@@ -19,6 +19,7 @@ const FIXTURES: [&str; 10] = [
     "sequence_cjk.mmd",
     "class_basic.mmd",
     "er_basic.mmd",
+    "er_contains.mmd",
     "mindmap_cjk.mmd",
     "pie_basic.mmd",
 ];
@@ -34,12 +35,22 @@ fn fixture(name: &str) -> String {
     .unwrap_or_else(|err| panic!("the fixture {name} reads: {err}"))
 }
 
-/// The reading palettes the diagrams are judged under: the light
-/// default and the compiled-in dark theme the app ships.
-fn palettes() -> [(MermaidTheme, &'static str); 2] {
+/// The reading palettes the diagrams are judged under: the shipped
+/// light theme file and the compiled-in dark theme the app falls back
+/// to.
+fn palettes() -> [(MermaidPresentation, &'static str); 2] {
+    let light = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("themes")
+        .join("oryx-light.toml");
     [
-        (MermaidTheme::default(), "light"),
-        (MermaidTheme::from_oryx(&Theme::default_dark()), "dark"),
+        (
+            MermaidPresentation::from_oryx(&load_file(&light).expect("the light theme loads")),
+            "light",
+        ),
+        (
+            MermaidPresentation::from_oryx(&Theme::default_dark()),
+            "dark",
+        ),
     ]
 }
 

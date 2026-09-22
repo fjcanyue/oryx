@@ -4514,7 +4514,7 @@ fn a_stale_render_lands_under_its_own_key() {
     assert_eq!(current.images.len(), 1);
     let own = oryx::doc::mermaid::cache_key(
         "flowchart LR\n  A --> B --> C",
-        &oryx::doc::mermaid::MermaidTheme::from_oryx(&theme),
+        &oryx::doc::mermaid::MermaidPresentation::from_oryx(&theme),
     )
     .uri();
     assert_eq!(

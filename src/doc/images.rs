@@ -296,13 +296,13 @@ impl DecodePool {
 /// on their own. A result lands under its own content-addressed key,
 /// so a superseded document's result cannot overwrite a newer one's.
 struct MermaidPool {
-    sender: std::sync::mpsc::Sender<(String, String, crate::doc::mermaid::MermaidTheme)>,
+    sender: std::sync::mpsc::Sender<(String, String, crate::doc::mermaid::MermaidPresentation)>,
 }
 
 impl MermaidPool {
     fn spawn(arrivals: Arrivals, waker: Option<Waker>) -> MermaidPool {
         let (sender, receiver) =
-            std::sync::mpsc::channel::<(String, String, crate::doc::mermaid::MermaidTheme)>();
+            std::sync::mpsc::channel::<(String, String, crate::doc::mermaid::MermaidPresentation)>();
         let receiver = Arc::new(Mutex::new(receiver));
         // Diagram renders are heavier than decodes; a couple of
         // workers keep a page of diagrams moving without hogging cores.
@@ -317,8 +317,8 @@ impl MermaidPool {
             std::thread::spawn(move || loop {
                 let job = receiver.lock().expect("render queue").recv();
                 match job {
-                    Ok((uri, source, theme)) => {
-                        let outcome = crate::doc::mermaid::render(&source, &theme)
+                    Ok((uri, source, presentation)) => {
+                        let outcome = crate::doc::mermaid::render(&source, &presentation)
                             .map_err(|err| err.to_string());
                         arrivals
                             .lock()
@@ -335,7 +335,7 @@ impl MermaidPool {
         MermaidPool { sender }
     }
 
-    fn send(&self, job: (String, String, crate::doc::mermaid::MermaidTheme)) {
+    fn send(&self, job: (String, String, crate::doc::mermaid::MermaidPresentation)) {
         let _ = self.sender.send(job);
     }
 }
@@ -531,7 +531,7 @@ impl MediaCache {
         &mut self,
         key: String,
         source: String,
-        theme: crate::doc::mermaid::MermaidTheme,
+        presentation: crate::doc::mermaid::MermaidPresentation,
     ) {
         if self.mermaid_pending.contains(&key) || self.generated.contains_key(&key) {
             return;
@@ -540,7 +540,7 @@ impl MediaCache {
         let pool = self.mermaid_pool.get_or_insert_with(|| {
             MermaidPool::spawn(Arc::clone(&self.arrivals), self.waker.clone())
         });
-        pool.send((key, source, theme));
+        pool.send((key, source, presentation));
     }
 
     /// Adopts book image sources: bytes and header dimensions per key.
