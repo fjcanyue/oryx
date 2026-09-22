@@ -66,6 +66,17 @@ mkdir -p "$dmgroot"
 cp -R "$app" "$dmgroot/Oryx.app"
 ln -s /Applications "$dmgroot/Applications"
 rm -f "$out/$name"
-hdiutil create -volname "Oryx $version" -srcfolder "$dmgroot" -ov -format UDZO "$out/$name"
+# hdiutil answers "Resource busy" now and then on GitHub's Mac machines,
+# the image left mounted by an earlier step; a few tries some seconds
+# apart get past it, as the release of 22/09/2026 found.
+tries=0
+until hdiutil create -volname "Oryx $version" -srcfolder "$dmgroot" -ov -format UDZO "$out/$name"; do
+    tries=$((tries + 1))
+    if [ "$tries" -ge 5 ]; then
+        echo "build.sh: hdiutil failed $tries times" >&2
+        exit 1
+    fi
+    sleep 5
+done
 (cd "$out" && shasum -a 256 "$name" > "$name.sha256" && cat "$name.sha256")
 echo "$out/$name"
