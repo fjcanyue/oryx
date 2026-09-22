@@ -165,6 +165,11 @@ pub const TIPS: &[Tip] = &[
     Tip {
         kind: TipKind::Note,
         area: Area::Files,
+        text: r#"A file with nothing in it opens in the editor, ready to type: the file `Ctrl+N` just created, or an empty one from the sidebar."#,
+    },
+    Tip {
+        kind: TipKind::Note,
+        area: Area::Files,
         text: r#"`Ctrl+M` starts a markdown note right away, without any dialog. The note has no file on disk until you save it with `Ctrl+S`, and Oryx will ask before letting you close it."#,
     },
     Tip {
@@ -180,7 +185,7 @@ pub const TIPS: &[Tip] = &[
     Tip {
         kind: TipKind::Tip,
         area: Area::Files,
-        text: r#"`Ctrl+Shift+S` saves the file you are editing under a new name. From then on you are working on the new file, and the old one stays as it was."#,
+        text: r#"`Ctrl+Shift+S` saves the file under a new name, whether you are reading it or editing it. From then on you are working on the new file, and the old one stays as it was."#,
     },
     Tip {
         kind: TipKind::Note,
@@ -415,7 +420,7 @@ pub const TIPS: &[Tip] = &[
     Tip {
         kind: TipKind::Tip,
         area: Area::Editing,
-        text: r#"In the editor, with nothing selected, `Ctrl+C` copies the whole line you are on and `Ctrl+X` cuts it."#,
+        text: r#"In the editor, with nothing selected, `Ctrl+C` copies the whole line you are on and `Ctrl+X` cuts it. `Ctrl+V` puts it back as a whole line, above the one you are on."#,
     },
     Tip {
         kind: TipKind::Tip,
@@ -450,7 +455,7 @@ pub const TIPS: &[Tip] = &[
     Tip {
         kind: TipKind::Tip,
         area: Area::Editing,
-        text: r#"`Ctrl+Shift+V` pastes a picture as-is without resizing, just like using images from the file's folder."#,
+        text: r#"`Ctrl+Shift+V` pastes a picture at its full size, with no resizing."#,
     },
     Tip {
         kind: TipKind::Tip,
@@ -701,6 +706,11 @@ pub const TIPS: &[Tip] = &[
         kind: TipKind::Tip,
         area: Area::Markdown,
         text: r#"A file without an extension gets syntax colors when Oryx can tell what it is: a shebang, an editor modeline, a name like `.bashrc` or `Gemfile`, or the shape of a diff, a JSON, an XML or an INI file."#,
+    },
+    Tip {
+        kind: TipKind::Tip,
+        area: Area::Markdown,
+        text: r#"A diff shows its added lines in green and its removed lines in red, whether you open a `.diff` or `.patch` file or pipe one in with `git diff | oryx`."#,
     },
     Tip {
         kind: TipKind::Tip,
