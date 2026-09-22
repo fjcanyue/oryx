@@ -23,8 +23,11 @@ fn fixture(name: &str) -> String {
 /// artifacts, not asserted here.
 #[test]
 fn the_business_state_flow_renders() {
-    let out = render(&fixture("state_cjk_business_flow.mmd"), &MermaidTheme::default())
-        .unwrap_or_else(|err| panic!("the business state flow renders: {err}"));
+    let out = render(
+        &fixture("state_cjk_business_flow.mmd"),
+        &MermaidTheme::default(),
+    )
+    .unwrap_or_else(|err| panic!("the business state flow renders: {err}"));
     assert!(out.width > 0.0 && out.width.is_finite());
     assert!(out.height > 0.0 && out.height.is_finite());
 }
@@ -52,5 +55,7 @@ fn the_business_state_flow_dumps_and_rasterizes_when_asked() {
         .unwrap_or_else(|| std::path::PathBuf::from("target").join("mermaid-debug"));
     let svg = dir.join(format!("{hash}.svg"));
     assert!(svg.exists(), "the adapter wrote its svg: {}", svg.display());
-    pixels.save(dir.join(format!("{hash}.png"))).expect("the png writes");
+    pixels
+        .save(dir.join(format!("{hash}.png")))
+        .expect("the png writes");
 }

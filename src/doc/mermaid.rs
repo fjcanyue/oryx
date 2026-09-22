@@ -2,9 +2,11 @@
 //! renderer. Markdown only produces `BlockKind::Mermaid`; here the
 //! diagram source becomes an svg document with its natural size, and
 //! every third-party error becomes one of Oryx's own. Nothing else in
-//! Oryx names `mermaid_rs_renderer`.
+//! Oryx names `merman`.
 
 use std::sync::Arc;
+
+use merman::render::{HeadlessError, HeadlessRenderer, HostThemeProfile, HostThemeRoles};
 
 use crate::style::theme::{hex_string, Rgba, Theme};
 
@@ -109,21 +111,23 @@ impl MermaidTheme {
         }
     }
 
-    /// The renderer's theme: its classic palette with this theme's
-    /// roles laid over it, everything the six roles miss left as the
-    /// renderer intends.
-    fn third_party(&self) -> mermaid_rs_renderer::Theme {
-        let mut theme = mermaid_rs_renderer::Theme::mermaid_default();
-        theme.background = hex_string(self.background);
-        theme.text_color = hex_string(self.foreground);
-        theme.primary_text_color = hex_string(self.foreground);
-        theme.primary_color = hex_string(self.primary);
-        theme.primary_border_color = hex_string(self.border);
-        theme.line_color = hex_string(self.line);
-        theme.secondary_color = hex_string(self.accent);
-        theme.cluster_background = hex_string(self.primary);
-        theme.cluster_border = hex_string(self.border);
-        theme
+    /// The renderer's theme: this palette's six roles as Merman host
+    /// roles, everything the six miss left for Merman to derive — note,
+    /// actor, cluster and series colors come from the base set, not
+    /// from twenty more Theme fields.
+    fn host_profile(&self) -> HostThemeProfile {
+        HostThemeProfile {
+            roles: HostThemeRoles {
+                canvas: Some(hex_string(self.background)),
+                surface: Some(hex_string(self.primary)),
+                surface_alt: Some(hex_string(self.accent)),
+                text: Some(hex_string(self.foreground)),
+                border: Some(hex_string(self.border)),
+                line: Some(hex_string(self.line)),
+                ..HostThemeRoles::default()
+            },
+            ..HostThemeProfile::default()
+        }
     }
 }
 
@@ -136,8 +140,10 @@ pub struct MermaidRender {
 }
 
 /// The cache namespace version: bump it when renderer behavior changes
-/// and every old entry misses.
-pub const CACHE_VERSION: &str = "oryx-mermaid-v1";
+/// and every old entry misses. The renderer swap from
+/// mermaid-rs-renderer to Merman re-lays-out every diagram, so the old
+/// identity must not survive.
+pub const CACHE_VERSION: &str = "oryx-merman-0.7-v1";
 
 /// A diagram's identity in the media cache: the version, the source,
 /// and the theme fingerprint hashed together. A typed key, not a bare
@@ -149,6 +155,13 @@ impl MermaidCacheKey {
     /// The media-cache address the diagram registers under.
     pub fn uri(&self) -> String {
         format!("mermaid://{}", self.0)
+    }
+
+    /// The stable svg id a diagram renders under: deterministic, easy
+    /// to grep in debug dumps, and safe when several diagrams share a
+    /// host document's id space (`<defs>`, accessibility ids).
+    pub fn svg_id(&self) -> String {
+        format!("oryx-mermaid-{}", self.0)
     }
 }
 
@@ -179,34 +192,43 @@ pub fn cache_key(source: &str, theme: &MermaidTheme) -> MermaidCacheKey {
 
 /// Renders diagram source into an svg with its natural size. The
 /// source arrives trimmed by the caller or here; empty never reaches
-/// the renderer.
+/// the renderer. Strict parsing, so a bad diagram lands in the error
+/// panel instead of a guessed-at picture; the vendored text metrics
+/// Mermaid browsers run on; the resvg-safe pipeline, because Oryx's
+/// consumer of the svg is resvg/usvg.
 pub fn render(source: &str, theme: &MermaidTheme) -> Result<MermaidRender, MermaidError> {
     let source = source.trim();
     if source.is_empty() {
         return Err(MermaidError::Empty);
     }
-    let options = mermaid_rs_renderer::RenderOptions {
-        theme: theme.third_party(),
-        layout: mermaid_rs_renderer::LayoutConfig::default(),
-    };
-    let svg = mermaid_rs_renderer::render_with_options(source, options).map_err(|err| {
-        if err
-            .downcast_ref::<mermaid_rs_renderer::ParseError>()
-            .is_some()
-        {
-            MermaidError::Parse(err.to_string())
-        } else {
-            MermaidError::Render(err.to_string())
-        }
-    })?;
-    let (width, height) = dimensions(&svg)?;
     let key = cache_key(source, theme);
+    let renderer = HeadlessRenderer::new()
+        .with_strict_parsing()
+        .with_host_theme(&theme.host_profile())
+        .with_vendored_text_measurer()
+        .with_diagram_id(&key.svg_id());
+    let svg = renderer
+        .render_svg_resvg_safe_sync(source)
+        .map_err(headless_error)?
+        .ok_or_else(|| MermaidError::Parse("no Mermaid diagram detected".to_string()))?;
+    let (width, height) = dimensions(&svg)?;
     dump_debug(&key, svg.as_bytes());
     Ok(MermaidRender {
         svg: Arc::from(svg.into_bytes()),
         width,
         height,
     })
+}
+
+/// Merman's error, classified once: parse failures read as the user's
+/// syntax to fix, everything past parsing as the renderer's own
+/// trouble. The messages carry over verbatim; no deep matching of the
+/// internals — the panel only needs a readable story.
+fn headless_error(err: HeadlessError) -> MermaidError {
+    match err {
+        HeadlessError::Parse(err) => MermaidError::Parse(err.to_string()),
+        HeadlessError::Render(err) => MermaidError::Render(err.to_string()),
+    }
 }
 
 /// Writes a rendered svg under `target/mermaid-debug/` when
@@ -337,8 +359,8 @@ mod tests {
 
     #[test]
     fn a_syntax_error_becomes_a_parse_error() {
-        // The parser is lenient with stray tokens, so the error needs a
-        // construct it provably rejects: a subgraph that never closes.
+        // Strict parsing rejects an unclosed subgraph outright: the
+        // message reads as EOF where the closing `end` was expected.
         let err = render(
             "flowchart LR\n    subgraph X\n    A --> B",
             &MermaidTheme::default(),
@@ -349,7 +371,7 @@ mod tests {
             "a renderer failure, got {err:?}"
         );
         assert!(
-            err.to_string().to_lowercase().contains("subgraph"),
+            err.to_string().to_lowercase().contains("end"),
             "the message names the problem: {err}"
         );
     }
