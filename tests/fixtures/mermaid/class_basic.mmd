@@ -1,0 +1,13 @@
+classDiagram
+    class Reader {
+        +open(path)
+        +close()
+    }
+    class Layout {
+        +arrange(blocks)
+    }
+    class Painter {
+        +draw(layout)
+    }
+    Reader --> Layout: feeds blocks
+    Layout --> Painter: feeds geometry

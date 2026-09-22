@@ -1,0 +1,8 @@
+stateDiagram-v2
+    [*] --> Draft
+    Draft --> Review: submit
+    Review --> Approved: approve
+    Review --> Draft: request changes
+    Approved --> Published: publish
+    Published --> Draft: unpublish and edit
+    Published --> [*]

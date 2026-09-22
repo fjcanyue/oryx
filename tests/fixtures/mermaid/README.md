@@ -32,3 +32,25 @@ Observed in the dumped artifacts:
 - nodes overlap labels
 - CJK text placement incorrect
 - back edge layout compressed
+
+### Merman 0.7.0 — PASS (2026-09-22)
+
+Judged on the dumped artifacts under both palettes against the
+acceptance checklist (not pixel-perfect against the Mermaid Live
+Editor):
+
+- state nodes do not overlap each other, under light and dark
+- transition labels do not cover states
+- the three parallel edges around 正常运行/升级中 stay
+  distinguishable; boxes may touch, reading does not break
+- CJK text stays inside its label backgrounds, long labels wrap
+- back edges (故障→未安装, 降级运行→正常运行) carry their own paths
+- `[*]` start and end nodes present and correct
+- the automated layers hold: finite sizes, no NaN/Infinity, no native
+  `<foreignObject>`, every fixture rasterizes through Oryx's own
+  `decode`
+
+Remaining known imperfection, accepted: Merman spaces the labels of
+parallel back-and-forth state edges tightly; per the migration design
+no offset patching happens host-side. Fixtures judged 7–9/10 readable;
+`state_cjk_business_flow` 7/10, every other fixture 9–10/10.
