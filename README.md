@@ -41,7 +41,7 @@ All the standard constructs, plus the extended ones: subscript and superscript (
 
 Oryx displays fenced blocks in a bordered panel with syntax colors for code. A code line too long wraps inside the panel. Oryx also opens source files directly and renders them as one highlighted document. Over a hundred extensions are supported, from Rust and Python to Terraform and Zig. Some files like a `Dockerfile` or a `Makefile` are recognized by name. A file without an extension gets its colors when it says what it is: a script with a shebang, a file with an editor modeline, a dotfile like `.bashrc` or `.gitconfig`, or a diff, a JSON, an XML or an INI file recognized by its first lines. A diff shows its added lines in green and its removed lines in red. Any other text file opens in the code font.
 
-Oryx refuses binary files: a file whose first 8 KB holds a zero byte or is mostly unreadable. A text file in an encoding older than UTF-8 is refused too, and the message says so.
+Oryx refuses binary files: a file whose first 8 KB holds a zero byte or is mostly unreadable. A text file in an encoding older than UTF-8 is refused too.
 
 ![Oryx rendering highlighted code](screenshots/code.png)
 
