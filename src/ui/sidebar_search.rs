@@ -517,10 +517,9 @@ fn draw_hit_path(
     let accent = ui.sidebar_dir;
     let avail = width - 2.0 * PAD;
     let full = &*hit.relative_path;
-    let shown = crate::ui::sidebar::fit(full, avail, |text| {
+    let (shown, cut) = crate::ui::sidebar::fit_with_source_len(full, avail, |text| {
         painter.measure(text, BODY_FAMILY, TEXT_SIZE, 400)
     });
-    let cut = shown.len();
     let name_at = (hit.basename_start as usize).min(cut);
     // Segments alternate: a run of plain text, then each matched
     // character (or consecutive run of them) accented. A plain run
@@ -578,6 +577,23 @@ fn draw_hit_path(
             from = stop;
         }
         at = end;
+    }
+    // The synthetic suffix has no source offsets and is never highlighted.
+    if cut < shown.len() {
+        let color = if cut < hit.basename_start as usize {
+            dim(fg)
+        } else {
+            fg
+        };
+        painter.text(
+            x,
+            ry + 6.0,
+            &shown[cut..],
+            BODY_FAMILY,
+            TEXT_SIZE,
+            400,
+            color,
+        );
     }
 }
 
@@ -708,10 +724,9 @@ fn draw_hit_line(
         Some((at, _)) => &line[..at],
         None => line,
     };
-    let shown = crate::ui::sidebar::fit(head, avail, |text| {
+    let (shown, cut) = crate::ui::sidebar::fit_with_source_len(head, avail, |text| {
         painter.measure(text, CODE_FAMILY, LINE_SIZE, 400)
     });
-    let cut = shown.len();
     let mut x = text_x;
     let mut at = 0usize;
     let mut ranges = hit.ranges.iter().filter(|r| r.start < cut);
@@ -731,6 +746,9 @@ fn draw_hit_line(
             x += painter.measure(segment, CODE_FAMILY, LINE_SIZE, 400);
         }
         at = end;
+    }
+    if cut < shown.len() {
+        painter.text(x, ry + 7.0, &shown[cut..], CODE_FAMILY, LINE_SIZE, 400, fg);
     }
 }
 
@@ -817,6 +835,64 @@ mod tests {
             line_number: number,
             line_text: Arc::from(text),
             ranges: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn truncated_file_highlights_do_not_slice_the_ellipsis() {
+        let mut fonts = crate::style::fonts::FontStore::new();
+        let mut pixmap = tiny_skia::Pixmap::new(400, 100).unwrap();
+        let mut painter = Painter::new(&mut pixmap, &mut fonts, None, 1.0);
+        let theme = Theme::default_dark();
+        let mut file = hit("abcdefghijklmnopqrstuvwxyz.md");
+        let avail = painter.measure("abc\u{2026}", BODY_FAMILY, TEXT_SIZE, 400) + 0.1;
+        let shown = crate::ui::sidebar::fit(&file.relative_path, avail, |text| {
+            painter.measure(text, BODY_FAMILY, TEXT_SIZE, 400)
+        });
+        assert_eq!(shown, "abc\u{2026}");
+        // The hidden 'e' used to point inside the replacement ellipsis.
+        file.matched = vec![4];
+        draw_hit_path(&mut painter, &theme, avail + 2.0 * PAD, 0.0, &file, false);
+    }
+
+    #[test]
+    fn truncated_file_basename_does_not_slice_the_ellipsis() {
+        let mut fonts = crate::style::fonts::FontStore::new();
+        let mut pixmap = tiny_skia::Pixmap::new(400, 100).unwrap();
+        let mut painter = Painter::new(&mut pixmap, &mut fonts, None, 1.0);
+        let theme = Theme::default_dark();
+        let file = hit("abc/long-filename.md");
+        let avail = painter.measure("abc\u{2026}", BODY_FAMILY, TEXT_SIZE, 400) + 0.1;
+        let shown = crate::ui::sidebar::fit(&file.relative_path, avail, |text| {
+            painter.measure(text, BODY_FAMILY, TEXT_SIZE, 400)
+        });
+        assert_eq!(shown, "abc\u{2026}");
+        // The basename starts at byte 4, inside the ellipsis at bytes 3..6.
+        draw_hit_path(&mut painter, &theme, avail + 2.0 * PAD, 0.0, &file, false);
+    }
+
+    #[test]
+    fn truncated_content_highlights_do_not_slice_the_ellipsis() {
+        let mut fonts = crate::style::fonts::FontStore::new();
+        let mut pixmap = tiny_skia::Pixmap::new(400, 100).unwrap();
+        let mut painter = Painter::new(&mut pixmap, &mut fonts, None, 1.0);
+        let theme = Theme::default_dark();
+        let mut content = line("a.rs", 1, "abcdefghijklmnopqrstuvwxyz");
+        let avail = painter.measure("abc\u{2026}", CODE_FAMILY, LINE_SIZE, 400) + 0.1;
+        let shown = crate::ui::sidebar::fit(&content.line_text, avail, |text| {
+            painter.measure(text, CODE_FAMILY, LINE_SIZE, 400)
+        });
+        assert_eq!(shown, "abc\u{2026}");
+        for range in [4..5, 2..4, 0..26] {
+            content.ranges = vec![range];
+            draw_hit_line(
+                &mut painter,
+                &theme,
+                avail + 2.0 * PAD + GUTTER_W,
+                0.0,
+                &content,
+                false,
+            );
         }
     }
 

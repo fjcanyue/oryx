@@ -166,19 +166,29 @@ pub fn caption_hit(width: f32, x: f32, y: f32) -> Option<Tab> {
 
 /// Shortens text with a trailing ellipsis to fit `avail`, measured by
 /// the caller's closure so the fitting stays pure and testable.
-pub fn fit(text: &str, avail: f32, mut measure: impl FnMut(&str) -> f32) -> String {
+pub fn fit(text: &str, avail: f32, measure: impl FnMut(&str) -> f32) -> String {
+    fit_with_source_len(text, avail, measure).0
+}
+
+/// Fits text and reports the byte length of the retained source prefix.
+/// Source offsets only apply to that prefix, never to the added ellipsis.
+pub(crate) fn fit_with_source_len(
+    text: &str,
+    avail: f32,
+    mut measure: impl FnMut(&str) -> f32,
+) -> (String, usize) {
     if measure(text) <= avail {
-        return text.to_string();
+        return (text.to_string(), text.len());
     }
     let mut cut = text.to_string();
     while !cut.is_empty() {
         cut.pop();
         let candidate = format!("{cut}\u{2026}");
         if measure(&candidate) <= avail {
-            return candidate;
+            return (candidate, cut.len());
         }
     }
-    "\u{2026}".to_string()
+    ("\u{2026}".to_string(), 0)
 }
 
 /// A width the panel may actually take, given the window it sits in. The
@@ -1481,6 +1491,25 @@ mod tests {
         let cut = fit("far too long a name", 60.0, measure);
         assert_eq!(cut, "far t\u{2026}", "five chars plus the ellipsis");
         assert_eq!(fit("abc", 5.0, measure), "\u{2026}", "nothing fits");
+    }
+
+    #[test]
+    fn fitted_source_length_excludes_only_the_added_ellipsis() {
+        let measure = |t: &str| t.chars().count() as f32 * 10.0;
+        for text in ["", "abcdef", "中文/文件.md", "a😀é文.txt", "abc…", "ab…def"] {
+            for width in (0..=120).step_by(10) {
+                let (shown, kept) = fit_with_source_len(text, width as f32, measure);
+                assert!(text.is_char_boundary(kept));
+                assert_eq!(&shown[..kept], &text[..kept]);
+                if measure(text) <= width as f32 {
+                    assert_eq!(kept, text.len());
+                    assert_eq!(shown, text);
+                } else {
+                    assert!(kept < text.len());
+                    assert_eq!(&shown[kept..], "\u{2026}");
+                }
+            }
+        }
     }
 
     #[test]
