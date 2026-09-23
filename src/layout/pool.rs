@@ -133,7 +133,7 @@ pub(crate) fn shape_text_data(
     }
     buffer.set_text(
         &mut fonts.font_system,
-        &job.text,
+        &crate::style::fonts::shapable(&job.text),
         &attrs,
         Shaping::Advanced,
         None,

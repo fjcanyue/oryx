@@ -2,9 +2,11 @@
 //! display text. Each match is a `Selection`, so highlight geometry and
 //! scroll targets reuse the selection machinery.
 
+use std::borrow::Cow;
 use std::ops::Range;
 
 use crate::doc::model::Document;
+use crate::edit::caret::word_char;
 use crate::paint::painter::Painter;
 use crate::style::fonts::CODE_FAMILY;
 use crate::style::theme::{Rgba, Theme};
@@ -16,18 +18,18 @@ use crate::ui::textfield::TextField;
 const BLOCK_SEP: char = '\u{1}';
 
 const BAR_WIDTH: f32 = 344.0;
-const BAR_HEIGHT: f32 = 40.0;
-const MARGIN: f32 = 16.0;
-const PAD: f32 = 16.0;
-const RADIUS: f32 = 20.0;
-const QUERY_SIZE: f32 = 15.0;
-const COUNTER_SIZE: f32 = 13.0;
+pub(crate) const BAR_HEIGHT: f32 = 40.0;
+pub(crate) const MARGIN: f32 = 16.0;
+pub(crate) const PAD: f32 = 16.0;
+pub(crate) const RADIUS: f32 = 20.0;
+pub(crate) const QUERY_SIZE: f32 = 15.0;
+pub(crate) const COUNTER_SIZE: f32 = 13.0;
 const TOGGLE_W: f32 = 26.0;
 const TOGGLE_H: f32 = 22.0;
 const ROW_H: f32 = 36.0;
 /// The glyphs sit this much below the row's top, so the text's caps
 /// stand centered on the caret and the pill, level with the toggle.
-const TEXT_DROP: f32 = 2.0;
+pub(crate) const TEXT_DROP: f32 = 2.0;
 
 /// Live find session: the query as typed, its matches, and the cursor
 /// among them. `stale` marks the matches for recomputation against the
@@ -459,9 +461,10 @@ impl Haystack {
                     Piece::Sep(text) => hay.push_inert(&mut opened, text),
                     Piece::Label(text) => hay.push_inert(&mut opened, &text),
                     Piece::Addr { span, text } => {
-                        if text.is_empty() {
-                            continue;
-                        }
+                        // An empty piece (an empty code line, an empty
+                        // cell) keeps a zero-length segment, so the
+                        // joiners around it stand between two segments
+                        // and a match made of them maps exactly.
                         hay.open(&mut opened);
                         hay.segs.push(Seg {
                             range: hay.text.len()..hay.text.len() + text.len(),
@@ -500,32 +503,49 @@ impl Haystack {
 
     /// The selection a byte range of `text` converts to, clipped to the
     /// addressable characters inside it. An empty range, a range covering
-    /// the block separator, or one holding no addressable byte converts
-    /// to nothing.
+    /// the block separator, or one holding neither an addressable byte
+    /// nor a line joiner converts to nothing.
+    ///
+    /// A line joiner is addressed through its neighbors: a range starting
+    /// on the `\n` right after a segment starts at that segment's end, and
+    /// one ending right after a `\n` that a segment follows ends at that
+    /// segment's start. So a match made of line breaks alone selects from
+    /// the end of one piece to the start of the next, and never across
+    /// blocks, since the `\n` beside the separator has a segment on one
+    /// side only and the two ends meet.
     fn selection(&self, range: Range<usize>) -> Option<Selection> {
         if range.is_empty() || self.text[range.clone()].contains(BLOCK_SEP) {
             return None;
         }
+        let bytes = self.text.as_bytes();
+        let at = |seg: &Seg, byte: usize| ModelPos {
+            block: seg.block,
+            span: seg.span,
+            byte,
+        };
         let first = self
             .segs
             .partition_point(|seg| seg.range.end <= range.start);
+        let start = match first.checked_sub(1).map(|i| &self.segs[i]) {
+            Some(before) if bytes[range.start] == b'\n' && before.range.end == range.start => {
+                at(before, before.range.len())
+            }
+            _ => {
+                let head = self.segs.get(first)?;
+                at(head, range.start.saturating_sub(head.range.start))
+            }
+        };
         let last = self.segs.partition_point(|seg| seg.range.start < range.end);
-        if first >= last {
-            return None;
-        }
-        let head = &self.segs[first];
-        let tail = &self.segs[last - 1];
-        let start = ModelPos {
-            block: head.block,
-            span: head.span,
-            byte: range.start.saturating_sub(head.range.start),
+        let end = match self.segs.get(last) {
+            Some(after) if bytes[range.end - 1] == b'\n' && after.range.start == range.end => {
+                at(after, 0)
+            }
+            _ => {
+                let tail = &self.segs[last.checked_sub(1)?];
+                at(tail, range.end.min(tail.range.end) - tail.range.start)
+            }
         };
-        let end = ModelPos {
-            block: tail.block,
-            span: tail.span,
-            byte: range.end.min(tail.range.end) - tail.range.start,
-        };
-        Some(Selection { start, end })
+        (start < end).then_some(Selection { start, end })
     }
 }
 
@@ -545,6 +565,26 @@ pub fn matches(doc: &Document, query: &str) -> Vec<Selection> {
     };
     found
         .into_iter()
+        .filter_map(|range| hay.selection(range))
+        .collect()
+}
+
+/// Every whole-word occurrence of `word`, exact case, in document
+/// order: a match counts when the characters on both sides of it are
+/// not word characters, so `count` is found in `count + 1` and not in
+/// `recount` or `count_all`.
+pub fn word_matches(doc: &Document, word: &str) -> Vec<Selection> {
+    if word.is_empty() {
+        return Vec::new();
+    }
+    let hay = Haystack::build(doc);
+    find_exact(&hay.text, word)
+        .into_iter()
+        .filter(|range| {
+            let before = hay.text[..range.start].chars().next_back();
+            let after = hay.text[range.end..].chars().next();
+            !before.is_some_and(word_char) && !after.is_some_and(word_char)
+        })
         .filter_map(|range| hay.selection(range))
         .collect()
 }
@@ -604,6 +644,7 @@ pub fn regex_replacements(
     }
     let regex = compile(pattern)?;
     let hay = Haystack::build(doc);
+    let template = unescape_template(template);
     let expander = fancy_regex::Expander::default();
     let mut out = Vec::new();
     // The walk mirrors `regex_matches` exactly, discard recovery
@@ -616,13 +657,43 @@ pub fn regex_replacements(
         let found = captures.get(0).expect("a match always captures group 0");
         match hay.selection(found.start()..found.end()) {
             Some(selection) => {
-                out.push((selection, expander.expansion(template, &captures)));
+                out.push((selection, expander.expansion(&template, &captures)));
                 pos = found.end();
             }
             None => pos = next_boundary(&hay.text, found.start()),
         }
     }
     Some(out)
+}
+
+/// The replacement with its escapes read, the way VS Code's replace box
+/// reads them in regex mode: `\n` a line break, `\t` a tab, `\\` one
+/// backslash. Any other backslash sequence stays as typed, and a
+/// backslash ending the template keeps itself. The group syntax is
+/// dollar-based, so this pass and the expander never meet.
+fn unescape_template(template: &str) -> Cow<'_, str> {
+    if !template.contains('\\') {
+        return Cow::Borrowed(template);
+    }
+    let mut out = String::with_capacity(template.len());
+    let mut chars = template.chars();
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            out.push(c);
+            continue;
+        }
+        match chars.next() {
+            Some('n') => out.push('\n'),
+            Some('t') => out.push('\t'),
+            Some('\\') => out.push('\\'),
+            Some(other) => {
+                out.push('\\');
+                out.push(other);
+            }
+            None => out.push('\\'),
+        }
+    }
+    Cow::Owned(out)
 }
 
 /// The pattern with the standing flags: anchors match per line, and
@@ -711,6 +782,25 @@ mod tests {
         );
         assert!(!doc.block_visible(1), "the paragraph is folded away");
         assert_eq!(matches(&doc, "needle").len(), 1);
+    }
+
+    #[test]
+    fn word_matches_are_whole_words_in_exact_case() {
+        let doc = markdown::parse("cat catalog Cat cat_ (cat) concat cat.\n\n- a cat\n\n`cat`");
+        let found = word_matches(&doc, "cat");
+        let bytes: Vec<(usize, usize)> = found
+            .iter()
+            .map(|m| (m.start.block, m.start.byte))
+            .collect();
+        assert_eq!(found.len(), 5, "{bytes:?}");
+        assert_eq!(bytes[..3], [(0, 0), (0, 22), (0, 34)]);
+        assert!(word_matches(&doc, "").is_empty());
+    }
+
+    #[test]
+    fn word_matches_read_letters_of_any_script_as_word_characters() {
+        let doc = markdown::parse("été répété été, l'été");
+        assert_eq!(word_matches(&doc, "été").len(), 3);
     }
 
     #[test]
@@ -945,5 +1035,205 @@ mod tests {
     fn regex_backtrack_limit_reports_as_invalid() {
         let doc = markdown::parse("x".repeat(40));
         assert!(regex_matches(&doc, r"(?:(x+)\1)+y").is_none());
+    }
+
+    // ---- Line breaks as matches: the joiners between pieces ----
+
+    fn code_doc(text: &str) -> Document {
+        crate::doc::load::code_document(None, text)
+    }
+
+    fn sel(a: (usize, usize, usize), b: (usize, usize, usize)) -> Selection {
+        let pos = |(block, span, byte)| ModelPos { block, span, byte };
+        Selection {
+            start: pos(a),
+            end: pos(b),
+        }
+    }
+
+    /// The source after every pair is spliced, the way replace all does.
+    fn replaced_all(doc: &Document, pattern: &str, template: &str) -> String {
+        let pairs = regex_replacements(doc, pattern, template).expect("valid");
+        let edits: Vec<(Range<usize>, String)> = pairs
+            .into_iter()
+            .filter_map(|(sel, text)| {
+                crate::edit::caret::selection_range(doc, &sel).map(|range| (range, text))
+            })
+            .collect();
+        let (region, text) = crate::edit::splice::combine(&doc.source, &edits).expect("edits");
+        let mut out = doc.source.to_string();
+        out.replace_range(region, &text);
+        out
+    }
+
+    #[test]
+    fn a_line_break_matches_between_code_lines() {
+        let doc = code_doc("one\ntwo\nthree");
+        assert_eq!(
+            regex_matches(&doc, "\\n").expect("valid"),
+            vec![sel((0, 0, 3), (0, 1, 0)), sel((0, 1, 3), (0, 2, 0))]
+        );
+    }
+
+    #[test]
+    fn line_breaks_around_an_empty_line_match_exactly() {
+        let doc = code_doc("one\n\ntwo");
+        assert_eq!(
+            regex_matches(&doc, "\\n\\n").expect("valid"),
+            vec![sel((0, 0, 3), (0, 2, 0))]
+        );
+        assert_eq!(
+            regex_matches(&doc, "\\n").expect("valid"),
+            vec![sel((0, 0, 3), (0, 1, 0)), sel((0, 1, 0), (0, 2, 0))]
+        );
+    }
+
+    #[test]
+    fn a_line_break_never_joins_blocks() {
+        let doc = markdown::parse("one\n\ntwo");
+        assert!(regex_matches(&doc, "\\n").expect("valid").is_empty());
+        let doc = markdown::parse("one\n\n```\na\nb\n```\n\ntwo");
+        assert_eq!(
+            regex_matches(&doc, "\\n").expect("valid"),
+            vec![sel((1, 0, 1), (1, 1, 0))],
+            "only the break inside the code block"
+        );
+    }
+
+    #[test]
+    fn the_final_line_break_is_not_a_joiner() {
+        let doc = code_doc("one\ntwo\n");
+        assert_eq!(regex_matches(&doc, "\\n").expect("valid").len(), 1);
+    }
+
+    #[test]
+    fn line_breaks_join_table_rows_and_tabs_join_nothing() {
+        let doc = markdown::parse("| a | b |\n|---|---|\n| c | d |\n| e | f |");
+        assert_eq!(regex_matches(&doc, "\\n").expect("valid").len(), 2);
+        assert!(regex_matches(&doc, "\\t").expect("valid").is_empty());
+        assert!(matches(&doc, "\t").is_empty());
+    }
+
+    #[test]
+    fn a_hard_break_matches_as_a_line_break() {
+        let doc = markdown::parse("one two\\\nthree");
+        assert_eq!(regex_matches(&doc, "\\n").expect("valid").len(), 1);
+        assert!(matches(&doc, "two three").is_empty());
+    }
+
+    #[test]
+    fn a_named_line_end_and_a_line_break_agree() {
+        let doc = code_doc("go\nno\nyes\nso");
+        assert_eq!(regex_matches(&doc, "o$").expect("valid").len(), 3);
+        let found = regex_matches(&doc, "o\\n").expect("valid");
+        assert_eq!(found.len(), 2, "the last line has no break after it");
+        assert_eq!(
+            found[0],
+            sel((0, 0, 1), (0, 1, 0)),
+            "the break itself is inside the match"
+        );
+    }
+
+    #[test]
+    fn a_pasted_newline_finds_the_joiners_too() {
+        let doc = code_doc("one\ntwo\nthree");
+        assert_eq!(matches(&doc, "\n").len(), 2);
+    }
+
+    #[test]
+    fn line_break_replacements_mirror_the_matches() {
+        let doc = code_doc("one\ntwo\nthree");
+        let pairs = regex_replacements(&doc, "\\n", " ").expect("valid");
+        let sels: Vec<Selection> = pairs.iter().map(|(s, _)| *s).collect();
+        assert_eq!(sels, regex_matches(&doc, "\\n").expect("valid"));
+        assert!(pairs.iter().all(|(_, t)| t == " "));
+    }
+
+    #[test]
+    fn replacing_line_breaks_joins_lines() {
+        let doc = code_doc("one\ntwo\nthree\n");
+        assert_eq!(
+            replaced_all(&doc, "\\n", " "),
+            "one two three\n",
+            "the terminator stays"
+        );
+    }
+
+    #[test]
+    fn replacing_double_blank_lines_collapses_them() {
+        let doc = code_doc("one\n\n\ntwo\n");
+        assert_eq!(replaced_all(&doc, "\\n\\n\\n", "\n\n"), "one\n\ntwo\n");
+    }
+
+    #[test]
+    fn replacing_a_line_break_with_two_doubles_it() {
+        let doc = code_doc("one\ntwo\n");
+        assert_eq!(replaced_all(&doc, "\\n", "\n\n"), "one\n\ntwo\n");
+    }
+
+    #[test]
+    fn replacing_a_line_break_keeps_the_other_crlf_endings() {
+        // The load normalizes CRLF to LF and remembers where; the ledger
+        // puts every untouched ending back on save.
+        let doc = code_doc("one\ntwo\nthree\n");
+        let first = regex_matches(&doc, "\\n").expect("valid")[0];
+        let range = crate::edit::caret::selection_range(&doc, &first).expect("a source range");
+        let mut led = crate::edit::splice::Ledger::new(doc.source.clone(), vec![3, 7, 13]);
+        led.edit(range, " ");
+        assert_eq!(led.emit(), b"one two\r\nthree\r\n");
+    }
+
+    // ---- Escapes in the replacement ----
+
+    fn replacement_texts(doc: &Document, pattern: &str, template: &str) -> Vec<String> {
+        regex_replacements(doc, pattern, template)
+            .expect("valid")
+            .into_iter()
+            .map(|(_, text)| text)
+            .collect()
+    }
+
+    #[test]
+    fn a_tab_and_a_newline_escape_in_the_replacement() {
+        let doc = markdown::parse("a b");
+        assert_eq!(replacement_texts(&doc, " ", "\\t"), ["\t"]);
+        assert_eq!(replacement_texts(&doc, " ", "\\n"), ["\n"]);
+        assert_eq!(replacement_texts(&doc, " ", "x\\ty\\nz"), ["x\ty\nz"]);
+    }
+
+    #[test]
+    fn a_doubled_backslash_is_one_backslash() {
+        let doc = markdown::parse("a b");
+        assert_eq!(replacement_texts(&doc, " ", "\\\\"), ["\\"]);
+        assert_eq!(
+            replacement_texts(&doc, " ", "\\\\t"),
+            ["\\t"],
+            "the escaped backslash does not join the t"
+        );
+    }
+
+    #[test]
+    fn other_escapes_stay_as_typed() {
+        let doc = markdown::parse("a b");
+        assert_eq!(replacement_texts(&doc, " ", "\\s"), ["\\s"]);
+        assert_eq!(replacement_texts(&doc, " ", "\\d"), ["\\d"]);
+        assert_eq!(
+            replacement_texts(&doc, " ", "end\\"),
+            ["end\\"],
+            "a lone backslash at the end keeps itself"
+        );
+    }
+
+    #[test]
+    fn a_group_and_an_escape_combine() {
+        let doc = markdown::parse("ab cd");
+        assert_eq!(
+            replacement_texts(&doc, r"(\w)(\w)", "$2\\t$1"),
+            ["b\ta", "d\tc"]
+        );
+        assert_eq!(
+            replacement_texts(&doc, r"(\w)(\w)", "$$\\n"),
+            ["$\n", "$\n"]
+        );
     }
 }

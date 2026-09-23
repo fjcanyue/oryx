@@ -237,7 +237,7 @@ fn fold_backlog_measured() {
             })
             .collect();
         let started = Instant::now();
-        recolor_batch(&mut lay, &doc, &theme, &mut fonts, &cfg, &patches);
+        recolor_batch(&mut lay, &doc, &theme, &mut fonts, &cfg, &patches, None);
         println!(
             "fold {name}: {} blocks over {} runs in {}ms",
             patches.len(),
@@ -287,7 +287,7 @@ fn fold_trickle_measured() {
             let count = drains.len();
             let started = Instant::now();
             for drain in drains {
-                recolor_batch(&mut lay, &doc, &theme, &mut fonts, &cfg, drain);
+                recolor_batch(&mut lay, &doc, &theme, &mut fonts, &cfg, drain, None);
             }
             println!(
                 "trickle {name}: {} drains of {} blocks over {} runs in {}ms",
@@ -902,4 +902,321 @@ fn long_lines_meet_the_budget() {
     if !cfg!(debug_assertions) {
         assert!(laid.ms < 1000, "budget exceeded: layout {}ms", laid.ms);
     }
+}
+
+/// The corner count's cost over the markdown and code tiers: the whole
+/// file counted once, the way a load or a pause in typing does.
+#[test]
+#[ignore = "timing probe, release mode"]
+fn count_measured() {
+    use oryx::doc::count;
+    for bytes in [64 * 1024, 1024 * 1024, 8 * 1024 * 1024] {
+        let md = large_gen::generate(bytes);
+        let code = large_gen::generate_code(bytes);
+        let best = |f: &dyn Fn() -> count::Counts| {
+            (0..5)
+                .map(|_| {
+                    let t = Instant::now();
+                    let c = f();
+                    (t.elapsed().as_secs_f64() * 1000.0, c)
+                })
+                .min_by(|a, b| a.0.total_cmp(&b.0))
+                .unwrap()
+        };
+        let (md_ms, md_c) = best(&|| count::markdown(&md));
+        let (tx_ms, _) = best(&|| count::text(&md));
+        let (cd_ms, cd_c) = best(&|| count::code(&code));
+        println!(
+            "count {:>5} KB: markdown {md_ms:.2}ms ({} words), text {tx_ms:.2}ms, code {cd_ms:.2}ms ({} lines)",
+            bytes / 1024,
+            md_c.words,
+            cd_c.lines
+        );
+    }
+}
+
+/// What the line numbers add to a band: the editor's band, five
+/// viewports tall, painted over a 1 MB code file with and without them.
+/// The band is repainted at each keystroke, so the difference is what
+/// the setting costs a typed letter.
+#[test]
+#[ignore = "timing probe, release mode"]
+fn gutter_measured() {
+    let (_, _, doc) = measure_open(&large_gen::generate_code(1024 * 1024), "rs");
+    let (_, lay) = measure_layout(&doc, None);
+    let mut fonts = FontStore::new();
+    let mut media = MediaCache::new(PathBuf::from("."));
+    let theme = Theme::default_dark();
+    let height = 5 * VIEWPORT_H as u32;
+    let mut paint = |numbers: Option<oryx::style::theme::Rgba>| {
+        (0..5)
+            .map(|_| {
+                let started = Instant::now();
+                let _ = oryx::paint::band_numbered(
+                    &lay,
+                    &doc,
+                    &theme,
+                    &mut fonts,
+                    &mut media,
+                    &[],
+                    numbers,
+                    lay.height / 2.0,
+                    WIDTH as u32,
+                    height,
+                );
+                started.elapsed().as_secs_f64() * 1000.0
+            })
+            .fold(f64::MAX, f64::min)
+    };
+    let plain = paint(None);
+    let numbered = paint(Some(theme.syntax.comment));
+    println!(
+        "gutter: band {plain:.2}ms plain, {numbered:.2}ms numbered, {:.2}ms for the numbers",
+        numbered - plain
+    );
+}
+
+/// What the syntax guess costs a file without an extension, at open and
+/// at each rebuild from the text: 8 MB of short lines, and 8 MB with no
+/// line break at all, where the first line is the whole file.
+#[test]
+#[ignore = "timing probe, release mode"]
+fn sniff_measured() {
+    let lines = "some words on a line\n".repeat(8 * 1024 * 1024 / 21);
+    let one_line = "x".repeat(8 * 1024 * 1024);
+    let time = |text: &str| {
+        (0..3)
+            .map(|_| {
+                let started = Instant::now();
+                let _ = oryx::style::highlight::sniff_language("data", text);
+                started.elapsed().as_secs_f64() * 1000.0
+            })
+            .fold(f64::MAX, f64::min)
+    };
+    // The grammars load once, outside the figures.
+    let _ = oryx::style::highlight::sniff_language("data", "x\n");
+    println!(
+        "sniff: {:.2}ms on 8 MB of short lines, {:.2}ms on 8 MB with no line break",
+        time(&lines),
+        time(&one_line)
+    );
+}
+
+/// What one save in a shown folder costs the sidebar: the save's
+/// temporary file moves the folder's stamp and the next disk check reads
+/// the tree again, on the window's thread. A folder of 5,000 files with
+/// known extensions, and one of 5,000 without, where each file is opened
+/// and its head read to tell text from binary.
+#[test]
+#[ignore = "timing probe, release mode"]
+fn sidebar_rescan_measured() {
+    let root = std::env::temp_dir().join(format!("oryx-perf-side-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let time = |name: &str, suffix: &str| {
+        let dir = root.join(name);
+        std::fs::create_dir_all(&dir).unwrap();
+        for i in 0..5000 {
+            std::fs::write(dir.join(format!("file-{i:04}{suffix}")), "some text\n").unwrap();
+        }
+        let mut side = oryx::ui::sidebar::Sidebar::new(&dir);
+        (0..3)
+            .map(|round| {
+                // The kernel stamps a folder with a coarse clock.
+                std::thread::sleep(std::time::Duration::from_millis(20));
+                std::fs::write(dir.join(format!("touch-{round}.md")), "x").unwrap();
+                let started = Instant::now();
+                assert!(side.refresh_if_changed(), "the stamp moved");
+                started.elapsed().as_secs_f64() * 1000.0
+            })
+            .fold(f64::MAX, f64::min)
+    };
+    let known = time("known", ".md");
+    let unknown = time("unknown", "");
+    let _ = std::fs::remove_dir_all(&root);
+    println!("sidebar rescan of 5,000 files: {known:.2}ms with extensions, {unknown:.2}ms without");
+}
+
+/// What a select-all costs the window's thread before its count leaves
+/// for a thread of its own: the selection's plain text, built on the
+/// 8 MB markdown page and on the 8 MB code file.
+#[test]
+#[ignore = "timing probe, release mode"]
+fn selection_text_measured() {
+    use oryx::ui::selection;
+    let (_, _, page) = measure_open(&large_gen::generate(8 * 1024 * 1024), "md");
+    let (_, _, code) = measure_open(&large_gen::generate_code(8 * 1024 * 1024), "rs");
+    let time = |doc: &oryx::doc::model::Document| {
+        let all = selection::all(doc).expect("a page with text");
+        (0..3)
+            .map(|_| {
+                let started = Instant::now();
+                let text = selection::plain_text(&all, doc);
+                (started.elapsed().as_secs_f64() * 1000.0, text.len())
+            })
+            .min_by(|a, b| a.0.total_cmp(&b.0))
+            .unwrap()
+    };
+    let (page_ms, page_len) = time(&page);
+    let (code_ms, code_len) = time(&code);
+    println!(
+        "select-all text at 8 MB: markdown page {page_ms:.2}ms ({page_len} bytes), code {code_ms:.2}ms ({code_len} bytes)"
+    );
+}
+
+/// The cost of a double click's occurrence highlight, which runs on the
+/// window's thread: every whole-word match of a common word on the 8 MB
+/// markdown page and on the 8 MB code file, beside a plain search for
+/// the same word.
+#[test]
+#[ignore = "timing probe, release mode"]
+fn occurrences_measured() {
+    use oryx::ui::search;
+    let (_, _, page) = measure_open(&large_gen::generate(8 * 1024 * 1024), "md");
+    let (_, _, code) = measure_open(&large_gen::generate_code(8 * 1024 * 1024), "rs");
+    let best = |run: &dyn Fn() -> usize| {
+        (0..3)
+            .map(|_| {
+                let started = Instant::now();
+                let found = run();
+                (started.elapsed().as_secs_f64() * 1000.0, found)
+            })
+            .min_by(|a, b| a.0.total_cmp(&b.0))
+            .unwrap()
+    };
+    for (name, doc, word) in [("markdown page", &page, "the"), ("code", &code, "let")] {
+        let (word_ms, words) = best(&|| search::word_matches(doc, word).len());
+        let (plain_ms, plain) = best(&|| search::matches(doc, word).len());
+        println!(
+            "occurrences of {word:?} at 8 MB, {name}: whole words {word_ms:.2}ms ({words}), a plain search {plain_ms:.2}ms ({plain})"
+        );
+    }
+}
+
+/// What bringing a big picture in costs on the window's thread: a
+/// 4800 by 3200 picture pasted at full size and reduced, the same
+/// picture dropped as a JPEG and as a PNG, and the resize alone under
+/// each filter, which is how the filter was chosen.
+#[test]
+#[ignore = "timing probe, release mode"]
+fn pictures_measured() {
+    use image::imageops::{resize, FilterType};
+    use oryx::edit::attach;
+    let (w, h) = (4800u32, 3200u32);
+    let mut seed = 1u32;
+    let picture = image::RgbaImage::from_fn(w, h, |x, y| {
+        seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+        let noise = (seed >> 27) as u8;
+        image::Rgba([
+            (x * 255 / w) as u8 ^ noise,
+            (y * 255 / h) as u8,
+            noise * 4,
+            255,
+        ])
+    });
+    let dir = std::env::temp_dir().join(format!("oryx-pictures-measured-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    // Beside the note's folder, not under it: a picture under it is
+    // linked where it lies and never read.
+    std::fs::create_dir_all(dir.join("outside")).unwrap();
+    std::fs::create_dir_all(dir.join("notes")).unwrap();
+    let file = dir.join("notes/note.md");
+    let ms = |started: Instant| started.elapsed().as_secs_f64() * 1000.0;
+    for (name, filter) in [
+        ("triangle", FilterType::Triangle),
+        ("catmull-rom", FilterType::CatmullRom),
+        ("lanczos3", FilterType::Lanczos3),
+    ] {
+        let started = Instant::now();
+        let small = resize(&picture, 2560, 1707, filter);
+        println!(
+            "resize 4800x3200 to 2560x1707, {name}: {:.0}ms ({} bytes)",
+            ms(started),
+            small.len()
+        );
+    }
+    let started = Instant::now();
+    let small = image::imageops::thumbnail(&picture, 2560, 1707);
+    println!(
+        "resize 4800x3200 to 2560x1707, thumbnail: {:.0}ms ({} bytes)",
+        ms(started),
+        small.len()
+    );
+    for full in [true, false] {
+        let started = Instant::now();
+        let saved = attach::save_pasted(&file, "stamp", w, h, picture.as_raw(), full).unwrap();
+        let bytes = std::fs::metadata(dir.join("notes").join(&saved.relative))
+            .unwrap()
+            .len();
+        println!(
+            "paste, full size {full}: {:.0}ms, {:.1} MB on disk",
+            ms(started),
+            bytes as f64 / 1e6
+        );
+    }
+    let dynamic = image::DynamicImage::ImageRgba8(picture);
+    dynamic
+        .to_rgb8()
+        .save(dir.join("outside/photo.jpg"))
+        .unwrap();
+    dynamic.save(dir.join("outside/photo.png")).unwrap();
+    for name in ["photo.jpg", "photo.png"] {
+        let before = std::fs::metadata(dir.join("outside").join(name))
+            .unwrap()
+            .len();
+        let started = Instant::now();
+        let saved = attach::adopt_dropped(&file, &dir.join("outside").join(name)).unwrap();
+        let bytes = std::fs::metadata(dir.join("notes").join(&saved.relative))
+            .unwrap()
+            .len();
+        println!(
+            "drop {name}: {:.0}ms, {:.1} MB to {:.1} MB",
+            ms(started),
+            before as f64 / 1e6,
+            bytes as f64 / 1e6
+        );
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Two walks over the blocks, measured at the far end of the 8 MB
+/// fixtures: what stands at the top of the view, asked at every jump,
+/// at F1, at an open and at the quit, which `scroll::top_offset` finds
+/// by walking the blocks from the first; and the editor's landing with
+/// a remembered offset on a blank line of a code file, a line with no
+/// row of its own, whose row the line table answers.
+#[test]
+#[ignore = "timing probe, release mode"]
+fn top_offset_measured() {
+    use oryx::edit::caret;
+    use oryx::paint::scroll;
+    let best = |run: &dyn Fn() -> usize| {
+        (0..5)
+            .map(|_| {
+                let started = Instant::now();
+                let answer = run();
+                (started.elapsed().as_secs_f64() * 1000.0, answer)
+            })
+            .min_by(|a, b| a.0.total_cmp(&b.0))
+            .unwrap()
+    };
+    let (_, _, page) = measure_open(&large_gen::generate(8 * 1024 * 1024), "md");
+    let (_, page_lay) = measure_layout(&page, None);
+    let (_, _, code) = measure_open(&large_gen::generate_code(8 * 1024 * 1024), "rs");
+    let (_, code_lay) = measure_layout(&code, None);
+    let (page_ms, page_top) =
+        best(&|| scroll::top_offset(&page_lay, &page, page_lay.height - VIEWPORT_H));
+    let (code_ms, code_top) =
+        best(&|| scroll::top_offset(&code_lay, &code, code_lay.height - VIEWPORT_H));
+    let blank = code
+        .source
+        .rfind("\n\n")
+        .map(|at| at + 1)
+        .expect("a blank line");
+    let (land_ms, landed) =
+        best(&|| caret::landing(&code_lay, &code, None, Some(blank), 0.0, VIEWPORT_H));
+    println!(
+        "top offset at the end of 8 MB: markdown page {page_ms:.2}ms (offset {page_top}), \
+         code {code_ms:.2}ms (offset {code_top}); landing with a blank line remembered near \
+         the end of 8 MB code: {land_ms:.2}ms (offset {landed})"
+    );
 }

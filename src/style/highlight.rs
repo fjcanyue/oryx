@@ -32,6 +32,12 @@ pub enum SyntaxRole {
     Variable,
     Punctuation,
     Plain,
+    /// A diff's lines: added, removed, and the `@@` line that says
+    /// where a change sits. Only a grammar that marks text as inserted
+    /// or deleted produces these, a diff above all.
+    Added,
+    Removed,
+    Range,
     /// Markdown source roles. A markdown file edits its own bytes, so
     /// its source is colored from the document's theme, the heading
     /// ramp and the text and block colors, rather than from the code
@@ -50,7 +56,9 @@ pub enum SyntaxRole {
 /// role keeps the regular face, since a source view's rows are a grid.
 pub fn role_face(role: SyntaxRole) -> (bool, bool) {
     match role {
-        SyntaxRole::Bold => (true, false),
+        // A heading line is bold in the source as on the page; bold
+        // inside it keeps the heading's role, so the weight is the same.
+        SyntaxRole::Bold | SyntaxRole::Heading(_) => (true, false),
         SyntaxRole::Italic => (false, true),
         _ => (false, false),
     }
@@ -523,13 +531,18 @@ impl Parser {
         let mut tokens: Vec<Token> = Vec::new();
         let mut last = 0usize;
         let markdown = self.markdown;
+        // A diff's line is added, removed or a range whole, its scope
+        // pushed at the line's start: the first token answers for the
+        // line, and the other tokens never look.
+        let mut line_role: Option<Option<SyntaxRole>> = None;
         let mut push = |from: usize, to: usize, stack: &ScopeStack| {
             let to = to.min(line.len());
             if from < to {
                 let role = if markdown {
                     markdown_role(stack, hashes)
                 } else {
-                    role_for(stack)
+                    let diff = *line_role.get_or_insert_with(|| diff_role(stack));
+                    diff.unwrap_or_else(|| role_for(stack))
                 };
                 tokens.push(Token {
                     role,
@@ -664,6 +677,152 @@ fn resolve_syntax(token: &str) -> Option<&'static syntect::parsing::SyntaxRefere
     })
 }
 
+/// How much of a first line the first-line rules read, in bytes.
+const FIRST_LINE_READ: usize = 1024;
+
+/// The grammar for a file whose name carries no extension, from what
+/// the file says about itself, in four layers tried in order: its first
+/// line against the grammars' own first-line patterns (shebangs, an XML
+/// header), an editor modeline in its first or last lines, its name
+/// against the grammars' own name lists (`.bashrc`, `Gemfile`), and the
+/// shape of its first lines for four plain tells only, a diff, JSON,
+/// XML or INI, so a settings file is never colored as the wrong
+/// language. None keeps the file plain; a wrong guess costs colors,
+/// never the text. Answers the grammar's name, which resolves as a
+/// token.
+pub fn sniff_language(name: &str, text: &str) -> Option<&'static str> {
+    let set = syntax_set();
+    // The first-line rules read a shebang or a header. A file with no
+    // line break is one line of any length, and the rules run over all
+    // they are given (105 ms at 8 MB), so they get its head alone.
+    let first = text.lines().next().unwrap_or("");
+    let mut head = first.len().min(FIRST_LINE_READ);
+    while !first.is_char_boundary(head) {
+        head -= 1;
+    }
+    if let Some(syntax) = set.find_syntax_by_first_line(&first[..head]) {
+        return Some(syntax.name.as_str());
+    }
+    if let Some(syntax) = modeline_token(text).and_then(|token| resolve_syntax(&token)) {
+        return Some(syntax.name.as_str());
+    }
+    if let Some(syntax) = set.find_syntax_by_extension(name) {
+        return Some(syntax.name.as_str());
+    }
+    shape_token(text)
+        .and_then(resolve_syntax)
+        .map(|syntax| syntax.name.as_str())
+}
+
+/// The file extension of the grammar a text names by itself, `diff` for
+/// a diff, `sh` for a shell script: the name a text with no file behind
+/// it is given, so the ordinary open path colors it. None for a text
+/// that says nothing.
+pub fn sniff_extension(text: &str) -> Option<&'static str> {
+    let name = sniff_language("", text)?;
+    syntax_set()
+        .find_syntax_by_name(name)?
+        .file_extensions
+        .first()
+        .map(String::as_str)
+}
+
+/// The language a modeline names, in the vim form (`vim: set ft=sh:`,
+/// `vi:ft=sh`, `syntax=sh`) or the Emacs form (`-*- mode: python -*-`,
+/// `-*- python -*-`), looked for in the first and the last five lines.
+fn modeline_token(text: &str) -> Option<String> {
+    let lines: Vec<&str> = text.lines().collect();
+    let edge = lines.len().min(5);
+    let candidates = lines[..edge]
+        .iter()
+        .chain(lines[lines.len() - edge..].iter());
+    // A modeline is a short comment; a line longer than that is data,
+    // and a search through megabytes of it names nothing.
+    for line in candidates.filter(|line| line.len() <= FIRST_LINE_READ) {
+        if let Some(token) = vim_modeline(line).or_else(|| emacs_modeline(line)) {
+            return Some(token);
+        }
+    }
+    None
+}
+
+fn vim_modeline(line: &str) -> Option<String> {
+    let start = ["vim:", "vi:", "ex:"]
+        .iter()
+        .filter_map(|marker| {
+            line.find(marker)
+                .filter(|&i| i == 0 || !line.as_bytes()[i - 1].is_ascii_alphanumeric())
+                .map(|i| i + marker.len())
+        })
+        .min()?;
+    line[start..]
+        .split(|c: char| c.is_whitespace() || c == ':')
+        .find_map(|word| {
+            let value = word
+                .strip_prefix("filetype=")
+                .or_else(|| word.strip_prefix("ft="))
+                .or_else(|| word.strip_prefix("syntax="))?;
+            (!value.is_empty()).then(|| value.to_ascii_lowercase())
+        })
+}
+
+fn emacs_modeline(line: &str) -> Option<String> {
+    let open = line.find("-*-")? + 3;
+    let close = line[open..].find("-*-")? + open;
+    let inner = line[open..close].trim();
+    let token = match inner.find("mode:") {
+        Some(i) => inner[i + 5..]
+            .trim_start()
+            .split(|c: char| c == ';' || c.is_whitespace())
+            .next()?,
+        None if !inner.contains(':') => inner,
+        None => return None,
+    };
+    (!token.is_empty()).then(|| token.to_ascii_lowercase())
+}
+
+/// The four plain shapes told from the first lines: a diff, a JSON
+/// object or array with a quoted key, XML or HTML by its tags, INI by
+/// a section line over a key line. Anything else says nothing.
+fn shape_token(text: &str) -> Option<&'static str> {
+    let head: Vec<&str> = text
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .take(20)
+        .collect();
+    let first = head.first()?.trim_start();
+    let is_diff = first.starts_with("diff --git")
+        || first.starts_with("Index: ")
+        || (first.starts_with("--- ") && head.iter().any(|line| line.starts_with("+++ ")))
+        || head
+            .iter()
+            .any(|line| line.starts_with("@@ ") && line.contains(" @@"));
+    if is_diff {
+        return Some("diff");
+    }
+    if (first.starts_with('{') || first.starts_with('['))
+        && head
+            .iter()
+            .any(|line| line.contains("\":") || line.contains("\" :"))
+    {
+        return Some("json");
+    }
+    let tag_open = first.starts_with('<')
+        && first[1..]
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_alphabetic() || c == '?' || c == '!');
+    if tag_open && (text.contains("</") || text.contains("/>")) {
+        return Some("xml");
+    }
+    let section =
+        first.starts_with('[') && first.trim_end().ends_with(']') && !first.contains("](");
+    if section && head.get(1).is_some_and(|line| line.contains('=')) {
+        return Some("ini");
+    }
+    None
+}
+
 /// Whether a language token resolves to the markdown grammar, which is
 /// the only one whose scopes carry the document's own colors.
 fn is_markdown(language: Option<&str>) -> bool {
@@ -713,6 +872,33 @@ fn markdown_role(stack: &ScopeStack, hashes: u8) -> SyntaxRole {
     SyntaxRole::Plain
 }
 
+/// The whole-line role of a diff's line, from its first token's stack:
+/// a line marked as inserted, deleted or as a range is that from its
+/// first character to its last, its `+`, `-` or `@@` included, since a
+/// diff is read by whole lines of one color. The scopes are compared
+/// as scopes, outermost first, and asked once per line: as a string
+/// per scope per token it was a second allocation pass over every
+/// colored line, 14% on the 8 MB code highlight at Gate 3.
+fn diff_role(stack: &ScopeStack) -> Option<SyntaxRole> {
+    static DIFF_ROLES: OnceLock<[(Scope, SyntaxRole); 3]> = OnceLock::new();
+    let diff_roles = DIFF_ROLES.get_or_init(|| {
+        let scope = |name: &str| Scope::new(name).expect("a fixed scope name parses");
+        [
+            (scope("markup.inserted"), SyntaxRole::Added),
+            (scope("markup.deleted"), SyntaxRole::Removed),
+            (scope("meta.diff.range"), SyntaxRole::Range),
+        ]
+    });
+    for scope in stack.as_slice() {
+        for (prefix, role) in diff_roles {
+            if prefix.is_prefix_of(*scope) {
+                return Some(*role);
+            }
+        }
+    }
+    None
+}
+
 /// The innermost scope with a known mapping wins.
 fn role_for(stack: &ScopeStack) -> SyntaxRole {
     for scope in stack.as_slice().iter().rev() {
@@ -751,6 +937,31 @@ fn role_for(stack: &ScopeStack) -> SyntaxRole {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_diff_tells_its_added_removed_and_range_lines() {
+        let text = "diff --git a/notes.md b/notes.md\nindex 1d7918d..2323a24 100644\n--- a/notes.md\n+++ b/notes.md\n@@ -1,4 +1,5 @@\n # Notes\n-An old line.\n+A new line.\n";
+        let body = CodeBody::from_text(text);
+        let got = spans(text, &body, Some("diff"));
+        let roles =
+            |line: usize| -> Vec<SyntaxRole> { got[line].iter().map(|(_, role)| *role).collect() };
+        assert_eq!(
+            roles(6),
+            vec![SyntaxRole::Removed],
+            "the whole line, its minus included"
+        );
+        assert_eq!(got[6][0].0, 0..13);
+        assert_eq!(roles(7), vec![SyntaxRole::Added]);
+        assert_eq!(roles(4), vec![SyntaxRole::Range], "the @@ line");
+        assert!(
+            !roles(5).contains(&SyntaxRole::Added) && !roles(5).contains(&SyntaxRole::Removed),
+            "a context line keeps the text color"
+        );
+        assert!(
+            !roles(2).contains(&SyntaxRole::Removed) && !roles(3).contains(&SyntaxRole::Added),
+            "the two file lines are names, not changes"
+        );
+    }
 
     fn lines(v: &[&str]) -> CodeBody {
         CodeBody::from_text(&v.join("\n"))
@@ -921,12 +1132,20 @@ mod tests {
         }
     }
 
+    /// Headings draw bold in the source as they do on the page, every
+    /// level alike; a monospace bold keeps the advance, so the grid holds.
     #[test]
-    fn only_bold_and_italic_change_the_face() {
+    fn bold_italic_and_headings_change_the_face() {
         assert_eq!(role_face(SyntaxRole::Bold), (true, false));
         assert_eq!(role_face(SyntaxRole::Italic), (false, true));
+        for level in 1..=6 {
+            assert_eq!(
+                role_face(SyntaxRole::Heading(level)),
+                (true, false),
+                "heading {level} is bold"
+            );
+        }
         for role in [
-            SyntaxRole::Heading(1),
             SyntaxRole::InlineCode,
             SyntaxRole::Link,
             SyntaxRole::Quote,
@@ -1480,5 +1699,108 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// A file with no line break is one long first line: the rules read
+    /// its head, cut on a character, and a shebang there still answers.
+    #[test]
+    fn a_first_line_of_any_length_is_read_by_its_head() {
+        let long = format!("#!/bin/sh {}", "é".repeat(4 * FIRST_LINE_READ));
+        assert_eq!(
+            sniff_language("run", &long),
+            Some("Bourne Again Shell (bash)")
+        );
+        assert_eq!(sniff_language("data", &"é".repeat(FIRST_LINE_READ)), None);
+    }
+
+    /// A file with no extension says what it is in four ways, tried in
+    /// order: its first line, a modeline, its name, or its shape; prose
+    /// says nothing and stays plain.
+    #[test]
+    fn a_file_without_an_extension_is_sniffed_from_what_it_says() {
+        let sniff = |name: &str, text: &str| sniff_language(name, text);
+        assert_eq!(
+            sniff("script", "#!/usr/bin/env python3\nprint(1)\n"),
+            Some("Python")
+        );
+        assert_eq!(
+            sniff("run", "#!/bin/sh\necho hi\n"),
+            Some("Bourne Again Shell (bash)")
+        );
+        assert_eq!(
+            sniff("feed", "<?xml version=\"1.0\"?>\n<rss/>\n"),
+            Some("XML")
+        );
+        assert_eq!(
+            sniff("modeline", "# a comment\n# vim: set ft=ruby:\nputs 1\n"),
+            Some("Ruby")
+        );
+        assert_eq!(
+            sniff("tail", "puts 1\nputs 2\n# vim:ft=ruby\n"),
+            Some("Ruby"),
+            "a modeline in the last lines counts too"
+        );
+        assert_eq!(
+            sniff("emacs", ";; -*- mode: lisp -*-\n(defun f () 1)\n"),
+            Some("Lisp")
+        );
+        assert_eq!(
+            sniff("emacs-bare", "# -*- python -*-\nprint(1)\n"),
+            Some("Python"),
+            "the bare Emacs form names the mode alone"
+        );
+        assert_eq!(
+            sniff(".bashrc", "# no shebang\nexport A=1\n"),
+            Some("Bourne Again Shell (bash)"),
+            "the grammars know the name"
+        );
+        assert_eq!(
+            sniff("Gemfile", "source 'https://rubygems.org'\n"),
+            Some("Ruby")
+        );
+        assert_eq!(
+            sniff(
+                "patch",
+                "diff --git a/x b/x\n--- a/x\n+++ b/x\n@@ -1 +1 @@\n-a\n+b\n"
+            ),
+            Some("Diff")
+        );
+        assert_eq!(
+            sniff("changes", "--- a/x\n+++ b/x\n@@ -1 +1 @@\n-a\n+b\n"),
+            Some("Diff"),
+            "a unified diff without the git header"
+        );
+        assert_eq!(
+            sniff("settings", "{\n  \"theme\": \"nord\"\n}\n"),
+            Some("JSON")
+        );
+        assert_eq!(sniff("config", "[window]\nwidth = 1000\n"), Some("INI"));
+        assert_eq!(sniff("gitconfig", "[user]\n\tname = x\n"), Some("INI"));
+        assert_eq!(
+            sniff("page", "<html>\n<body>hi</body>\n</html>\n"),
+            Some("HTML"),
+            "the grammars' first-line patterns know an html tag"
+        );
+        assert_eq!(
+            sniff("feed", "<rss>\n<item/>\n</rss>\n"),
+            Some("XML"),
+            "a tag the patterns do not know is XML by its shape"
+        );
+        assert_eq!(
+            sniff("README", "Oryx\n\nA fast viewer.\n"),
+            None,
+            "prose stays plain"
+        );
+        assert_eq!(
+            sniff("notes", "[a link](x)\n\nmore\n"),
+            None,
+            "a bracket alone is not INI"
+        );
+        assert_eq!(
+            sniff("list", "[\"a\", \"b\"]\n"),
+            None,
+            "an array of strings is not JSON enough"
+        );
+        assert_eq!(sniff("empty", ""), None);
     }
 }

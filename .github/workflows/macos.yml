@@ -1,0 +1,35 @@
+# The Mac build, started by hand from the Actions tab. It builds and
+# uploads only; the disk image goes to the release by hand, after the
+# tester's word, like every other release file. Run it on the release
+# tag for a release, or on a branch to try the build.
+name: macOS build
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Tag or branch to build (empty: the branch this runs on)"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+      - name: Install the SVG renderer
+        run: brew install librsvg
+      - name: Build the app and the disk image
+        run: sh packaging/macos/build.sh release
+      - uses: actions/upload-artifact@v7
+        with:
+          name: oryx-macos
+          path: |
+            release/*.dmg
+            release/*.sha256
+          if-no-files-found: error

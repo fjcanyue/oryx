@@ -28,18 +28,8 @@ pub fn parse(source: impl Into<Arc<str>>) -> Document {
 /// every span text the source already carries.
 pub fn parse_unless(source: impl Into<Arc<str>>, bail: impl Fn() -> bool) -> Option<Document> {
     let source: Arc<str> = source.into();
-    let options = Options::ENABLE_TABLES
-        | Options::ENABLE_FOOTNOTES
-        | Options::ENABLE_STRIKETHROUGH
-        | Options::ENABLE_TASKLISTS
-        | Options::ENABLE_SMART_PUNCTUATION
-        | Options::ENABLE_MATH
-        | Options::ENABLE_YAML_STYLE_METADATA_BLOCKS
-        | Options::ENABLE_GFM
-        | Options::ENABLE_HEADING_ATTRIBUTES
-        | Options::ENABLE_DEFINITION_LIST;
     let mut builder = Builder::new(Arc::clone(&source));
-    for (count, (event, range)) in Parser::new_ext(&source, options)
+    for (count, (event, range)) in Parser::new_ext(&source, options())
         .into_offset_iter()
         .enumerate()
     {
@@ -62,6 +52,21 @@ pub fn parse_unless(source: impl Into<Arc<str>>, bail: impl Fn() -> bool) -> Opt
             .collect(),
         ..Document::default()
     })
+}
+
+/// The markdown extensions Oryx reads. The word count parses with the
+/// same set, so it sees the constructs the page shows.
+pub(crate) fn options() -> Options {
+    Options::ENABLE_TABLES
+        | Options::ENABLE_FOOTNOTES
+        | Options::ENABLE_STRIKETHROUGH
+        | Options::ENABLE_TASKLISTS
+        | Options::ENABLE_SMART_PUNCTUATION
+        | Options::ENABLE_MATH
+        | Options::ENABLE_YAML_STYLE_METADATA_BLOCKS
+        | Options::ENABLE_GFM
+        | Options::ENABLE_HEADING_ATTRIBUTES
+        | Options::ENABLE_DEFINITION_LIST
 }
 
 /// The currency gate over dollar-delimited math. pulldown already requires
@@ -219,11 +224,35 @@ struct HtmlPre {
 }
 
 /// One open HTML list level.
-/// An open `<p>` or `<div>`: whether it centers its content, and
-/// whether a page break follows it (`page-break-after`).
+/// An open `<p>` or `<div>`: the side its `align` attribute names, if
+/// any, and whether a page break follows it (`page-break-after`).
 struct HtmlDiv {
-    centered: bool,
+    align: Option<HtmlAlign>,
     break_after: bool,
+}
+
+/// The values of `align` Oryx reads on a `p` or a `div`.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum HtmlAlign {
+    Left,
+    Center,
+    Right,
+}
+
+impl HtmlAlign {
+    /// Any other value, `justify` included, reads as no attribute: the
+    /// block keeps the word of the block around it.
+    fn parse(value: &str) -> Option<Self> {
+        if value.eq_ignore_ascii_case("left") {
+            Some(HtmlAlign::Left)
+        } else if value.eq_ignore_ascii_case("center") {
+            Some(HtmlAlign::Center)
+        } else if value.eq_ignore_ascii_case("right") {
+            Some(HtmlAlign::Right)
+        } else {
+            None
+        }
+    }
 }
 
 /// Which side of an element a page break style puts the break on.
@@ -1162,14 +1191,13 @@ impl Builder {
                     return;
                 }
                 self.flush_spans();
-                let centered =
-                    html_attr(attrs, "align").is_some_and(|a| a.eq_ignore_ascii_case("center"));
+                let align = html_attr(attrs, "align").and_then(|a| HtmlAlign::parse(&a));
                 let side = html_attr(attrs, "style").and_then(|s| page_break_side(&s));
                 if side == Some(BreakSide::Before) {
                     self.emit(BlockKind::PageBreak);
                 }
                 self.html_divs.push(HtmlDiv {
-                    centered,
+                    align,
                     break_after: side == Some(BreakSide::After),
                 });
             }
@@ -1646,7 +1674,7 @@ impl Builder {
         };
         if let Some(caption) = t.caption {
             self.html_divs.push(HtmlDiv {
-                centered: true,
+                align: Some(HtmlAlign::Center),
                 break_after: false,
             });
             self.emit(BlockKind::Paragraph { spans: caption });
@@ -1682,6 +1710,8 @@ impl Builder {
                 alert: None,
                 range: start..start,
                 centered: false,
+                right: false,
+                left: false,
                 details: self.details[id as usize].parent,
                 kind: BlockKind::Summary {
                     spans: vec![Span::plain("Details")],
@@ -1888,11 +1918,15 @@ impl Builder {
             BlockKind::Summary { group, .. } => self.details[*group as usize].parent,
             _ => self.details_stack.last().copied(),
         };
+        // The innermost open block that names a side decides.
+        let align = self.html_divs.iter().rev().find_map(|d| d.align);
         self.blocks.push(Block {
             quote_depth: self.quote_depth,
             alert: self.alerts.iter().rev().find_map(|a| *a),
             range,
-            centered: self.html_divs.iter().any(|d| d.centered),
+            centered: align == Some(HtmlAlign::Center),
+            right: align == Some(HtmlAlign::Right),
+            left: align == Some(HtmlAlign::Left),
             details,
             kind,
         });
@@ -2629,6 +2663,71 @@ mod tests {
             .expect("cell keeps its image span");
         assert_eq!(image.src, "badge.svg");
         assert_eq!(image.width, Some(90));
+    }
+
+    /// `align="right"` on a p or div puts its blocks against the right
+    /// edge, as GitHub does; center keeps working, and a plain block
+    /// carries neither.
+    #[test]
+    fn html_align_right_marks_the_blocks_inside() {
+        let d = parse("<p align=\"right\">\n\n[More tips...](tip:next)\n\n</p>\n\nplain\n");
+        let link = d
+            .blocks
+            .iter()
+            .find(|b| matches!(b.kind, BlockKind::Paragraph { .. }))
+            .expect("the paragraph inside");
+        assert!(link.right, "right-aligned");
+        assert!(!link.centered);
+        let plain = d.blocks.last().unwrap();
+        assert!(!plain.right && !plain.centered, "outside the div, neither");
+        let c = parse("<div align=\"CENTER\">\n\ntext\n\n</div>\n");
+        let inner = c
+            .blocks
+            .iter()
+            .find(|b| matches!(b.kind, BlockKind::Paragraph { .. }))
+            .unwrap();
+        assert!(inner.centered && !inner.right);
+    }
+
+    /// The innermost `align` wins, as in HTML: a left block inside a
+    /// centered one goes back to the left, and the outer word holds
+    /// again once the inner block closes.
+    #[test]
+    fn html_align_takes_the_innermost_word() {
+        let paragraph = |d: &Document, text: &str| -> (bool, bool, bool) {
+            let block = d
+                .blocks
+                .iter()
+                .find(|b| match &b.kind {
+                    BlockKind::Paragraph { spans } => {
+                        spans.iter().any(|s| s.text(&d.source) == text)
+                    }
+                    _ => false,
+                })
+                .unwrap_or_else(|| panic!("no paragraph {text}"));
+            (block.left, block.centered, block.right)
+        };
+        let d = parse(
+            "<div align=\"center\">\n\nbefore\n\n<p align=\"LEFT\">\n\ninner\n\n</p>\n\nafter\n\n</div>\n\nplain\n",
+        );
+        assert_eq!(paragraph(&d, "before"), (false, true, false));
+        assert_eq!(paragraph(&d, "inner"), (true, false, false));
+        assert_eq!(paragraph(&d, "after"), (false, true, false));
+        assert_eq!(paragraph(&d, "plain"), (false, false, false));
+
+        let d = parse("<div align=\"center\">\n\n<p align=\"right\">\n\ninner\n\n</p>\n\n</div>\n");
+        assert_eq!(paragraph(&d, "inner"), (false, false, true));
+
+        // The one-line form of SYNTAX.md.
+        let d = parse("<div align=\"center\"><p align=\"left\">inner</p></div>\n");
+        assert_eq!(paragraph(&d, "inner"), (true, false, false));
+
+        // A block without the attribute, or with a value Oryx does not
+        // read, keeps the word of the block around it.
+        let d = parse(
+            "<div align=\"right\">\n\n<div>\n\n<p align=\"justify\">\n\ninner\n\n</p>\n\n</div>\n\n</div>\n",
+        );
+        assert_eq!(paragraph(&d, "inner"), (false, false, true));
     }
 
     #[test]

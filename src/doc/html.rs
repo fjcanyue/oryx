@@ -1338,6 +1338,8 @@ impl Walker {
                 alert: None,
                 range: start..start,
                 centered: false,
+                right: false,
+                left: false,
                 details: self.details[id as usize].parent,
                 kind: BlockKind::Summary {
                     spans: vec![Span::plain("Details")],
@@ -1395,6 +1397,8 @@ impl Walker {
             alert: None,
             range,
             centered: self.center.iter().any(|&c| c),
+            right: false,
+            left: false,
             details,
             kind,
         });

@@ -1,0 +1,53 @@
+name: Fork regression checks
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fork-ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_BUILD_JOBS: 1
+  CARGO_PROFILE_TEST_DEBUG: 0
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config libssl-dev libwayland-dev libxkbcommon-dev fonts-dejavu-core fonts-noto-cjk
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Check all targets
+        run: cargo check --workspace --all-targets --locked
+      - name: Run the complete workspace on Linux
+        if: runner.os == 'Linux'
+        run: cargo test --workspace --locked
+      - name: Run Windows unit tests
+        if: runner.os == 'Windows'
+        run: >-
+          cargo test --workspace --locked --lib --bins --
+          --skip app::tests::theme_dirs_from_adds_the_system_data_dirs_after_the_user_dir
+          --skip app::tests::theme_dirs_from_reads_each_xdg_data_dirs_entry_in_order
+      - name: Run Windows rendering and export regressions
+        if: runner.os == 'Windows'
+        run: >-
+          cargo test --locked
+          --test mermaid_theme_matrix --test mermaid_fixtures --test merman_smoke
+          --test layout --test export --test copy_html

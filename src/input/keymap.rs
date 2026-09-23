@@ -11,6 +11,7 @@ pub enum Command {
     Reload,
     Refetch,
     Sidebar,
+    HiddenFiles,
     Export,
     ExportSettings,
     Help,
@@ -30,6 +31,7 @@ pub enum Command {
     Replace,
     /// Search in files: the sidebar's Files tab, content view.
     SearchInFiles,
+    GoToLine,
     LineUp,
     LineDown,
     PaneLeft,
@@ -40,9 +42,11 @@ pub enum Command {
     Top,
     Bottom,
     Back,
+    Forward,
     Edit,
     Cut,
     Paste,
+    PasteFull,
     Undo,
     Redo,
     Save,
@@ -70,12 +74,14 @@ pub enum Command {
 }
 
 impl Command {
-    /// Every variant; the coverage test checks each one against the table.
-    pub const ALL: [Command; 61] = [
+    /// Every variant. One test checks each entry has a row in the table,
+    /// another that every command a row binds is listed here.
+    pub const ALL: [Command; 66] = [
         Command::OpenFile,
         Command::Reload,
         Command::Refetch,
         Command::Sidebar,
+        Command::HiddenFiles,
         Command::Export,
         Command::ExportSettings,
         Command::Help,
@@ -85,6 +91,7 @@ impl Command {
         Command::ZoomOut,
         Command::ZoomReset,
         Command::Justify,
+        Command::Direction,
         Command::SelectAll,
         Command::CopyText,
         Command::CopyMarkdown,
@@ -93,6 +100,7 @@ impl Command {
         Command::FindPrev,
         Command::Replace,
         Command::SearchInFiles,
+        Command::GoToLine,
         Command::LineUp,
         Command::LineDown,
         Command::PaneLeft,
@@ -103,9 +111,11 @@ impl Command {
         Command::Top,
         Command::Bottom,
         Command::Back,
+        Command::Forward,
         Command::Edit,
         Command::Cut,
         Command::Paste,
+        Command::PasteFull,
         Command::Undo,
         Command::Redo,
         Command::Save,
@@ -184,6 +194,24 @@ enum Binding {
     /// that a layout printing something else on the `0`, `-` or `=`
     /// keys still zooms with them, the way browsers do.
     CtrlCode(KeyCode),
+    /// A chord that holds on macOS only, where the Mac's own habits
+    /// take a key: `Option+Left` moves by a word in every Mac app, so
+    /// back and forward take the browser's `Cmd+[` and `Cmd+]` there.
+    Mac(&'static Binding),
+    /// A chord that holds everywhere but on macOS.
+    NotMac(&'static Binding),
+}
+
+impl Binding {
+    /// The chord as it stands on a platform: itself, or the one it
+    /// wraps for that platform, or nothing there.
+    fn on(&self, macos: bool) -> Option<&Binding> {
+        match self {
+            Binding::Mac(inner) => macos.then_some(*inner),
+            Binding::NotMac(inner) => (!macos).then_some(*inner),
+            other => Some(other),
+        }
+    }
 }
 
 /// One help-table row: display labels plus the chords the row covers.
@@ -223,7 +251,7 @@ pub const SHORTCUTS: &[Shortcut] = &[
     },
     Shortcut {
         keys: "Ctrl+Shift+S",
-        action: "Save as (editing)",
+        action: "Save as",
         section: "Files",
         bindings: &[(Binding::CtrlShift("s"), Command::SaveAs)],
     },
@@ -272,10 +300,21 @@ pub const SHORTCUTS: &[Shortcut] = &[
         ],
     },
     Shortcut {
-        keys: "Alt+Left",
-        action: "Go back after a link or outline jump",
+        keys: "Alt+Left / Alt+Right",
+        action: "Go back to where a jump left, and forward again",
         section: "Navigation",
-        bindings: &[(Binding::AltNamed(NamedKey::ArrowLeft), Command::Back)],
+        bindings: &[
+            (
+                Binding::NotMac(&Binding::AltNamed(NamedKey::ArrowLeft)),
+                Command::Back,
+            ),
+            (
+                Binding::NotMac(&Binding::AltNamed(NamedKey::ArrowRight)),
+                Command::Forward,
+            ),
+            (Binding::Mac(&Binding::Ctrl("[")), Command::Back),
+            (Binding::Mac(&Binding::Ctrl("]")), Command::Forward),
+        ],
     },
     Shortcut {
         keys: "Ctrl+Shift+B",
@@ -291,6 +330,12 @@ pub const SHORTCUTS: &[Shortcut] = &[
             (Binding::Named(NamedKey::ArrowLeft), Command::PaneLeft),
             (Binding::Named(NamedKey::ArrowRight), Command::PaneRight),
         ],
+    },
+    Shortcut {
+        keys: "Ctrl+Shift+H",
+        action: "Show or hide hidden files in the sidebar",
+        section: "Navigation",
+        bindings: &[(Binding::CtrlShift("h"), Command::HiddenFiles)],
     },
     Shortcut {
         keys: "Ctrl+Tab",
@@ -332,12 +377,19 @@ pub const SHORTCUTS: &[Shortcut] = &[
         section: "Find",
         bindings: &[(Binding::Ctrl("h"), Command::Replace)],
     },
-    // Handled by the open search bar itself, so no command binding.
+    // Handled by the open search bar and by the sidebar themselves, so
+    // no command binding.
     Shortcut {
         keys: "Ctrl+Enter",
-        action: "Replace all (replace open)",
+        action: "Replace all (replace open); in the sidebar, open the highlighted file in a new window, as a middle click on its row does",
         section: "Find",
         bindings: &[],
+    },
+    Shortcut {
+        keys: "Ctrl+G",
+        action: "Go to a line: 412, or 412:10 for a column too",
+        section: "Find",
+        bindings: &[(Binding::Ctrl("g"), Command::GoToLine)],
     },
     Shortcut {
         keys: "Ctrl+A",
@@ -347,7 +399,7 @@ pub const SHORTCUTS: &[Shortcut] = &[
     },
     Shortcut {
         keys: "Ctrl+C",
-        action: "Copy selection as text",
+        action: "Copy the selection with its formatting, or the line (editing)",
         section: "Selection",
         bindings: &[(Binding::Ctrl("c"), Command::CopyText)],
     },
@@ -365,7 +417,7 @@ pub const SHORTCUTS: &[Shortcut] = &[
     },
     Shortcut {
         keys: "Ctrl+X",
-        action: "Cut the selection (editing)",
+        action: "Cut the selection, or the line (editing)",
         section: "Edit",
         bindings: &[(Binding::Ctrl("x"), Command::Cut)],
     },
@@ -374,6 +426,12 @@ pub const SHORTCUTS: &[Shortcut] = &[
         action: "Paste at the caret (editing)",
         section: "Edit",
         bindings: &[(Binding::Ctrl("v"), Command::Paste)],
+    },
+    Shortcut {
+        keys: "Ctrl+Shift+V",
+        action: "Paste a big picture at its full size (editing markdown)",
+        section: "Edit",
+        bindings: &[(Binding::CtrlShift("v"), Command::PasteFull)],
     },
     Shortcut {
         keys: "Ctrl+Z",
@@ -472,7 +530,7 @@ pub const SHORTCUTS: &[Shortcut] = &[
     },
     Shortcut {
         keys: "Ctrl+K",
-        action: "Link around the selection, or an empty link; pasting an address over a selection links it too (markdown editing)",
+        action: "Link around the selection or the word, or an empty link; pasting an address over a selection links it too (markdown editing)",
         section: "Edit",
         bindings: &[(Binding::Ctrl("k"), Command::Link)],
     },
@@ -514,7 +572,7 @@ pub const SHORTCUTS: &[Shortcut] = &[
     },
     Shortcut {
         keys: "Ctrl+,",
-        action: "Settings: fonts, sizes and interface scale",
+        action: "Settings: fonts, sizes, interface scale, line numbers, word count and autosave",
         section: "View",
         bindings: &[(Binding::Ctrl(","), Command::Settings)],
     },
@@ -592,7 +650,25 @@ pub fn command(
     shift: bool,
     alt: bool,
 ) -> Option<Command> {
-    let bindings = || SHORTCUTS.iter().flat_map(|row| row.bindings.iter());
+    command_on(key, code, ctrl, shift, alt, cfg!(target_os = "macos"))
+}
+
+/// `command` for a named platform, so a test can ask for the Mac's
+/// chords from anywhere.
+fn command_on(
+    key: &Key,
+    code: PhysicalKey,
+    ctrl: bool,
+    shift: bool,
+    alt: bool,
+    macos: bool,
+) -> Option<Command> {
+    let bindings = || {
+        SHORTCUTS
+            .iter()
+            .flat_map(|row| row.bindings.iter())
+            .filter_map(move |(binding, cmd)| Some((binding.on(macos)?, *cmd)))
+    };
     let shifted = bindings().find(|(binding, _)| match binding {
         Binding::CtrlShift(c) => ctrl && shift && is_char(key, c),
         Binding::ShiftNamed(n) => shift && is_named(key, n),
@@ -615,10 +691,7 @@ pub fn command(
             _ => false,
         })
     };
-    shifted
-        .or_else(plain)
-        .or_else(physical)
-        .map(|(_, cmd)| *cmd)
+    shifted.or_else(plain).or_else(physical).map(|(_, cmd)| cmd)
 }
 
 fn is_char(key: &Key, c: &str) -> bool {
@@ -629,14 +702,17 @@ fn is_named(key: &Key, n: &NamedKey) -> bool {
     matches!(key, Key::Named(k) if k == n)
 }
 
-/// Chord label for the running platform: Ctrl renders as Cmd on macOS.
+/// Chord label for the running platform: Ctrl renders as Cmd on macOS,
+/// and back and forward as the Mac's own keys.
 pub fn display(keys: &str) -> String {
     platform_label(keys, cfg!(target_os = "macos"))
 }
 
 fn platform_label(keys: &str, macos: bool) -> String {
     if macos {
-        keys.replace("Ctrl", "Cmd")
+        keys.replace("Alt+Left", "Cmd+[")
+            .replace("Alt+Right", "Cmd+]")
+            .replace("Ctrl", "Cmd")
     } else {
         keys.to_string()
     }
@@ -713,7 +789,7 @@ mod tests {
         let none = PhysicalKey::Unidentified(NativeKeyCode::Unidentified);
         let mut seen = 0;
         for (binding, cmd) in SHORTCUTS.iter().flat_map(|row| row.bindings.iter()) {
-            let (code, ctrl, alt) = match binding {
+            let (code, ctrl, alt) = match binding.on(cfg!(target_os = "macos")).unwrap_or(binding) {
                 Binding::CtrlCode(code) => (code, true, false),
                 Binding::AltCode(code) => (code, false, true),
                 _ => continue,
@@ -826,6 +902,14 @@ mod tests {
         assert_eq!(command(&chr("k"), true, false), Some(Command::Link));
     }
 
+    /// The file managers' chord for hidden files is Ctrl+H, which is
+    /// find and replace here; the toggle takes Shift with it.
+    #[test]
+    fn ctrl_shift_h_toggles_hidden_files_and_plain_ctrl_h_replaces() {
+        assert_eq!(command(&chr("H"), true, true), Some(Command::HiddenFiles));
+        assert_eq!(command(&chr("h"), true, false), Some(Command::Replace));
+    }
+
     #[test]
     fn ctrl_slash_toggles_a_comment_by_character_or_key() {
         assert_eq!(command(&chr("/"), true, false), Some(Command::Comment));
@@ -854,13 +938,59 @@ mod tests {
     }
 
     #[test]
+    fn on_the_mac_back_and_forward_are_cmd_brackets_and_option_arrows_are_free() {
+        let none = PhysicalKey::Unidentified(NativeKeyCode::Unidentified);
+        let mac = |key: &Key, ctrl: bool, alt: bool| command_on(key, none, ctrl, false, alt, true);
+        let elsewhere =
+            |key: &Key, ctrl: bool, alt: bool| command_on(key, none, ctrl, false, alt, false);
+        assert_eq!(mac(&chr("["), true, false), Some(Command::Back));
+        assert_eq!(mac(&chr("]"), true, false), Some(Command::Forward));
+        let left = Key::Named(NamedKey::ArrowLeft);
+        let right = Key::Named(NamedKey::ArrowRight);
+        assert_eq!(
+            mac(&left, false, true),
+            Some(Command::PaneLeft),
+            "Option+Left is not back on the Mac, where every app moves by a word with it"
+        );
+        assert_eq!(mac(&right, false, true), Some(Command::PaneRight));
+        assert_eq!(elsewhere(&left, false, true), Some(Command::Back));
+        assert_eq!(elsewhere(&right, false, true), Some(Command::Forward));
+        assert_eq!(elsewhere(&chr("["), true, false), None);
+        assert_eq!(elsewhere(&chr("]"), true, false), None);
+        assert_eq!(
+            platform_label("Alt+Left / Alt+Right", true),
+            "Cmd+[ / Cmd+]"
+        );
+        assert_eq!(
+            platform_label("Alt+Left / Alt+Right", false),
+            "Alt+Left / Alt+Right"
+        );
+        assert_eq!(
+            platform_label("Alt+Up / Alt+Down", true),
+            "Alt+Up / Alt+Down"
+        );
+    }
+
+    #[test]
     fn alt_left_goes_back_and_plain_left_still_switches_panes() {
+        // Off the Mac, whatever machine runs the test.
         let left = Key::Named(NamedKey::ArrowLeft);
         let none = PhysicalKey::Unidentified(NativeKeyCode::Unidentified);
         assert_eq!(
-            super::command(&left, none, false, false, true),
+            command_on(&left, none, false, false, true, false),
             Some(Command::Back),
             "Alt+Left returns from a jump"
+        );
+        let right = Key::Named(NamedKey::ArrowRight);
+        assert_eq!(
+            command_on(&right, none, false, false, true, false),
+            Some(Command::Forward),
+            "Alt+Right goes forward again"
+        );
+        assert_eq!(
+            command_on(&right, none, false, false, false, false),
+            Some(Command::PaneRight),
+            "plain Right keeps the pane switch"
         );
         assert_eq!(
             super::command(&left, none, false, false, false),
@@ -895,6 +1025,24 @@ mod tests {
                 "{cmd:?} has no row in SHORTCUTS"
             );
         }
+    }
+
+    /// The other way round, which keeps `ALL` whole: a command the table
+    /// binds stands in the list. A new command is useless until a row
+    /// binds it, and the row fails here until the list names it, so the
+    /// tests that walk `ALL` never miss one.
+    #[test]
+    fn every_bound_command_stands_in_the_list() {
+        let missing: Vec<String> = SHORTCUTS
+            .iter()
+            .flat_map(|row| row.bindings.iter().map(move |(_, cmd)| (row.keys, cmd)))
+            .filter(|(_, cmd)| !Command::ALL.contains(cmd))
+            .map(|(keys, cmd)| format!("{cmd:?} ({keys})"))
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "bound by a row and missing from Command::ALL: {missing:?}"
+        );
     }
 
     /// While a text field has the keyboard, the document's editing and
@@ -1021,6 +1169,7 @@ mod tests {
     fn cut_and_paste_resolve() {
         assert_eq!(command(&chr("x"), true, false), Some(Command::Cut));
         assert_eq!(command(&chr("v"), true, false), Some(Command::Paste));
+        assert_eq!(command(&chr("V"), true, true), Some(Command::PasteFull));
     }
 
     #[test]
@@ -1094,6 +1243,12 @@ mod tests {
     #[test]
     fn find_chords_resolve() {
         assert_eq!(command(&chr("f"), true, false), Some(Command::Find));
+        assert_eq!(command(&chr("g"), true, false), Some(Command::GoToLine));
+        assert_eq!(command(&chr("G"), true, true), Some(Command::GoToLine));
+        assert!(
+            Command::GoToLine.live_under_a_field(),
+            "Ctrl+G under the search field swaps the two bars"
+        );
         assert_eq!(
             command(&Key::Named(NamedKey::F3), false, false),
             Some(Command::FindNext)

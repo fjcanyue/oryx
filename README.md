@@ -35,21 +35,23 @@ Oryx reads CommonMark, the GitHub Flavored Markdown extensions (tables, task lis
 
 ### Markdown
 
-Headings, bold, italic, strikethrough, inline code, links and bare URLs (a link to another file opens it in Oryx), nested blockquotes, horizontal rules, smart quotes and dashes, and emoji shortcodes like `:tada:` :tada:. Ordered, unordered and task lists nest as deep as needed. The extended forms render too: `H~2~O` and `x^2^` as subscript and superscript, `==text==` highlighted, a definition list with each term above its indented definitions, a heading with an id of its own in braces, and abbreviations with a dotted underline. Resting the mouse on an abbreviation shows its expansion. A lot of care was given to details: for example, a wrapped line aligns with the text above it, not with the bullet, and tables keep per-column alignment, shade alternating rows and wrap long cells, so a wide table does not run off the page.
+All the standard constructs, plus the extended ones: subscript and superscript (`H~2~O`, `x^2^`), `==highlight==`, definition lists, heading ids in braces, abbreviations with their expansion on hover, and emoji shortcodes like `:tada:` :tada:. Lists nest as deep as needed. A lot of care was given to details: a wrapped line aligns with the text above it, not with the bullet, tables keep per-column alignment, shade alternating rows and wrap long cells, and a link to another file opens it in Oryx.
 
 ### Source code
 
-Oryx displays fenced blocks in a bordered panel with syntax colors for code. A code line too long wraps inside the panel. Oryx also opens source files directly and renders them as one highlighted document. Over a hundred extensions are supported, from Rust and Python to Terraform and Zig. Some files like a `Dockerfile` or a `Makefile` are recognized by name. Any other text file opens in the code font.
+Oryx displays fenced blocks in a bordered panel with syntax colors for code. A code line too long wraps inside the panel. Oryx also opens source files directly and renders them as one highlighted document. Over a hundred extensions are supported, from Rust and Python to Terraform and Zig. Some files like a `Dockerfile` or a `Makefile` are recognized by name. A file without an extension gets its colors when it says what it is: a script with a shebang, a file with an editor modeline, a dotfile like `.bashrc` or `.gitconfig`, or a diff, a JSON, an XML or an INI file recognized by its first lines. A diff shows its added lines in green and its removed lines in red. Any other text file opens in the code font.
+
+Oryx refuses binary files: a file whose first 8 KB holds a zero byte or is mostly unreadable. A text file in an encoding older than UTF-8 is refused too.
 
 ![Oryx rendering highlighted code](screenshots/code.png)
 
-### GitHub flavor and more
+### GitHub Flavored Markdown (GFM) and more
 
-The five GitHub alerts are styled, each with its own color and title. Oryx shows a YAML frontmatter header as a small metadata panel above the document. Footnote markers appear raised in the text, numbered in order of use, and link to their definitions, gathered at the foot of the document. The number at the foot links back to the text, and `Alt+Left` returns to where you were reading.
+The five GitHub alerts are styled, each with its own color and title. Oryx shows a YAML frontmatter header as a small metadata panel above the document. Footnote markers appear raised in the text, numbered in order of use, and link to their definitions, gathered at the foot of the document. The number at the foot links back to the text, and `Alt+Left` (`Cmd+[` on a Mac) returns to where you were reading.
 
 **Images and badges**: Supported formats are PNG, JPEG, GIF, WebP or SVG. Remote images are fetched in the background and cached on disk, so a file with badges comes up immediately the second time it is opened, and keeps working offline. A cached image older than a day is refreshed in the background the next time the file opens. If a path is broken, the image is replaced by a placeholder showing the alt text, or the file name when there is none.
 
-**Embedded HTML** covers what GitHub renders: tables with or without a header row, collapsible `<details>` sections, HTML headings, lists and quotes, definition lists, centered blocks, images at a set width or height, rows of clickable badges, and the inline tags down to `mark`, `kbd` and `small`. Search sees into a closed section, and jumping to a match unfolds it.
+**Embedded HTML** covers what GitHub renders: tables with or without a header row, collapsible `<details>` sections, HTML headings, lists and quotes, definition lists, blocks aligned to the left, the center or the right, images at a set width or height, rows of clickable badges, and the inline tags down to `mark`, `kbd` and `small`. Search sees into a closed section, and jumping to a match unfolds it.
 
 ![Oryx rendering a GitHub style README](screenshots/github.png)
 
@@ -71,7 +73,7 @@ Oryx opens EPUB, FB2, MOBI and AZW3 (Kindle) books and renders them as one conti
 
 Book text is justified: lines end at the same right edge, and the last line of each paragraph stays ragged, like print. `Ctrl+J` turns justification off and on. Markdown files can justify too; they start ragged, and each kind remembers its own choice.
 
-The sidebar's Outline tab shows the book's own table of contents, follows the reading position and jumps on a click. Links inside the book work, so a footnote reference jumps to its note, and `Alt+Left` comes back, one jump at a time. Ebooks reopen where reading stopped, even after Oryx is closed; other files open at the top on a new start.
+The sidebar's Outline tab shows the book's own table of contents, follows the reading position and jumps on a click. Links inside the book work, so a footnote reference jumps to its note, `Alt+Left` comes back and `Alt+Right` goes forward again. Ebooks reopen where reading stopped, even after Oryx is closed; other files open at the top on a new start.
 
 DRM-protected books and fixed-layout EPUB books are not supported. The [examples](examples/) folder installed with Oryx includes *The Adventures of Sherlock Holmes* to try it on.
 
@@ -99,17 +101,24 @@ Comic book contents are analyzed and files processed accordingly, not by name, s
 
 ## Tools
 
-- **Find in document**: `Ctrl+F` searches text. The search is smart about case: `oryx` matches Oryx, ORYX and oryx, while `Oryx` performs an exact match. A match can cross styling, so `fast viewer` is found even when it was written as `**fast** *viewer*`, and it can cross a wrapped line. The whole document is searchable even while a big file is still loading. The `.*` button in the search bar (or `Alt+R`) switches to regular expressions, in the Rust `fancy-regex` flavor, so capture groups, backreferences and lookarounds are available. `^` and `$` match at line starts and ends, and on the rendered page each block counts as one line. While a pattern is incomplete, the bar's border changes color instead of showing a match count. Clicking anywhere in the document closes the search bar. The search field behaves like a text box: `Ctrl+Left` and `Ctrl+Right` jump by word, `Shift` selects, `Ctrl+Backspace` and `Ctrl+Delete` delete a word, a double click selects the word and a triple click selects everything. While the field has the keyboard, the document's editing keys stay quiet.
+Fork maintenance and upstream upgrades: [上游同步与本地迭代](docs/UPSTREAM_SYNC.md).
+
+- **Find in document**: `Ctrl+F` searches text. The search is smart about case: `oryx` matches Oryx, ORYX and oryx, while `Oryx` performs an exact match. A match can cross styling, so `fast viewer` is found even when it was written as `**fast** *viewer*`, and it can cross a wrapped line. The whole document is searchable even while a big file is still loading. The `.*` button in the search bar (or `Alt+R`) switches to regular expressions, in the Rust `fancy-regex` flavor, so capture groups, backreferences and lookarounds are available. `^` and `$` match at line starts and ends, and on the rendered page each block counts as one line; `\n` matches a line break. While a pattern is incomplete, the bar's border changes color instead of showing a match count. Clicking anywhere in the document closes the search bar. The search field behaves like a text box: `Ctrl+Left` and `Ctrl+Right` jump by word, `Shift` selects, `Ctrl+Backspace` and `Ctrl+Delete` delete a word, a double click selects the word and a triple click selects everything. While the field has the keyboard, the document's editing keys stay quiet.
+- **Select and copy**: `Ctrl+C` copies a selection with its formatting, so it pastes into an email or a Word document with its headings, lists, tables, quotes, links and code, pictures and formulas included. A terminal or a text editor gets the plain text. `Ctrl+Shift+C` copies the original markdown of the selection. A double click selects the word and lights up every other place the same word appears, a triple click selects the paragraph, the code line or the table cell, and a click with `Shift` held extends the selection to that point. Select all is instant at any file size, a selection survives zooming, theme switches and window resizes, and both copies work before a big file has finished loading.
+- **Sidebar**: `Ctrl+Shift+B` shows and hides a two-tab panel: the folder tree around the open file, and an outline of the document's headings that tracks the reading position, folds its branches, and jumps on a click. For a book, the outline is its table of contents. Both tabs drive entirely from the keyboard. The sidebar is open at the first launch, on your home folder, and follows the disk: a file added, removed or renamed shows the next time you touch the window. Files and folders whose name starts with a dot are hidden; `Ctrl+Shift+H` shows them and Oryx remembers your choice. A folder reached through a symbolic link is listed too, and opening it moves the tree to the real folder. A folder Oryx cannot read shows one row saying so, under the `..` row, so you can climb back out.
+- **Second window**: a middle click on a file in the sidebar, or `Ctrl+Enter` on the highlighted row, opens it in a second Oryx window, a step down and right of the first (on Wayland your desktop places it). The two windows share the settings and your places in books, and each saves only what it changed.
 - **Find files**: press `/` in the Files tab of the sidebar (or click the magnifier in the caption) and type. Files match fuzzily across their whole path — `usrctrl` finds `src/user/UserController.rs` — ranked best first, with the matched characters highlighted. Case is smart, like the in-document search. `Enter` opens the selection, `Up`/`Down` move it, `PageUp`/`PageDown` page, `Esc` returns to the tree; the mouse clicks, drags and scrolls the same list. The walk respects `.gitignore` and `.ignore` and skips hidden folders, the way `fd` does, and it runs off the UI thread, so a huge folder never freezes the panel.
 - **Search in files**: `Ctrl+Shift+F` greps the sidebar's folder right in the Files tab. Plain queries are literal strings; `Alt+R` (or the `.*` toggle) switches to regular expressions in ripgrep's Rust `regex` flavor — linear-time and lookahead-free, unlike the in-document search's `fancy-regex`. Case is smart in both modes. Results stream in grouped by file with line numbers and the matched text highlighted, `Enter` (or a click) opens the file at the match, and binary files are skipped on their first NUL byte. A file with unsaved edits is searched as it stands in the editor, not as it lies on disk. Both searches stay inside the folder the Files tab is rooted at, wherever you navigated it.
-- **Select and copy**: `Ctrl+C` copies a selection as plain text. `Ctrl+Shift+C` copies the original markdown of the selection. A double click selects the word, a triple click the paragraph, the code line or the table cell. Select all is instant at any file size, a selection survives zooming, theme switches and window resizes, and both copies work before a big file has finished loading.
-- **Sidebar**: `Ctrl+Shift+B` opens a two-tab panel: the folder tree around the open file, and an outline of the document's headings that tracks the reading position, folds its branches, and jumps on a click. For a book, the outline is its table of contents. Both tabs drive entirely from the keyboard. A folder reached through a symbolic link is listed too, and opening it moves the tree to the real folder.
 - **Open file**: `Ctrl+O` opens the native file dialog.
-- **Live reload**: Oryx notices when the open file changes on disk and reloads it, as long as there are no unsaved edits. `F5` / `Ctrl+R` reload on demand.
+- **Drag and drop**: drop a file on the window to open it, a folder to browse it in the sidebar, or a picture on a markdown file you are editing to add it.
+- **Live reload**: Oryx notices when the open file changes on disk and reloads it, as long as there are no unsaved edits. `F5` / `Ctrl+R` reload on demand. If the file is deleted or moved away outside Oryx, a notice says so, the title shows the unsaved dot, and `Ctrl+S` writes the text back.
+- **Go to line**: `Ctrl+G` opens a small field. Type a line number and press `Enter`; `412:10` goes to the tenth character of line 412. From a terminal, `oryx main.rs:412` opens the file there.
+- **Line numbers**: a `line numbers` row in the settings (`Ctrl+,`) numbers the lines of code and text files, and of a markdown file while you edit it. The rendered page and the PDF stay without numbers. It is off by default.
+- **Word count**: a `word count` row in the settings shows words, characters, lines and reading time in the bottom right corner, for the file or for the selection. It counts the text as the page shows it, without the markdown marks. It is off by default.
 - **Zoom**: `Ctrl+Plus` (in) and `Ctrl+Minus` (out), or the mouse wheel with `Ctrl` held.
 - **Display scale**: Oryx follows the display's scale, so text and controls render at the intended size on a scaled screen (a laptop at 200%, for example). An `interface scale` entry in the settings (`Ctrl+,`) adjusts the size around the detected value, from -50% to +100%, and is remembered.
 - **Touch**: On a touch screen, swiping scrolls the document, the sidebar and the dialogs. A swipe released while moving keeps the document scrolling with momentum. Tapping clicks, and a two-finger pinch zooms the document.
-- **Persistence**: Window geometry, the active theme, the sidebar and the last folder are all saved and restored at every start. While Oryx is open, switching between files keeps each file's place: a file left mid-edit comes back in the editor, at the same spot.
+- **Persistence**: Window geometry, the active theme, the sidebar and the last folder are all saved and restored at every start. While Oryx is open, switching between files keeps each file's place: a file left mid-edit comes back in the editor, at the same spot, and a code file at the line you were reading.
 
 <p align="center">
   <img src="screenshots/settings.png" alt="Settings dialog in Oryx">
@@ -117,33 +126,50 @@ Comic book contents are analyzed and files processed accordingly, not by name, s
 
 ## Editing
 
-With version 1.1.0, Oryx became an complete editor focused on keyboard workflow, but please note that it is not meant to compete with `vscode` or `zed`. Oryx is a good daily driver for quick code editing, note taking and markdown production, extremely fast, simple and distraction free.
+Oryx is now a complete editor, built around the keyboard. For markdown, I think it is one of the best around. For code, it is not meant to compete with VS Code or Zed, which are specialized code editors; Oryx is a good daily driver for quick code edits, note taking and markdown writing, fast, simple and distraction free.
 
-Press `Ctrl+E` to enter edit mode, with a caret and the usual keys; `Escape` (or `Ctrl+E` again) returns to reading. The window title shows `editing` and a thin line in the theme's selection color runs along the top of the page, so the mode is always visible.
+### Edit mode
 
-Source code and plain text files edit on the page itself. A markdown file shows its own source instead: the page is replaced by the markdown text, drawn in the theme's colors with the markers visible. `Escape` brings the view mode with the edits applied.
+- `Ctrl+E` enters edit mode, `Escape` (or `Ctrl+E` again) returns to reading. The title says `editing` and a thin line in the selection color runs along the top of the page.
+- Code and text files edit on the page itself. A markdown file shows its source, drawn in the theme's colors with the markers visible; `Escape` shows the page again with your edits applied. The line you are on stays at the same height on the screen, both ways.
+- An empty file opens in the editor right away. Switching between files during a session keeps each file's place, reading or editing.
+- Books cannot be edited, and neither can a file whose text did not read cleanly, since Oryx could not write it back as it was. A notice in the corner says so.
 
-During a session, you can switch between files and Oryx will remember the reading or editing position. 
+### Writing
 
-Books cannot be edited, and neither can a file whose text did not read cleanly, since Oryx could not write it back exactly as it was. A small notice in the corner will tell you when editing is not available.
+- The usual keys: typing, selections, `Ctrl+X` and `Ctrl+V`, `Ctrl+Z` to undo, `Ctrl+Shift+Z` or `Ctrl+Y` to redo. Typing is instant even in very large files.
+- `Ctrl+Left` / `Ctrl+Right` jump by word, `Ctrl+Home` / `Ctrl+End` to the ends of the file, `Ctrl+Backspace` / `Ctrl+Delete` delete a word. `Up` on the first line goes to its start, `Down` on the last line to its end.
+- With nothing selected, `Ctrl+C` copies the whole line, `Ctrl+X` cuts it, and `Ctrl+V` puts it back as a line above the current one.
+- With text selected, a bracket or a quote wraps it instead of replacing it; in a markdown file so do `*`, `_` and a backtick.
+- `Alt+Up` / `Alt+Down` move the line or the selected lines, `Ctrl+Shift+D` duplicates them, `Ctrl+Shift+K` deletes them, `Ctrl+/` comments them out. Each is one `Ctrl+Z` to undo.
+- `Alt+Left` and `Alt+Right` go back and forward between the places you jumped from, in the editor too.
 
-Editing works the way a text editor does: typing, selections, `Ctrl+X` and `Ctrl+V`, undo with `Ctrl+Z`, redo with `Ctrl+Shift+Z` or `Ctrl+Y`. While editing, `Ctrl+Left` / `Ctrl+Right` jump by word, `Ctrl+Home` / `Ctrl+End` jump to the ends of the file, and `Ctrl+Backspace` / `Ctrl+Delete` delete by word. Typing is instant even in very large files.
+### Markdown helpers
 
-A few tricks save keystrokes. With text selected, a bracket or a quote wraps it instead of replacing it, and in a markdown file so do `*`, `_` and a backtick. `Ctrl+B`, `Ctrl+I` and `` Ctrl+` `` make the selection or the word under the caret bold, italic or code, and the same key removes it. `Ctrl+K` turns the selection into a link. `Alt+-`, `Alt+1` and `Alt+X` turn the selected lines into a bullet, numbered or task list, `Alt+.` quotes them, `Ctrl+1` to `Ctrl+6` set the heading level and `Ctrl+L` ticks the task box. `Alt+Up` and `Alt+Down` move the line or the selected lines, `Ctrl+Shift+D` duplicates them, `Ctrl+Shift+K` deletes them and `Ctrl+/` comments them out. Each of these is one `Ctrl+Z` to undo.
+- `Ctrl+B`, `Ctrl+I` and `` Ctrl+` `` make the selection or the word under the caret bold, italic or code; the same key removes it. With nothing selected: press the key, type, press it again and go on in plain text.
+- `Ctrl+K` turns the selection or the word under the caret into a link, and a web address into the link's target.
+- `Alt+-`, `Alt+1` and `Alt+X` turn the selected lines into a bullet, numbered or task list, `Alt+.` quotes them, `Ctrl+1` to `Ctrl+6` set the heading level, `Ctrl+L` ticks the task box. A task box can also be ticked with a click on the page, without entering edit mode.
+- `Enter` keeps the indentation and continues what you are writing: the next list marker, an unchecked task, the `>` of a quote. `Enter` on an empty item ends the list. `Shift+Enter` adds a line break inside a paragraph or an item.
+- `Tab` indents and `Shift+Tab` removes an indent, on every selected line at once. At a list marker, `Tab` nests the item under the one above, inside a quote too; a first item stays where it is, so a list never turns into a code block. A new markdown file indents with four spaces, an existing file keeps what it uses.
+- `Ctrl+V` pastes a picture from the clipboard: Oryx saves it as a PNG in an `images` folder next to the file and writes the link, with the caret ready for the description. A picture dropped on the file is added the same way, and one already under the file's folder is linked where it is. A big picture is reduced to 2560 pixels on its longer side; `Ctrl+Shift+V` pastes it as it is.
 
-`Enter` keeps the indentation of the current line. In a markdown file it also continues what you are writing: a list item gets the next marker (numbered lists count on), a task item continues unchecked, and a quoted line keeps its `>`. `Enter` on an empty item ends the list. `Tab` indents and `Shift+Tab` removes an indent, on every line of a selection at once; with the caret at a list marker, `Tab` nests the item. Whether `Tab` inserts a tab or spaces follows what the file already uses.
+### Find and replace
 
-`Ctrl+H` opens find and replace: a second field appears under the search box. `Enter` replaces the current match and moves to the next, `Ctrl+Enter` replaces every match at once, and one `Ctrl+Z` brings a replace-all back. With regular expressions, the replacement can reuse captured groups: searching `(\w+)/(\w+)` and replacing with `$2/$1` swaps the two sides of every pair. The replace field only exists in the editor; the search itself works everywhere.
+- `Ctrl+H` opens a second field under the search box. `Enter` replaces the current match and moves to the next, `Ctrl+Enter` replaces every match at once, and one `Ctrl+Z` brings a replace-all back.
+- With regular expressions, the replacement can reuse captured groups: searching `(\w+)/(\w+)` and replacing with `$2/$1` swaps the two sides of every pair. `\n`, `\t` and `\\` in the replacement write a line break, a tab and a backslash.
+- The replace field only exists in the editor; the search itself works everywhere.
 
-A task checkbox can be ticked by clicking it on the page, without entering edit mode. Nothing else on the page moves, `Ctrl+Z` undoes it, and `Ctrl+S` saves it.
+### Saving
 
-`Ctrl+S` saves. Oryx is careful with the file: lines that were not touched are written back unchanged, and every line keeps its own ending, so a file with Windows line endings stays that way. The window title shows a dot next to the file name while changes are unsaved. `Ctrl+Shift+S` saves under a new name.
+- `Ctrl+S` saves. Lines you did not touch are written back unchanged, and every line keeps its own ending, so a Windows file or an old Mac file stays what it was. A dot next to the file name in the title means unsaved changes. `Ctrl+Shift+S` saves under a new name, while reading too.
+- Autosave, off by default, has two rows in the settings (`Ctrl+,`): `save on focus loss` writes the file when you switch to another window, `save after a pause` once you have stopped typing for the time you choose, from 5 seconds to 15 minutes. It never writes over a change another program made on disk: Oryx tells you and waits for your `Ctrl+S`.
+- Closing, quitting or reloading with unsaved changes asks first: `S` saves, `D` discards, `Escape` keeps editing. If the file changes on disk while you have unsaved edits, Oryx shows a notice and leaves your edits alone. If the file is deleted or moved away, `Ctrl+S` writes it back.
 
-`Ctrl+N` creates a new file: the save dialog opens first, then the empty page is ready to type into. That is how Oryx knows the type of file you created to be able to apply syntax colors.
+### New files and notes
 
-`Ctrl+M` opens an empty markdown note in the editor, with no dialog. The name, the place and the type are chosen at the first `Ctrl+S`. Until then the note is unsaved work, and Oryx asks the usual question before closing or opening another file.
-
-Closing the window, quitting or reloading with unsaved changes asks first: `S` saves, `D` discards, `Escape` keeps editing, or the arrows and `Enter` pick one of the three. If the file changes on disk while there are unsaved edits, Oryx shows a notice and leaves the edits alone.
+- `Ctrl+N` creates a new file: the save dialog opens first, so Oryx knows the type of the file and its syntax colors, then the empty page is ready to type into.
+- `Ctrl+M` opens an empty markdown note in the editor, no dialog. The name and the place are chosen at the first `Ctrl+S`; until then the note is unsaved work, and Oryx asks the usual question before closing or opening another file.
+- Oryx keeps a copy of the note while you type. If it ends without asking (a crash, a power cut), the next launch offers the note back: `R` recovers it, `D` discards it, `Escape` leaves it for later.
 
 ## Themes
 
@@ -155,7 +181,7 @@ Press `Ctrl+T` to open the theme browser. Arrow keys move through the list and p
   <img src="screenshots/themes.png" alt="The theme browser">
 </p>
 
-The theme editor changes any color role through a color picker while the document restyles live. Editing a bundled theme creates a copy, so the shipped files remain unchanged. A custom theme is a TOML file saved in the themes directory. Themes are read from `~/.local/share/oryx/themes` (your own and your edited copies) and from the system folders where a package installs them, such as `/usr/share/oryx/themes`.
+The theme editor changes any color role through a color picker while the document restyles live. Editing a bundled theme creates a copy, so the shipped files remain unchanged. A custom theme is a TOML file saved in the themes directory. Themes are read from `~/.local/share/oryx/themes` (your own and your edited copies) and from the system folders where a package installs them, such as `/usr/share/oryx/themes`. On a Mac, your own themes go in `~/Library/Application Support/oryx/themes`.
 
 <p align="center">
   <img src="screenshots/themes-editor.png" alt="The theme editor">
@@ -191,8 +217,10 @@ Oryx is packaged for the following platforms. Pick yours on the [releases page](
 
 - **Debian and Ubuntu**: the `.deb`, `sudo apt install ./oryx-editor_*_amd64.deb`.
 - **Fedora and openSUSE**: the `.rpm`, `sudo dnf install ./oryx-editor-*.x86_64.rpm` (or `zypper`).
+- **Arch Linux**: the `.pkg.tar.zst`, `sudo pacman -U oryx-editor-bin-*.pkg.tar.zst`.
 - **Any Linux**: the AppImage, one file to make executable and run, nothing to install.
-- **Windows**: the [Microsoft Store](https://apps.microsoft.com/detail/9NQGHNSJF3VB) (as Oryx Editor), `winget install Steerania.Oryx`, the MSI installer, or the zip with `install.ps1` for an install in your user folder.
+- **Windows**: the [Microsoft Store](https://apps.microsoft.com/detail/9NQGHNSJF3VB) (as Oryx Editor), the MSI installer, or the zip with `install.ps1` for an install in your user folder.
+- **macOS**: the `.dmg`, one app for Apple Silicon and Intel Macs. Open it and drag Oryx to Applications. The app is not signed with an Apple developer account, so macOS blocks the first open: go to System Settings, Privacy and Security, and click Open Anyway, once. On an older macOS, right-click the app and choose Open.
 - **Linux without a package**: the tarball, `tar -xzf oryx-*-linux-x86_64.tar.gz && cd oryx && ./install.sh`; `./install.sh --uninstall` removes it.
 
 The packages are named `oryx-editor` because Arch already ships an unrelated `oryx`, and the Store app is Oryx Editor because the name was taken there; the command is still `oryx` and the app appears as Oryx. A package registers Oryx with the file manager itself, so markdown files and books open with it right away; `oryx --register` is for the tarball and the source install, and says so under a package. If you move from the tarball or `make install` to a package, remove the per-user copy first (`./install.sh --uninstall`): it comes before the package on the PATH and in the launcher.
@@ -201,7 +229,7 @@ The Linux packages need glibc 2.35 and OpenSSL 3, which means Debian 12, Ubuntu 
 
 ### From source
 
-Building requires **Rust 1.88 or later**.
+Building this fork requires **Rust 1.95 or later** for Merman 0.7.
 
 ```sh
 git clone https://github.com/wmahfoudh/oryx.git
@@ -216,7 +244,7 @@ make install
 
 ## Using Oryx
 
-After installing, open Oryx from the launcher and browse folders and files through the sidebar. Started without a file, Oryx shows a short page with the basic shortcuts. You can also drag and drop a file onto the window to open it, or a folder to browse it. On macOS, `Cmd` works wherever the shortcuts below say `Ctrl`.
+After installing, open Oryx from the launcher and browse folders and files through the sidebar. Started without a file, Oryx shows a short page with the basic shortcuts and a tip, a different one each time. You can also drag and drop a file onto the window to open it, or a folder to browse it. On macOS, `Cmd` works wherever the shortcuts below say `Ctrl`, and `Cmd+[` / `Cmd+]` go back and forward in place of `Alt+Left` / `Alt+Right`.
 
 > [!NOTE]
 > There are no menus. **Press `F1`** for the complete shortcut list. `Esc` or a click outside closes a dialog, and `Esc` quits.
@@ -226,6 +254,9 @@ oryx README.md          # open a file
 oryx book.epub          # books read in the active theme
 oryx src/main.rs        # code files render highlighted
 oryx notes/             # open the sidebar on a folder
+oryx main.rs:412        # open a file at a line
+git diff | oryx         # show what a command prints; oryx - reads standard input
+git log | oryx --as md  # tell Oryx what kind of text it gets
 oryx --theme nord file  # pick a theme for this session
 oryx --register         # install the file association and icons
 oryx --clear-cache      # remove the downloaded remote images
@@ -240,15 +271,17 @@ oryx --help             # list these options
 | `Ctrl+N` | New file |
 | `Ctrl+M` | New markdown note; the name and the type are chosen when saving |
 | `Ctrl+S` | Save (editing) |
-| `Ctrl+Shift+S` | Save as (editing) |
+| `Ctrl+Shift+S` | Save as |
 | `F5` / `Ctrl+R` | Reload from disk |
 | `Ctrl+Shift+R` | Reload and refetch remote images |
 | **Navigation** | |
 | `Up` / `Down` | Scroll by line, or move the sidebar selection |
 | `Page Up` / `Page Down`, `Space` / `Shift+Space` | Scroll by page |
 | `Home` / `End` | Jump to top / bottom |
-| `Alt+Left` | Go back after a link or outline jump |
-| `Ctrl+Shift+B` | Toggle sidebar (files and outline) |
+| `Alt+Left` / `Alt+Right` | Go back after a jump (a link, a search hit, a line, another file), and forward again; `Cmd+[` / `Cmd+]` on a Mac |
+| `Ctrl+G` | Go to a line |
+| `Ctrl+Shift+B` | Show or hide the sidebar (files and outline) |
+| `Ctrl+Shift+H` | Show or hide the dot files in the sidebar |
 | `Left` / `Right` | Move to the sidebar / to the document |
 | `Ctrl+Tab` | Toggle the sidebar tab |
 | **Find** | |
@@ -256,19 +289,21 @@ oryx --help             # list these options
 | `F3` / `Shift+F3` | Next / previous match |
 | `Alt+R` | Regex matching on/off |
 | `Ctrl+H` | Find and replace (editing only) |
-| `Ctrl+Enter` | Replace all (replace open) |
+| `Ctrl+Enter` | Replace all (replace open); in the sidebar, open the file in a second window |
 | **Selection** | |
 | `Ctrl+A` | Select all |
-| `Ctrl+C` | Copy selection as text |
+| `Ctrl+C` | Copy the selection with its formatting, or the line (editing) |
 | `Ctrl+Shift+C` | Copy selection as markdown |
 | **Edit** | |
 | `Ctrl+E` | Edit the document |
-| `Ctrl+X` / `Ctrl+V` | Cut / paste (editing) |
+| `Ctrl+X` / `Ctrl+V` | Cut / paste, the line with nothing selected (editing) |
+| `Ctrl+Shift+V` | Paste a picture without resizing it (markdown editing) |
+| `Shift+Enter` | Line break inside a paragraph or a list item (markdown editing) |
 | `Ctrl+Z` | Undo the last edit |
 | `Ctrl+Shift+Z` / `Ctrl+Y` | Redo an undone edit |
 | `Ctrl+B` / `Ctrl+I` | Bold / italic around the selection or the word, again to remove (markdown editing) |
 | `` Ctrl+` `` | Inline code around the selection or the word, again to remove (markdown editing) |
-| `Ctrl+K` | Link around the selection, or an empty link; pasting an address over a selection links it too (markdown editing) |
+| `Ctrl+K` | Link around the selection or the word; pasting an address over a selection links it too (markdown editing) |
 | `Alt+-` | Bullet list on the selected lines, again to remove (markdown editing) |
 | `Alt+1` | Numbered list on the selected lines, again to remove (markdown editing) |
 | `Alt+X` | Task list on the selected lines, again to remove (markdown editing) |
@@ -281,7 +316,7 @@ oryx --help             # list these options
 | `Ctrl+/` | Comment or uncomment the line or the selected lines (code and markdown editing) |
 | **View** | |
 | `Ctrl+T` | Choose a theme |
-| `Ctrl+,` | Settings: fonts, sizes and interface scale |
+| `Ctrl+,` | Settings: fonts, sizes, interface scale, line numbers, word count and autosave |
 | `Ctrl+Plus` / `Ctrl+Minus` | Zoom in / out; in a comic, switch between page views |
 | `Ctrl+0` | Reset zoom; in a comic, show the whole page |
 | `Ctrl+J` | Justify prose (markdown and books) |
@@ -297,33 +332,40 @@ oryx --help             # list these options
 
 ## Performance
 
-Performance is one of the motivations behind Oryx. Many markdown viewers start struggling above one megabyte of file size, without even offering a decent look. Oryx keeps the same beautiful reading experience, whatever the file size and whatever the machine. Benchmarks have been reproduced for all supported file types, like ebooks. Here is how it works:
+Performance is one of the reasons Oryx exists. Many markdown viewers start struggling above one megabyte, and lose the nice look on the way. Oryx keeps the same reading experience whatever the file size, on a new laptop or on an old machine with no graphics card.
 
-For a big markdown file, Oryx parses only its first screens before the first paint and the rest arrives from a background thread. It uses all CPU cores to build the layout, for the wash-in below the first screens as well as every zoom or resize. Only the part of the document around the reading position is kept in drawn form, and scrolling rebuilds the landing from recorded positions in about a millisecond; memory stays flat however long the document is. Painting covers a band around the viewport, a couple of screens either side, and scrolling inside that band is a memory copy: the cost of a scroll frame does not depend on the document's length. Syntax highlighting and the layout below follow in the background, a slice at a time, without moving anything already on screen.
+Here is how: Oryx parses only the first screens of a big file before the first paint, and the rest comes from a background thread. The layout uses all CPU cores, for the rest of the file as well as for every zoom or resize. Only the part of the document around the reading position is kept drawn, so memory stays flat however long the document is. Syntax colors and the layout below arrive in the background, a slice at a time, without moving what is already on the screen. A PDF export writes pages to disk as they are laid out, so even a five thousand page export runs in a few megabytes. A book opens the same way: the first chapters first, the rest in the background, images included. An idle window uses **no CPU at all**.
 
-A PDF export streams pages to disk as they are laid out, and even a five-thousand-page export runs in a few megabytes of working memory. A book opens the same way: the first chapters parse before the first paint, and the rest of the book arrives in the background, images included. The event loop wakes only for input, and an idle window uses **no CPU at all**.
+The numbers below come from the last phase gate, release build, on a 2019 Linux laptop with no graphics card; every gate measures them again before a release. Open is the time before the first screen shows, held to 40 ms whatever the file. Parse is the rest of the markdown read, Highlight the syntax colors of the whole file, Full pass the layout of the whole file, all three in the background while you read. PDF export is the export of the whole file.
 
-Measured on a 2019 Linux laptop, release build. First frame is cold launch to first paint; the export column is the export itself, measured after syntax highlighting has settled:
+| File | Open | Parse | Highlight | Full pass | PDF export |
+|---|---|---|---|---|---|
+| 1 MB markdown | 40 ms | 31 ms | 0.7 s | 0.18 s | 0.96 s |
+| 1 MB source file | 40 ms | 0 ms | 2.8 s | 0.11 s | 0.9 s |
+| 8 MB markdown | 40 ms | 262 ms | 5.8 s | 1.5 s | 9.4 s |
+| 8 MB source file | 40 ms | 0 ms | 24.1 s | 0.86 s | 8.1 s |
 
-| Document | First frame | PDF export |
-|---|---|---|
-| 1 MB source file | **80 ms** | 1.3 s |
-| 8 MB source file | **85 ms** | 10.2 s |
-| 1 MB markdown | **80 ms** | 1.2 s |
-| 8 MB markdown | **80 ms** | 10.7 s |
+Memory: Settled is what the file takes once everything is loaded and laid out, Peak the most it takes on the way there, Export the extra during a PDF export.
 
-The 8 MB markdown export writes a 9219-page file. While open, the 8 MB markdown file reads in about 200 MB of memory and the 8 MB source file in about 90 MB. The sample book, *The Adventures of Sherlock Holmes*, parses its first chapters in 9 ms and exports its 211 pages in 0.8 s. Performance tests in the repository check the startup, relayout, paint and export timings and the memory figures.
+| File | Settled | Peak | Export |
+|---|---|---|---|
+| 1 MB markdown | 22 MB | 34 MB | +10 MB |
+| 1 MB source file | 11 MB | 12 MB | +11 MB |
+| 8 MB markdown | 173 MB | 257 MB | +34 MB |
+| 8 MB source file | 88 MB | 95 MB | +11 MB |
+
+Books open the same way. *The Adventures of Sherlock Holmes* (EPUB) shows its first chapters in 4 ms and exports its 211 pages in 0.8 s; a 300-chapter FB2 opens in 27 ms, a MOBI in 14 ms, a 40-page CBZ in 1 ms and the same comic as CBR in 7 ms. The performance tests in the repository check these timings and the memory figures.
 
 > [!NOTE]
-> Oryx is not a markdown-to-PDF converter. Its export reproduces the page you read, pixel for pixel: the theme, every shaped glyph, syntax colors for close to a hundred languages, images, links, the outline and the embedded fonts, at a millisecond or two per finished page whatever the document size. Raw conversion without any of that is a different, far faster job: a few milliseconds for a whole small file.
+> Oryx is not a markdown-to-PDF converter. Its export reproduces the page you read: the theme, every glyph, syntax colors for close to a hundred languages, images, links, the outline and the embedded fonts, at a millisecond or two per finished page whatever the document size. Raw conversion without any of that is a different, far faster job: a few milliseconds for a whole small file.
 
 ## Limitations
 
-- On a file several megabytes long, the layout below the first screens takes a moment to catch up. Syntax colors appear right away wherever you are reading, and a few lines can change color a moment later, once the full pass reaches them. An export waits for syntax highlighting to finish before it writes, so on the 8 MB file the wall time can be double the export column above.
-- The implemented HTML is a subset: what GitHub renders in a README, nothing more.
+- On a file several megabytes long, the layout below the first screens takes a moment to catch up. Syntax colors appear right away wherever you are reading, and a few lines can change color a moment later, once the full pass reaches them. An export waits for syntax highlighting to finish before it writes, so on a big file the wall time is about the Highlight and the PDF export columns above added together.
+- Embedded HTML is a subset: the tags GitHub allows in a README, plus a few extras like aligned blocks and page breaks. Oryx does not render CSS or a whole HTML page.
 - Editing types in any keyboard layout, but Chinese, Japanese and Korean input methods are not supported.
 - Remote images use the operating system's TLS stack, which on Linux means it needs the OpenSSL library (normally shipped with every distro). Without it, badges show placeholders but everything else works.
-- macOS compiles but is untested, and there is no packaged build as I don't have a Mac. The Windows release is compiled on my Linux machine.
+- The Windows release is compiled on my Linux machine, and the macOS build on GitHub's Mac machines. I don't have a Mac, so the Mac build is tested by other people, not by me every day.
 
 ## Credits
 

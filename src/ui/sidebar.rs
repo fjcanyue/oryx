@@ -1,12 +1,16 @@
 //! Folder sidebar: a persistent panel listing the open file's folder as a
 //! tree. Directories sort before files, both alphabetical; the listing
-//! keeps every file Oryx can display, including dot entries, which are
-//! drawn dimmed. Expansion is in place and children are read on demand.
+//! keeps every file Oryx can display. Dot entries stay out of the tree
+//! until the hidden-files toggle is on, when they are drawn dimmed; the
+//! file shown in the document keeps its row whatever the toggle.
+//! Expansion is in place and children are read on demand.
 //! A folder reached through a symbolic link is entered rather than
 //! expanded: the tree moves to the real folder, as if it had been
-//! opened directly.
+//! opened directly. A folder the system refuses to list shows one
+//! notice row in place of its entries, so the tree never goes blank.
 
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
 use serde::{Deserialize, Serialize};
 
@@ -227,6 +231,9 @@ fn icon_for(path: &Path) -> Icon {
     }
 }
 
+/// The one row a folder shows when the system refuses to list it.
+pub const UNREADABLE: &str = "This folder cannot be read";
+
 /// One visible row of the tree.
 pub struct Entry {
     pub name: String,
@@ -238,6 +245,24 @@ pub struct Entry {
     pub expanded: bool,
     /// Dot entry, rendered dimmed.
     pub hidden: bool,
+    /// A notice standing in for a folder's entries, not an entry itself:
+    /// drawn dimmed without a mark, opens nothing, takes no hover.
+    pub notice: bool,
+}
+
+impl Entry {
+    fn notice(dir: &Path, depth: usize) -> Entry {
+        Entry {
+            name: UNREADABLE.to_string(),
+            path: dir.to_path_buf(),
+            is_dir: false,
+            linked: false,
+            depth,
+            expanded: false,
+            hidden: false,
+            notice: true,
+        }
+    }
 }
 
 pub struct Sidebar {
@@ -249,6 +274,9 @@ pub struct Sidebar {
     selected: usize,
     /// The file currently displayed in the document area.
     current: Option<PathBuf>,
+    /// The folder last opened or closed with a click or Enter, the
+    /// accent's folder while no file is open.
+    acted_dir: Option<PathBuf>,
     scroll: f32,
     list_h: f32,
     /// The row or the thumb under the mouse, from the last cursor move.
@@ -258,6 +286,19 @@ pub struct Sidebar {
     /// The Files tab's search views, tree state untouched by entering
     /// or leaving them.
     pub search: SidebarSearchState,
+    /// The modified time of every folder the tree shows, the root and
+    /// the expanded ones, as last read. A folder's time moves when an
+    /// entry inside it is added, removed or renamed, on every platform,
+    /// so a moved stamp is the signal to read the tree again.
+    stamps: Vec<(PathBuf, Option<SystemTime>)>,
+    /// Whether dot entries list; off by default, the file managers'
+    /// convention, and remembered in the config.
+    show_hidden: bool,
+}
+
+/// A folder's modified time, None when it cannot be read.
+fn stamp(dir: &Path) -> Option<SystemTime> {
+    std::fs::metadata(dir).and_then(|meta| meta.modified()).ok()
 }
 
 /// Whether a directory entry belongs in the tree. Directories always do,
@@ -267,17 +308,40 @@ fn recognized(path: &Path, is_dir: bool) -> bool {
     is_dir || load::is_displayable_file(path)
 }
 
+/// What a scan lists of the dot entries: none, or all of them, and in
+/// either case the file shown in the document, which keeps its row, and
+/// the dot folders on the way down to it, without which the row has
+/// nowhere to stand.
+#[derive(Clone, Copy)]
+struct Filter<'a> {
+    show_hidden: bool,
+    current: Option<&'a Path>,
+}
+
+impl Filter<'_> {
+    fn keeps(&self, name: &str, path: &Path) -> bool {
+        self.show_hidden
+            || !name.starts_with('.')
+            || self.current.is_some_and(|open| open.starts_with(path))
+    }
+}
+
 /// The recognized entries of one directory, directories first, both
 /// groups alphabetical and case-insensitive. A symbolic link counts as
-/// what it points at, so a linked folder lists among the folders.
-fn scan(dir: &Path, depth: usize) -> Vec<Entry> {
+/// what it points at, so a linked folder lists among the folders. A
+/// directory that cannot be read yields its notice row instead. Dot
+/// entries pass through the filter.
+fn scan(dir: &Path, depth: usize, filter: Filter<'_>) -> Vec<Entry> {
     let Ok(read) = std::fs::read_dir(dir) else {
-        return Vec::new();
+        return vec![Entry::notice(dir, depth)];
     };
     let mut entries: Vec<Entry> = read
         .flatten()
         .filter_map(|e| {
             let name = e.file_name().to_str()?.to_string();
+            if !filter.keeps(&name, &e.path()) {
+                return None;
+            }
             let kind = e.file_type().ok()?;
             let is_dir = kind.is_dir() || (kind.is_symlink() && e.path().is_dir());
             recognized(&e.path(), is_dir).then(|| Entry {
@@ -288,6 +352,7 @@ fn scan(dir: &Path, depth: usize) -> Vec<Entry> {
                 depth,
                 expanded: false,
                 name,
+                notice: false,
             })
         })
         .collect();
@@ -301,7 +366,7 @@ fn scan(dir: &Path, depth: usize) -> Vec<Entry> {
 
 /// The visible rows for a root: a `..` row up front when a parent exists,
 /// then the root's own entries.
-fn tree(root: &Path) -> Vec<Entry> {
+fn tree(root: &Path, filter: Filter<'_>) -> Vec<Entry> {
     let mut entries = Vec::new();
     if let Some(parent) = root.parent() {
         entries.push(Entry {
@@ -312,27 +377,135 @@ fn tree(root: &Path) -> Vec<Entry> {
             depth: 0,
             expanded: false,
             hidden: false,
+            notice: false,
         });
     }
-    entries.extend(scan(root, 0));
+    entries.extend(scan(root, 0, filter));
     entries
 }
 
 impl Sidebar {
     pub fn new(root: &Path) -> Sidebar {
-        Sidebar {
+        let filter = Filter {
+            show_hidden: false,
+            current: None,
+        };
+        let mut side = Sidebar {
             width: DEFAULT_WIDTH,
             tab: Tab::Files,
             root: root.to_path_buf(),
-            entries: tree(root),
+            entries: tree(root, filter),
             selected: 0,
             current: None,
+            acted_dir: None,
             scroll: 0.0,
             list_h: 0.0,
             hover: None,
             thumb_grab: None,
             search: SidebarSearchState::new(),
+            stamps: Vec::new(),
+            show_hidden: false,
+        };
+        side.restamp();
+        side
+    }
+
+    /// The scan's filter as the panel stands: the toggle, and the file
+    /// shown in the document, which keeps its row whatever the toggle.
+    fn filter(&self) -> Filter<'_> {
+        Filter {
+            show_hidden: self.show_hidden,
+            current: self.current.as_deref(),
         }
+    }
+
+    pub fn show_hidden(&self) -> bool {
+        self.show_hidden
+    }
+
+    /// Flips the dot entries in or out of the tree, the tree read again
+    /// on the same root: the expanded folders that still exist stay
+    /// expanded, the selection follows its path where it is still
+    /// listed, the scroll and the current mark stay.
+    pub fn set_show_hidden(&mut self, show: bool) {
+        if self.show_hidden == show {
+            return;
+        }
+        self.show_hidden = show;
+        self.rebuild();
+    }
+
+    /// Reads the tree again on the same root with the panel's filter,
+    /// keeping what a reader would expect kept: the expanded folders
+    /// still there, the selection by path or in range, the scroll.
+    fn rebuild(&mut self) {
+        let expanded: Vec<PathBuf> = self
+            .entries
+            .iter()
+            .filter(|e| e.expanded)
+            .map(|e| e.path.clone())
+            .collect();
+        let selected = self.entries.get(self.selected).map(|e| e.path.clone());
+        let fallback = self.selected;
+        // The hover names a row by its place in the old list; the next
+        // pointer move finds the row under it again.
+        if matches!(self.hover, Some(Hover::Row(_))) {
+            self.hover = None;
+        }
+        self.entries = tree(&self.root, self.filter());
+        // Parents come before their children in the list, so each
+        // folder is found once its parent has been expanded again.
+        for dir in expanded {
+            if let Some(index) = self
+                .entries
+                .iter()
+                .position(|e| e.is_dir && !e.expanded && e.path == dir)
+            {
+                self.toggle_dir(index);
+            }
+        }
+        let last = self.entries.len().saturating_sub(1);
+        self.selected = selected
+            .and_then(|path| self.entries.iter().position(|e| e.path == path))
+            .unwrap_or(fallback.min(last));
+        self.restamp();
+    }
+
+    /// Reads the stamps of the shown folders, after any change to the
+    /// set: the root, then every expanded folder.
+    fn restamp(&mut self) {
+        let mut folders = vec![self.root.clone()];
+        folders.extend(
+            self.entries
+                .iter()
+                .filter(|e| e.expanded)
+                .map(|e| e.path.clone()),
+        );
+        self.stamps = folders
+            .into_iter()
+            .map(|dir| {
+                let seen = stamp(&dir);
+                (dir, seen)
+            })
+            .collect();
+    }
+
+    /// Reads the tree again when a shown folder changed on disk since
+    /// the last read, and answers whether it did. The expanded folders
+    /// that still exist stay expanded, the selection follows its path,
+    /// the scroll and the current file's mark stay. One stat per shown
+    /// folder when nothing changed. Called from the app's disk check,
+    /// so it runs on interaction and on focus, never while idle. The
+    /// kernel stamps a folder with its coarse clock, so two changes a
+    /// few milliseconds apart can share a stamp; the next change is
+    /// caught, and a person's actions are never that close.
+    pub fn refresh_if_changed(&mut self) -> bool {
+        let moved = self.stamps.iter().any(|(dir, seen)| stamp(dir) != *seen);
+        if !moved {
+            return false;
+        }
+        self.rebuild();
+        true
     }
 
     pub fn tab(&self) -> Tab {
@@ -357,7 +530,7 @@ impl Sidebar {
     fn go_up(&mut self, parent: &Path) {
         let left = self.root.clone();
         self.root = parent.to_path_buf();
-        self.entries = tree(parent);
+        self.entries = tree(parent, self.filter());
         self.scroll = 0.0;
         self.selected = self
             .entries
@@ -365,6 +538,7 @@ impl Sidebar {
             .position(|e| e.path == left)
             .unwrap_or(0);
         self.scroll_to_selection();
+        self.restamp();
     }
 
     /// Rebuilds the tree at the real folder a link points to, the first
@@ -372,10 +546,11 @@ impl Sidebar {
     fn enter_link(&mut self, link: &Path) {
         let target = std::fs::canonicalize(link).unwrap_or_else(|_| link.to_path_buf());
         self.root = target.clone();
-        self.entries = tree(&target);
+        self.entries = tree(&target, self.filter());
         self.scroll = 0.0;
         let first = usize::from(self.entries.first().is_some_and(|e| e.name == ".."));
         self.selected = first.min(self.entries.len().saturating_sub(1));
+        self.restamp();
     }
 
     pub fn root(&self) -> &Path {
@@ -415,17 +590,19 @@ impl Sidebar {
                 self.selected -= end - index - 1;
             }
         } else {
-            let children = scan(&path, depth + 1);
+            let children = scan(&path, depth + 1, self.filter());
             if self.selected > index {
                 self.selected += children.len();
             }
             self.entries.splice(index + 1..index + 1, children);
         }
         self.entries[index].expanded = !expanded;
+        self.restamp();
     }
 
     /// A row was chosen: a file returns its path to open, a directory
-    /// toggles its expansion, a linked directory becomes the root.
+    /// toggles its expansion, a linked directory becomes the root, a
+    /// notice does nothing.
     pub fn activate(&mut self, index: usize) -> Option<PathBuf> {
         let entry = self.entries.get(index)?;
         self.selected = index;
@@ -433,15 +610,29 @@ impl Sidebar {
             let parent = entry.path.clone();
             self.go_up(&parent);
             None
+        } else if entry.notice {
+            None
         } else if entry.linked {
             let link = entry.path.clone();
             self.enter_link(&link);
             None
         } else if entry.is_dir {
+            self.acted_dir = Some(entry.path.clone());
             self.toggle_dir(index);
             None
         } else {
             Some(entry.path.clone())
+        }
+    }
+
+    /// The folder the accent names in the tree: the open file's, or,
+    /// while no file is open, the folder last opened or closed with a
+    /// click or Enter. Its name and mark take the accent color; the
+    /// accent fill stays the open file's own.
+    pub fn accent_dir(&self) -> Option<&Path> {
+        match &self.current {
+            Some(file) => file.parent(),
+            None => self.acted_dir.as_deref(),
         }
     }
 
@@ -459,9 +650,72 @@ impl Sidebar {
         self.activate(self.selected)
     }
 
-    /// Marks the file shown in the document area.
+    /// The file a row shows, or None for a folder, the parent row and
+    /// the notice: what a second window can open.
+    fn file_of(&self, index: usize) -> Option<PathBuf> {
+        if self.search_active() {
+            let relative = match self.search.view {
+                FilesView::FileSearch => &self.search.files.get(index)?.relative_path,
+                FilesView::ContentSearch => match self.search.rows.get(index)? {
+                    sidebar_search::ContentRow::Hit(hit) => {
+                        &self.search.content.get(*hit)?.relative_path
+                    }
+                    sidebar_search::ContentRow::Header(_) => return None,
+                },
+                FilesView::Tree => return None,
+            };
+            return Some(sidebar_search::absolute(&self.root, relative));
+        }
+        let entry = self.entries.get(index)?;
+        let parent = index == 0 && entry.name == "..";
+        (!entry.is_dir && !entry.notice && !parent).then(|| entry.path.clone())
+    }
+
+    /// The file under a point of the files tab, without touching the
+    /// selection or the tree; None off the rows or on the outline tab.
+    pub fn file_at(&self, x: f32, y: f32) -> Option<PathBuf> {
+        if self.tab != Tab::Files || x < 0.0 || x >= self.width - STRIP_W {
+            return None;
+        }
+        let top = PAD + CAPTION_H;
+        if y < top || y >= top + self.list_h {
+            return None;
+        }
+        if self.search_active() {
+            return self.file_of(sidebar_search::row_at(&self.search, y)?);
+        }
+        let index = ((y - top + self.scroll) / ROW_H).floor();
+        if index < 0.0 {
+            return None;
+        }
+        self.file_of(index as usize)
+    }
+
+    /// The file of the selected row, if the selection is on one.
+    pub fn selected_file(&self) -> Option<PathBuf> {
+        if self.tab != Tab::Files {
+            return None;
+        }
+        self.file_of(if self.search_active() {
+            self.search.selected
+        } else {
+            self.selected
+        })
+    }
+
+    /// Marks the file shown in the document area. A dot file kept out
+    /// by the toggle gets its row back, alone among the hidden entries,
+    /// so the open file always has one.
     pub fn set_current(&mut self, path: &Path) {
         self.current = Some(path.to_path_buf());
+        let listed = self.entries.iter().position(|e| e.path == path);
+        let hidden_name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| n.starts_with('.'));
+        if listed.is_none() && hidden_name && !self.show_hidden {
+            self.rebuild();
+        }
         if let Some(index) = self.entries.iter().position(|e| e.path == path) {
             self.selected = index;
         }
@@ -885,6 +1139,7 @@ impl Sidebar {
         let ui = &theme.ui;
         let width = self.width;
         let (fg, accent) = (ui.sidebar_fg, ui.sidebar_dir);
+        let accent_dir = self.accent_dir().map(Path::to_path_buf);
         self.scroll = self.scroll.clamp(0.0, self.max_scroll());
         let first = (self.scroll / ROW_H).floor() as usize;
         let offset = -(self.scroll - first as f32 * ROW_H);
@@ -897,19 +1152,42 @@ impl Sidebar {
             }
             slot += 1;
             let entry = &self.entries[index];
-            let current = self.current.as_deref() == Some(entry.path.as_path());
-            let attended =
-                self.hover == Some(Hover::Row(index)) || (owns_keys && index == self.selected);
+            let current = !entry.notice && self.current.as_deref() == Some(entry.path.as_path());
+            // A notice takes the selection fill, so the keys stay visible,
+            // but no hover fill: there is nothing to click.
+            let attended = (!entry.notice && self.hover == Some(Hover::Row(index)))
+                || (owns_keys && index == self.selected);
             draw_row_ground(painter, width, ry, current, attended, fg, accent);
             for level in 0..entry.depth {
                 draw_guide(painter, level, ry, fg);
             }
             let layout = row_layout(entry.depth, true);
-            let mut color = if current { accent } else { fg };
-            if entry.hidden {
+            // The accent's folder reads in the accent color, its name
+            // and its mark, with no fill: the fill is the open file's.
+            let accent_folder = entry.is_dir
+                && !(index == 0 && entry.name == "..")
+                && accent_dir.as_deref() == Some(entry.path.as_path());
+            let mut color = if current || accent_folder { accent } else { fg };
+            if entry.hidden || entry.notice {
                 color = dim(color);
             }
             let iy = ry + (ROW_H - MARK_H) / 2.0;
+            if entry.notice {
+                // The sentence starts where a mark would, so it reads as
+                // a notice about the folder rather than as one of its rows.
+                let avail = width - layout.mark_x - STRIP_W;
+                let text = truncated(painter, &entry.name, avail, 400);
+                painter.text(
+                    layout.mark_x,
+                    ry + 5.0,
+                    &text,
+                    BODY_FAMILY,
+                    TEXT_SIZE,
+                    400,
+                    color,
+                );
+                continue;
+            }
             if index == 0 && entry.name == ".." {
                 // Up chevron in the mark column for the parent row.
                 let (cx, cy) = (layout.mark_x + 5.0, ry + ROW_H / 2.0);
@@ -1126,6 +1404,34 @@ mod tests {
     }
 
     #[test]
+    fn the_accent_folder_is_the_open_files_or_the_last_one_clicked() {
+        let dir = temp_tree("accent-dir");
+        let mut side = Sidebar::new(&dir);
+        assert_eq!(side.accent_dir(), None, "nothing open, nothing clicked");
+        let sub = names(&side).iter().position(|n| n == "sub").unwrap();
+        side.activate(sub);
+        assert_eq!(
+            side.accent_dir(),
+            Some(dir.join("sub").as_path()),
+            "with no file open, the folder last clicked"
+        );
+        side.activate(sub);
+        assert_eq!(
+            side.accent_dir(),
+            Some(dir.join("sub").as_path()),
+            "closing it again keeps it the last one clicked"
+        );
+        side.set_current(&dir.join("zeta.md"));
+        assert_eq!(
+            side.accent_dir(),
+            Some(dir.as_path()),
+            "the open file's folder wins over the click"
+        );
+        side.set_current(&dir.join("sub/inner.md"));
+        assert_eq!(side.accent_dir(), Some(dir.join("sub").as_path()));
+    }
+
+    #[test]
     fn a_scrolled_outline_paints_only_inside_the_list_viewport() {
         let dir = temp_tree("chrome-outline");
         let mut side = Sidebar::new(&dir);
@@ -1267,10 +1573,18 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
+    /// A sidebar showing its dot entries, for the tests written before
+    /// the toggle, when every entry was listed.
+    fn showing_all(root: &Path) -> Sidebar {
+        let mut side = Sidebar::new(root);
+        side.set_show_hidden(true);
+        side
+    }
+
     #[test]
     fn scan_orders_directories_first_both_alphabetical() {
         let dir = temp_tree("order");
-        let side = Sidebar::new(&dir);
+        let side = showing_all(&dir);
         assert_eq!(
             names(&side),
             [
@@ -1320,7 +1634,7 @@ mod tests {
         let dir = temp_tree("symlink");
         std::os::unix::fs::symlink(dir.join("sub"), dir.join("linked")).unwrap();
         std::os::unix::fs::symlink(dir.join("zeta.md"), dir.join("linked.md")).unwrap();
-        let mut side = Sidebar::new(&dir);
+        let mut side = showing_all(&dir);
         let linked = side
             .entries
             .iter()
@@ -1355,7 +1669,7 @@ mod tests {
     #[test]
     fn expand_inserts_children_in_place_and_collapse_removes_them() {
         let dir = temp_tree("expand");
-        let mut side = Sidebar::new(&dir);
+        let mut side = showing_all(&dir);
         let sub = side.entries.iter().position(|e| e.name == "sub").unwrap();
         assert!(side.activate(sub).is_none());
         assert_eq!(
@@ -1662,6 +1976,7 @@ mod tests {
         use std::sync::Arc;
         let dir = temp_tree("content-click");
         let mut side = Sidebar::new(&dir);
+        side.list_h = 600.0;
         side.search.open(FilesView::ContentSearch);
         side.search.status = SearchStatus::Done {
             truncated: false,
@@ -1692,6 +2007,11 @@ mod tests {
         assert!(side.search.collapsed.is_empty());
         assert_eq!(side.search.rows.len(), 2);
         let hit_y = sidebar_search::results_top() + ROW_H + 5.0;
+        assert!(side.file_at(50.0, header_y).is_none());
+        assert!(side
+            .file_at(50.0, hit_y)
+            .unwrap()
+            .ends_with(dir.join("sub").join("inner.md")));
         match side.click(50.0, hit_y, &mut outline) {
             SideClick::SearchHit(path, line, column, expected) => {
                 assert!(path.ends_with(dir.join("sub").join("inner.md")));
@@ -1702,6 +2022,332 @@ mod tests {
             other => panic!("the hit row answered {other:?}"),
         }
         assert_eq!(side.search.selected, 1, "the click selected the line");
+        assert!(side
+            .selected_file()
+            .unwrap()
+            .ends_with(dir.join("sub").join("inner.md")));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn file_search_second_window_uses_results_and_survives_tree_refresh() {
+        use crate::workspace_search::FileHit;
+        use std::sync::Arc;
+
+        let dir = temp_tree("search-second-window");
+        let mut side = Sidebar::new(&dir);
+        side.list_h = 600.0;
+        side.search.open(FilesView::FileSearch);
+        side.search.file_query.insert("inner");
+        side.search.files = vec![FileHit {
+            relative_path: Arc::from("sub/inner.md"),
+            basename_start: 4,
+            score: 10,
+            matched: vec![4, 5, 6, 7, 8],
+        }];
+        let expected = sidebar_search::absolute(&dir, "sub/inner.md");
+        assert_eq!(side.selected_file(), Some(expected.clone()));
+        assert_eq!(
+            side.file_at(50.0, sidebar_search::results_top() + 5.0),
+            Some(expected.clone())
+        );
+        assert!(side.file_at(50.0, PAD + CAPTION_H + 1.0).is_none());
+        side.set_show_hidden(true);
+        side.rebuild();
+        assert_eq!(side.search.file_query.text(), "inner");
+        assert_eq!(side.selected_file(), Some(expected));
+        side.set_tab(Tab::Outline);
+        assert!(side.selected_file().is_none());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A folder the system refuses to list shows one notice row under
+    /// `..`, so the reader can climb out; the notice opens nothing.
+    #[cfg(unix)]
+    #[test]
+    fn an_unreadable_folder_shows_a_notice_under_the_parent_row() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = temp_tree("unreadable");
+        let locked = dir.join("locked");
+        std::fs::create_dir(&locked).unwrap();
+        std::fs::write(locked.join("secret.md"), "x").unwrap();
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+        if std::fs::read_dir(&locked).is_ok() {
+            // Running as root: nothing is unreadable, nothing to prove.
+            std::fs::remove_dir_all(&dir).unwrap();
+            return;
+        }
+        let mut side = Sidebar::new(&locked);
+        assert_eq!(names(&side), ["..", UNREADABLE]);
+        assert!(side.entries[1].notice);
+        assert!(side.activate(1).is_none(), "the notice opens nothing");
+        assert_eq!(side.root(), locked.as_path(), "and moves nowhere");
+        assert!(side.activate(0).is_none());
+        assert_eq!(
+            side.root(),
+            dir.as_path(),
+            "the parent row still climbs out"
+        );
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_unreadable_subfolder_expands_to_its_notice_and_collapses_clean() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = temp_tree("unreadable-sub");
+        let locked = dir.join("locked");
+        std::fs::create_dir(&locked).unwrap();
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+        if std::fs::read_dir(&locked).is_ok() {
+            std::fs::remove_dir_all(&dir).unwrap();
+            return;
+        }
+        let mut side = Sidebar::new(&dir);
+        let row = side
+            .entries
+            .iter()
+            .position(|e| e.name == "locked")
+            .unwrap();
+        assert!(side.activate(row).is_none());
+        assert_eq!(side.entries[row + 1].name, UNREADABLE);
+        assert_eq!(
+            side.entries[row + 1].depth,
+            1,
+            "the notice sits inside the folder"
+        );
+        assert!(side.entries[row + 2].depth == 0, "and nothing else joined");
+        assert!(side.activate(row).is_none());
+        assert_ne!(
+            side.entries[row + 1].name,
+            UNREADABLE,
+            "collapsing removes it"
+        );
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// The kernel stamps a folder with its coarse clock, a few
+    /// milliseconds wide: two changes inside one tick share a stamp,
+    /// so a test lets a tick pass between a read and the next change.
+    fn settle() {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+
+    /// The tree follows the disk on the disk check: a file added to a
+    /// shown folder appears, one removed goes, and an unchanged folder
+    /// costs nothing but a stat.
+    #[test]
+    fn a_refresh_shows_a_file_added_and_drops_one_removed() {
+        let dir = temp_tree("refresh-add");
+        let mut side = Sidebar::new(&dir);
+        assert!(!side.refresh_if_changed(), "nothing changed yet");
+        settle();
+        std::fs::write(dir.join("brand-new.md"), "x").unwrap();
+        assert!(side.refresh_if_changed(), "the root's stamp moved");
+        assert!(names(&side).contains(&"brand-new.md".to_string()));
+        assert!(!side.refresh_if_changed(), "seen once");
+        settle();
+        std::fs::remove_file(dir.join("brand-new.md")).unwrap();
+        assert!(side.refresh_if_changed());
+        assert!(!names(&side).contains(&"brand-new.md".to_string()));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_refresh_keeps_the_selection_by_path_and_the_expanded_folders() {
+        let dir = temp_tree("refresh-keep");
+        let mut side = Sidebar::new(&dir);
+        let sub = side.entries.iter().position(|e| e.name == "sub").unwrap();
+        assert!(side.activate(sub).is_none());
+        assert!(side.entries[sub].expanded);
+        side.selected = side
+            .entries
+            .iter()
+            .position(|e| e.name == "zeta.md")
+            .unwrap();
+        settle();
+        std::fs::remove_file(dir.join("Alpha.rs")).unwrap();
+        assert!(side.refresh_if_changed());
+        assert_eq!(
+            side.entries[side.selected].name, "zeta.md",
+            "the selection follows its file"
+        );
+        let sub = side.entries.iter().position(|e| e.name == "sub").unwrap();
+        assert!(side.entries[sub].expanded, "still expanded");
+        assert_eq!(side.entries[sub + 1].name, "subsub", "with its children");
+        settle();
+        std::fs::write(dir.join("sub/late.md"), "x").unwrap();
+        assert!(
+            side.refresh_if_changed(),
+            "an expanded folder's stamp counts too"
+        );
+        assert!(names(&side).contains(&"late.md".to_string()));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_refresh_drops_an_expanded_folder_that_vanished() {
+        let dir = temp_tree("refresh-gone");
+        let mut side = Sidebar::new(&dir);
+        let sub = side.entries.iter().position(|e| e.name == "sub").unwrap();
+        assert!(side.activate(sub).is_none());
+        side.selected = side
+            .entries
+            .iter()
+            .position(|e| e.name == "inner.md")
+            .unwrap();
+        settle();
+        std::fs::remove_dir_all(dir.join("sub")).unwrap();
+        assert!(side.refresh_if_changed());
+        assert!(!names(&side).contains(&"sub".to_string()));
+        assert!(!names(&side).contains(&"inner.md".to_string()));
+        assert!(
+            side.selected < side.entries.len(),
+            "the selection stays in range"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A middle click asks for the file under the pointer without
+    /// opening it in place: a file row answers its path, a folder row,
+    /// the parent row and the space below the list answer nothing.
+    #[test]
+    fn the_file_under_a_point_answers_only_for_a_file_row() {
+        let dir = temp_tree("file-at");
+        let mut side = Sidebar::new(&dir);
+        side.list_h = 600.0;
+        let row_y = |index: usize| PAD + CAPTION_H + index as f32 * ROW_H + 5.0;
+        let zeta = side
+            .entries
+            .iter()
+            .position(|e| e.name == "zeta.md")
+            .unwrap();
+        assert_eq!(side.file_at(40.0, row_y(zeta)), Some(dir.join("zeta.md")));
+        let sub = side.entries.iter().position(|e| e.name == "sub").unwrap();
+        assert_eq!(side.file_at(40.0, row_y(sub)), None, "a folder");
+        assert_eq!(side.file_at(40.0, row_y(0)), None, "the parent row");
+        assert_eq!(
+            side.file_at(40.0, row_y(side.entries.len() + 2)),
+            None,
+            "below the list"
+        );
+        assert_eq!(side.file_at(40.0, 10.0), None, "the caption row");
+        side.selected = zeta;
+        assert_eq!(side.selected_file(), Some(dir.join("zeta.md")));
+        side.selected = sub;
+        assert_eq!(side.selected_file(), None);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Dot entries stay out of the tree until the toggle is on, the
+    /// parent row untouched; on, they list flagged hidden, dimmed.
+    #[test]
+    fn hidden_entries_stay_out_until_the_toggle() {
+        let dir = temp_tree("hidden-off");
+        let mut side = Sidebar::new(&dir);
+        assert!(!side.show_hidden(), "off by default");
+        assert_eq!(
+            names(&side),
+            [
+                "..",
+                "sub",
+                "Alpha.rs",
+                "Cargo.lock",
+                "notes.txt",
+                "README",
+                "zeta.md"
+            ]
+        );
+        side.set_show_hidden(true);
+        assert!(names(&side).contains(&".git".to_string()));
+        assert!(names(&side).contains(&".gitignore".to_string()));
+        assert!(side.entries.iter().filter(|e| e.hidden).count() == 2);
+        side.set_show_hidden(false);
+        assert!(!names(&side).contains(&".git".to_string()));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// The file shown in the document keeps its row whatever the
+    /// toggle, alone among the dot entries, and the selection sits on it.
+    #[test]
+    fn the_open_file_stays_listed_while_hidden_entries_are_off() {
+        let dir = temp_tree("hidden-current");
+        let mut side = Sidebar::new(&dir);
+        side.set_current(&dir.join(".gitignore"));
+        let row = side
+            .entries
+            .iter()
+            .position(|e| e.name == ".gitignore")
+            .expect("the open file is listed");
+        assert!(side.entries[row].hidden, "still drawn dimmed");
+        assert_eq!(side.selected, row);
+        assert!(
+            !names(&side).contains(&".git".to_string()),
+            "the others stay out"
+        );
+        side.set_show_hidden(true);
+        side.set_show_hidden(false);
+        assert!(
+            names(&side).contains(&".gitignore".to_string()),
+            "through a toggle too"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_toggle_keeps_the_selection_on_its_path_and_the_expanded_folders() {
+        let dir = temp_tree("hidden-toggle");
+        std::fs::write(dir.join("sub/.secret.md"), "x").unwrap();
+        let mut side = Sidebar::new(&dir);
+        let sub = side.entries.iter().position(|e| e.name == "sub").unwrap();
+        assert!(side.activate(sub).is_none());
+        assert!(
+            !names(&side).contains(&".secret.md".to_string()),
+            "filtered inside too"
+        );
+        side.selected = side
+            .entries
+            .iter()
+            .position(|e| e.name == "zeta.md")
+            .unwrap();
+        side.set_show_hidden(true);
+        assert_eq!(side.entries[side.selected].name, "zeta.md");
+        let sub = side.entries.iter().position(|e| e.name == "sub").unwrap();
+        assert!(side.entries[sub].expanded, "still expanded");
+        assert!(names(&side).contains(&".secret.md".to_string()));
+        side.set_show_hidden(false);
+        assert_eq!(side.entries[side.selected].name, "zeta.md");
+        assert!(!names(&side).contains(&".secret.md".to_string()));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn the_open_file_inside_a_dot_folder_keeps_its_row_through_a_toggle() {
+        let dir = temp_tree("hidden-inside");
+        std::fs::write(dir.join(".git/notes.md"), "x").unwrap();
+        let mut side = Sidebar::new(&dir);
+        side.set_show_hidden(true);
+        let git = side.entries.iter().position(|e| e.name == ".git").unwrap();
+        assert!(side.activate(git).is_none());
+        side.set_current(&dir.join(".git/notes.md"));
+        side.hover = Some(Hover::Row(1));
+        side.set_show_hidden(false);
+        assert!(
+            side.hover.is_none(),
+            "a hover from the old list marks no row of the new one"
+        );
+        let row = side
+            .entries
+            .iter()
+            .position(|e| e.path == dir.join(".git/notes.md"))
+            .expect("the open file keeps its row, and its folder with it");
+        assert_eq!(side.selected, row, "the selection stays on the open file");
+        assert!(
+            !names(&side).contains(&".gitignore".to_string()),
+            "the other dot entries stay out"
+        );
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

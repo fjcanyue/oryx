@@ -1,0 +1,2 @@
+;; -*- mode: lisp -*-
+(defun square (x) (* x x))

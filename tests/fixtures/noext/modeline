@@ -1,0 +1,3 @@
+# A file whose only tell is its modeline
+# vim: set ft=ruby:
+puts "hi"

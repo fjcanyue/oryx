@@ -6,6 +6,8 @@
 //! are pure functions so the tables are testable on their own; `App`
 //! owns the wiring.
 
+pub mod attach;
+pub mod autosave;
 pub mod caret;
 pub mod manners;
 pub mod splice;
@@ -62,6 +64,13 @@ pub fn toggle(mode: Mode, kind: FileKind, lossy: bool) -> Result<Mode, Refusal> 
     }
 }
 
+/// Whether a file just read opens in the editor instead of on the page:
+/// it has nothing to read, empty or whitespace only, and the door would
+/// open on it.
+pub fn opens_in_editor(kind: FileKind, lossy: bool, text: &str) -> bool {
+    text.trim().is_empty() && toggle(Mode::Read, kind, lossy) == Ok(Mode::Edit)
+}
+
 /// The document the editor works on, or None when the kind already
 /// shows its own bytes. A code or text file reads and edits the same
 /// characters, so nothing is swapped; markdown renders to something
@@ -109,7 +118,16 @@ pub fn reparse(
         // re-derives the same source view the door opened, colors and
         // all. `source_document` names that shape.
         FileKind::Markdown => load::code_document(Some("md"), current),
-        FileKind::Unknown => load::code_document(None, current),
+        // A path that names no language: the open read the text for
+        // one (a shebang, a modeline), and the document keeps it
+        // through its edits.
+        FileKind::Unknown => {
+            let language = match old.blocks.first().map(|b| &b.kind) {
+                Some(BlockKind::CodeBlock { language, .. }) => language.as_deref(),
+                _ => None,
+            };
+            load::code_document(language, current)
+        }
         _ => load::text_document(current),
     };
     if new.plain_file {
@@ -302,13 +320,7 @@ pub fn splice_document(
             }
         }
     }
-    if !lines.splice(
-        current,
-        old_touched.clone(),
-        new_touched.clone(),
-        delta,
-        plain,
-    ) {
+    if !lines.splice(current, old_touched.clone(), new_touched.clone(), delta) {
         return None;
     }
     let new_len = lines.len();
@@ -417,6 +429,32 @@ mod tests {
             toggle(Mode::Read, FileKind::Markdown, true),
             Err(Refusal::Lossy),
             "a lossy markdown refuses as lossy, not as markdown"
+        );
+    }
+
+    #[test]
+    fn a_file_with_nothing_in_it_opens_in_the_editor() {
+        assert!(opens_in_editor(FileKind::Markdown, false, ""));
+        assert!(opens_in_editor(FileKind::Code("rust"), false, ""));
+        assert!(opens_in_editor(FileKind::Text, false, ""));
+        assert!(opens_in_editor(FileKind::Unknown, false, ""));
+        assert!(
+            opens_in_editor(FileKind::Markdown, false, " \n\t\n\n"),
+            "spaces and line breaks are nothing to read"
+        );
+    }
+
+    #[test]
+    fn a_file_with_text_or_behind_the_door_opens_for_reading() {
+        assert!(!opens_in_editor(FileKind::Markdown, false, "a"));
+        assert!(!opens_in_editor(FileKind::Text, false, "\n\na\n"));
+        assert!(
+            !opens_in_editor(FileKind::Epub, false, ""),
+            "a book is never edited"
+        );
+        assert!(
+            !opens_in_editor(FileKind::Text, true, ""),
+            "a lossy read is never edited"
         );
     }
 
@@ -839,6 +877,32 @@ mod tests {
         assert!(new.plain_file);
         assert!(!new.code_file);
         assert_eq!(&*new.source, "hello world\n");
+    }
+
+    #[test]
+    fn reparse_keeps_the_language_a_file_without_an_extension_opened_with() {
+        // The path alone says unknown; the open read the shebang and
+        // named the grammar, and an edit must not lose it.
+        let old = load::code_document(Some("Python"), "#!/usr/bin/env python3\nprint(1)\n");
+        let new = reparse(
+            FileKind::Unknown,
+            "#!/usr/bin/env python3\nprint(12)\n",
+            &old,
+            1..2,
+            1..2,
+        );
+        assert!(new.code_file);
+        assert!(matches!(
+            &new.blocks[0].kind,
+            BlockKind::CodeBlock { language: Some(name), .. } if name == "Python"
+        ));
+        // A file the open could not name stays without a language.
+        let old = load::code_document(None, "some words\n");
+        let new = reparse(FileKind::Unknown, "some more words\n", &old, 0..1, 0..1);
+        assert!(matches!(
+            new.blocks[0].kind,
+            BlockKind::CodeBlock { language: None, .. }
+        ));
     }
 
     /// Drives one edit through both pipes: the in-place splice on `fast`

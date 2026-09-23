@@ -111,6 +111,34 @@ fn family_for(class: ScriptClass) -> Option<&'static str> {
     }
 }
 
+/// `text` as the shaper gets it: a control character (the C0 set but
+/// the tab, and DEL) becomes a space of the same byte length, so every
+/// offset still maps. No font has a glyph for one, and the shaper's
+/// search for it walks every font on the system, loading each: a log
+/// full of escape codes froze the window for seconds and a random
+/// file for longer.
+pub fn shapable(text: &str) -> std::borrow::Cow<'_, str> {
+    if !text.bytes().any(is_control_byte) {
+        return std::borrow::Cow::Borrowed(text);
+    }
+    std::borrow::Cow::Owned(
+        text.chars()
+            .map(|c| {
+                if c.is_ascii() && is_control_byte(c as u8) {
+                    ' '
+                } else {
+                    c
+                }
+            })
+            .collect(),
+    )
+}
+
+/// A byte no text shows: the C0 controls but the tab, and DEL.
+fn is_control_byte(byte: u8) -> bool {
+    (byte < 0x20 && byte != b'\t') || byte == 0x7f
+}
+
 /// Splits text into byte ranges by strong script, each with the
 /// designated family that renders it, `None` where the span family
 /// keeps the run. Neutral characters (spaces, digits, punctuation)
@@ -257,6 +285,21 @@ impl Default for FontStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn control_characters_shape_as_spaces_of_the_same_length() {
+        assert!(matches!(
+            shapable("plain text\tand tab"),
+            std::borrow::Cow::Borrowed(_)
+        ));
+        let shaped = shapable("a\x1b[31mb\x01c\x7fd\u{e9}");
+        assert_eq!(&*shaped, "a [31mb c d\u{e9}");
+        assert_eq!(
+            shaped.len(),
+            "a\x1b[31mb\x01c\x7fd\u{e9}".len(),
+            "every offset still maps"
+        );
+    }
 
     #[test]
     fn bundled_families_present() {

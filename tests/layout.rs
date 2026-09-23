@@ -367,32 +367,76 @@ fn quote_indents_with_bar_and_panel() {
     );
 }
 
+// The box is 0.9 of the font size and the check mark 0.8, so the mark
+// fills the box; the web's native box is 0.81 and read small at 1x.
 #[test]
 fn task_items_draw_checkboxes() {
-    let l = lay("- [x] done\n- [ ] todo", 800.0);
+    let (doc, l) = lay2("- [x] done\n- [ ] todo", 800.0);
     let t = Theme::default_dark();
+    let size = cfg().body_size;
+    let fill = l
+        .rects
+        .iter()
+        .find(|r| r.color == t.text.link)
+        .expect("checked box fill");
     assert!(
-        l.rects.iter().any(|r| r.color == t.text.link),
-        "checked box fill"
+        (fill.width - 0.9 * size).abs() < 0.01,
+        "box side {}",
+        fill.width
     );
+    assert_eq!(fill.width, fill.height, "the box is square");
+    let outline = l
+        .rects
+        .iter()
+        .find(|r| r.color == t.blocks.rule && r.stroke > 0.0)
+        .expect("unchecked box outline");
     assert!(
-        l.rects
-            .iter()
-            .any(|r| r.color == t.blocks.rule && r.stroke > 0.0),
-        "unchecked box outline"
+        (outline.width - 0.9 * size).abs() < 0.01,
+        "outline side {}",
+        outline.width
+    );
+    let mark = find_text(&l, &doc, "\u{2713}");
+    assert!(
+        (mark.size - 0.8 * size).abs() < 0.01,
+        "mark size {}",
+        mark.size
+    );
+    let done = find_text(&l, &doc, "done");
+    assert!(
+        (mark.y - (done.y + 1.0)).abs() < 0.01,
+        "the mark sits one pixel below its line's text: mark {} text {}",
+        mark.y,
+        done.y
     );
 }
 
-// The squares are the click's hit targets: a point inside each box
-// answers its own block, the gutter beside the text answers nothing.
+// The squares are the click's hit targets, the same square that is
+// drawn: a point inside each box answers its own block, a point just
+// outside the drawn edge and the gutter beside the text answer nothing.
 #[test]
 fn checkboxes_answer_the_click() {
     let (doc, l) = lay2("- [x] done\n- [ ] todo", 800.0);
+    let t = Theme::default_dark();
     let done = find_text(&l, &doc, "done");
     let todo = find_text(&l, &doc, "todo");
+    let fill = l
+        .rects
+        .iter()
+        .find(|r| r.color == t.text.link)
+        .expect("checked box fill");
     let first = l
-        .checkbox_at(done.x - 14.0, done.y + 6.0)
-        .expect("the first box answers");
+        .checkbox_at(fill.x + fill.width / 2.0, fill.y + fill.height / 2.0)
+        .expect("the first box answers at its drawn center");
+    assert_eq!(
+        l.checkbox_at(fill.x - 3.0, fill.y + fill.height / 2.0),
+        None,
+        "just left of the drawn box is nothing"
+    );
+    assert_eq!(
+        l.checkbox_at(done.x - 14.0, done.y + 6.0),
+        Some(first),
+        "inside the box beside the text"
+    );
     let second = l
         .checkbox_at(todo.x - 14.0, todo.y + 6.0)
         .expect("the second box answers");
@@ -838,6 +882,71 @@ fn badge_row_centers_and_shares_a_line() {
     let right = l.images[1].x + l.images[1].width;
     let mid = (left + right) / 2.0;
     assert!((mid - 400.0).abs() < 20.0, "row centered, mid {mid}");
+}
+
+// A right-aligned block ends where a full line would: the text's right
+// edge meets the content's right edge, and a plain block starts at the
+// left as before.
+#[test]
+fn right_aligned_text_ends_at_the_right_edge() {
+    let (doc, l) = lay2("plain\n\n<p align=\"right\">\n\nshort\n\n</p>\n", 800.0);
+    let plain = find_text(&l, &doc, "plain");
+    let short = find_text(&l, &doc, "short");
+    let right_edge = 800.0 - plain.x;
+    assert!(
+        (short.x + short.width - right_edge).abs() < 2.0,
+        "ends at {} for an edge at {right_edge}",
+        short.x + short.width
+    );
+    assert!(short.x > plain.x + 300.0, "moved right, x {}", short.x);
+}
+
+// A left block inside a centered one starts at the left edge, and the
+// centered text around it stays in the middle.
+#[test]
+fn a_left_block_inside_a_centered_one_starts_at_the_left_edge() {
+    let (doc, l) = lay2(
+        "plain\n\n<div align=\"center\">\n\nmiddle\n\n<p align=\"left\">\n\nshort\n\n</p>\n\n</div>\n",
+        800.0,
+    );
+    let plain = find_text(&l, &doc, "plain");
+    let middle = find_text(&l, &doc, "middle");
+    let short = find_text(&l, &doc, "short");
+    assert!(
+        (short.x - plain.x).abs() < 1.0,
+        "at the left, x {}",
+        short.x
+    );
+    let mid = middle.x + middle.width / 2.0;
+    assert!((mid - 400.0).abs() < 2.0, "still centered, mid {mid}");
+}
+
+// Under a forced right-to-left direction every line sits on the right;
+// `align="left"` brings a block back to the left edge and `center` to
+// the middle.
+#[test]
+fn align_left_and_center_hold_under_a_forced_rtl_direction() {
+    let (doc, l) = lay_dir(
+        "plain\n\n<p align=\"left\">\n\nshort\n\n</p>\n\n<p align=\"center\">\n\nmiddle\n\n</p>\n",
+        800.0,
+        DirectionMode::Rtl,
+    );
+    let plain = find_text(&l, &doc, "plain");
+    let short = find_text(&l, &doc, "short");
+    let middle = find_text(&l, &doc, "middle");
+    let margin = 800.0 - (plain.x + plain.width);
+    assert!(
+        plain.x > 400.0,
+        "the plain line sits on the right, x {}",
+        plain.x
+    );
+    assert!(
+        (short.x - margin).abs() < 2.0,
+        "at the left edge {margin}, x {}",
+        short.x
+    );
+    let mid = middle.x + middle.width / 2.0;
+    assert!((mid - 400.0).abs() < 2.0, "centered, mid {mid}");
 }
 
 #[test]
@@ -1621,10 +1730,10 @@ fn the_y_index_stays_honest_while_a_pass_grows() {
         steps += 1;
         // Index on a stride so some checks run against a stale index
         // with a real tail.
-        if steps % 11 == 0 {
+        if steps.is_multiple_of(11) {
             out.index_more();
         }
-        if steps % 5 == 0 || done {
+        if steps.is_multiple_of(5) || done {
             let (head, tail) = out.runs_in(0.0, out.height);
             for (index, _) in out.runs.iter().enumerate() {
                 assert!(
@@ -1632,7 +1741,7 @@ fn the_y_index_stays_honest_while_a_pass_grows() {
                     "run {index} missed after {steps} steps"
                 );
             }
-            if out.height > 1500.0 && steps % 11 == 0 {
+            if out.height > 1500.0 && steps.is_multiple_of(11) {
                 let (head, tail) = out.runs_in(0.0, 200.0);
                 assert!(
                     head.len() + tail.len() < out.runs.len(),
@@ -1896,7 +2005,15 @@ fn a_multi_patch_batch_matches_the_sequential_path() {
         .collect();
     let theme = Theme::default_dark();
     let patches: Vec<(usize, std::ops::Range<usize>)> = blocks.iter().map(|&b| (b, 0..2)).collect();
-    recolor_batch(&mut batched, &doc, &theme, &mut store, &cfg(), &patches);
+    recolor_batch(
+        &mut batched,
+        &doc,
+        &theme,
+        &mut store,
+        &cfg(),
+        &patches,
+        None,
+    );
     for &b in &blocks {
         recolor_code_lines(&mut sequential, &doc, &theme, &mut store, &cfg(), b, 0..2);
     }
@@ -1928,6 +2045,7 @@ fn a_middle_patch_shifts_later_records_like_the_sequential_path() {
         &mut store,
         &cfg(),
         &[(middle, 0..2)],
+        None,
     );
     recolor_code_lines(
         &mut sequential,
@@ -1975,6 +2093,7 @@ fn an_empty_batch_is_a_no_op() {
         &mut store,
         &cfg(),
         &[],
+        None,
     );
     assert_eq!(lay.runs, before);
 }
@@ -2322,6 +2441,7 @@ fn recolor_preserves_accessor_texts() {
         &mut fonts,
         &cfg(),
         &[(0, 0..2)],
+        None,
     );
     let after: String = lay
         .runs
@@ -2823,6 +2943,102 @@ fn a_pooled_slide_matches_the_serial_window() {
     assert!(pool.completed() > before, "the pool shaped window fills");
 }
 
+// The pass holds a code block open across steps and remembers the run
+// count at its start, to drop the block whole when it lands outside the
+// view. Colors arriving meanwhile for a block above add runs before it;
+// the drop must then cut at the block's moved start, not into the lines
+// above it. Found 18/09/2026 on `huge.md:100000`, a panic in the recolor.
+#[test]
+fn a_recolor_while_a_far_code_block_is_open_keeps_the_records_in_step() {
+    let mut source = String::from("```rust\nlet a = 1;\nlet b = \"two\";\n```\n\n");
+    for i in 0..60 {
+        source.push_str(&format!(
+            "Paragraph {i} pushes the second block far below.\n\n"
+        ));
+    }
+    source.push_str("```rust\nfn far() {\n    let c = 3;\n    let d = 4;\n}\n```\n");
+    let mut doc = markdown::parse(source.as_str());
+    let mut fonts = fonts();
+    let mut media = MediaCache::new(PathBuf::from("."));
+    let (mut lay, mut pass) = layout_begin(&doc, &cfg(), 800.0);
+    pass.retain_around(0.0, 200.0);
+    // Steps until the pass is inside (or back outside) a code block.
+    {
+        let mut step_until = |open: bool,
+                              lay: &mut LayoutDoc,
+                              pass: &mut oryx::layout::LayoutPass,
+                              fonts: &mut FontStore| {
+            while pass.has_open_code() != open {
+                assert!(
+                    !layout_step(&doc, &theme(), fonts, &mut media, &cfg(), lay, pass),
+                    "the pass ended before the far block opened"
+                );
+            }
+        };
+        step_until(true, &mut lay, &mut pass, &mut fonts);
+        step_until(false, &mut lay, &mut pass, &mut fonts);
+        step_until(true, &mut lay, &mut pass, &mut fonts);
+    }
+    assert_eq!(
+        lay.code_lines.len(),
+        2,
+        "the first block's two lines are kept"
+    );
+    lay.records_consistent().expect("in step before the colors");
+
+    // The first block's colors arrive while the far block is open.
+    let (first, spans) = {
+        let BlockKind::CodeBlock {
+            language, lines, ..
+        } = &doc.blocks[0].kind
+        else {
+            panic!("the first block is code")
+        };
+        (0, highlight::spans(&doc.source, lines, language.as_deref()))
+    };
+    let BlockKind::CodeBlock { highlights, .. } = &mut doc.blocks[first].kind else {
+        panic!()
+    };
+    *highlights = spans;
+    let (_, _, delta) = recolor_batch(
+        &mut lay,
+        &doc,
+        &theme(),
+        &mut fonts,
+        &cfg(),
+        &[(first, 0..2)],
+        Some(&mut pass),
+    )
+    .expect("the colors move runs");
+    assert!(delta > 0, "colored lines hold more runs, delta {delta}");
+    lay.records_consistent().expect("in step after the colors");
+
+    // The far block closes outside the view and is dropped whole.
+    let mut media = MediaCache::new(PathBuf::from("."));
+    layout_more(
+        &doc,
+        &theme(),
+        &mut fonts,
+        &mut media,
+        &cfg(),
+        &mut lay,
+        &mut pass,
+        None,
+    );
+    lay.records_consistent()
+        .expect("in step after the far block dropped");
+    let text: String = lay
+        .runs
+        .iter()
+        .filter(|run| run.block == first)
+        .map(|run| lay.run_text(&doc, run))
+        .collect();
+    assert_eq!(
+        text, "let a = 1;let b = \"two\";",
+        "both lines keep every run"
+    );
+}
+
 #[test]
 fn zoom_rebuilds_the_table() {
     let doc = tour_doc();
@@ -2938,6 +3154,7 @@ fn model_selection_survives_recolor_and_relayout() {
         &mut fonts,
         &cfg(),
         &[(1, 0..1)],
+        None,
     );
     assert_eq!(
         oryx::ui::selection::plain_text(&sel, &doc),
@@ -3578,6 +3795,64 @@ fn the_layout_splice_matches_a_fresh_pass_on_a_code_file() {
         let fresh = windowed(&reference, width, 0.0, viewport);
         assert_same_layout(&lay, &doc, &fresh, &reference);
     }
+}
+
+#[test]
+fn enters_at_the_end_of_a_code_file_add_placed_rows() {
+    let mut source = String::new();
+    for i in 0..40 {
+        source.push_str(&format!("let value_{i} = compute({i});\n"));
+    }
+    let path = std::env::temp_dir().join("oryx_fastpath_tail_rows.rs");
+    std::fs::write(&path, &source).unwrap();
+    let mut doc = load::open(&path, None).unwrap().document;
+    let mut reference = load::open(&path, None).unwrap().document;
+    std::fs::remove_file(&path).ok();
+    let kind = load::FileKind::Code("rust");
+    let (width, viewport) = (700.0, 2000.0);
+    let mut lay = windowed(&doc, width, 0.0, viewport);
+    let before = lay.height;
+    let row = lay
+        .code_line_seat(0, 0)
+        .expect("a placed code block")
+        .height;
+    for _ in 0..3 {
+        let end = doc.source.len();
+        fast_keystroke(
+            &mut doc,
+            &mut reference,
+            kind,
+            &mut lay,
+            end..end,
+            "\n",
+            0.0,
+            viewport,
+        );
+    }
+    assert!(
+        ((lay.height - before) - 3.0 * row).abs() < 0.5,
+        "three rows taller: {} against {}",
+        lay.height - before,
+        3.0 * row
+    );
+    let last = lay
+        .code_line_seat(0, 42)
+        .expect("the third new row is placed");
+    let mut fonts = fonts();
+    // After the final newline the caret opens a row of its own, below
+    // the last placed row and still inside the page's bottom margin.
+    let seat = oryx::edit::caret::Caret::at(doc.source.len())
+        .geometry(&lay, &doc, &mut fonts)
+        .expect("the caret has a row");
+    assert!(
+        (seat.y - (last.y + row)).abs() < 0.5 && seat.y + seat.h <= lay.height + 0.5,
+        "the caret stands one row below the last row, inside the page: {} vs {} in {}",
+        seat.y,
+        last.y + row,
+        lay.height
+    );
+    let fresh = windowed(&reference, width, 0.0, viewport);
+    assert_same_layout(&lay, &doc, &fresh, &reference);
 }
 
 #[test]
@@ -4621,4 +4896,14 @@ fn a_diagram_beside_local_and_remote_images() {
         media.dimensions("tests/fixtures/missing.png").is_none(),
         "a missing file stays missing"
     );
+}
+
+/// An empty fenced block is a code block with no line: what stands at
+/// the top of the page is asked of its line table, which has nothing.
+#[test]
+fn an_empty_fence_at_the_top_answers_the_page_start() {
+    use oryx::paint::scroll;
+    let (doc, l) = lay2("```\n```\n\nText after the empty fence.\n", 400.0);
+    assert_eq!(scroll::top_offset(&l, &doc, 0.0), 0);
+    assert_eq!(scroll::top_offset(&l, &doc, 1.0), 0);
 }

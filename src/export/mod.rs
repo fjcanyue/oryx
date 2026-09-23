@@ -1,6 +1,7 @@
 //! PDF export: page geometry, the resumable pass, and the settings that
 //! drive them. Pagination and emission live in the two child modules.
 
+pub mod html;
 pub mod paginate;
 pub mod pdf;
 
@@ -279,6 +280,8 @@ impl ExportPass {
                 comic: crate::layout::ComicFit::Width,
                 direction: crate::layout::DirectionMode::Auto,
                 print: true,
+                // The PDF carries no line numbers, whatever the screen shows.
+                gutter: 0.0,
             },
             geometry,
             target,

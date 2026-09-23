@@ -223,5 +223,6 @@ pub fn settle_recolor(doc: &Document, lay: &mut LayoutDoc, fonts: &mut FontStore
         fonts,
         &ViewConfig::default(),
         &patches,
+        None,
     );
 }

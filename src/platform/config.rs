@@ -1,8 +1,10 @@
 //! Persistent user configuration: `config.toml` in the user's config
 //! directory, and the book positions beside it. Any read problem yields
 //! defaults, never an error, and a value outside its range is held to
-//! it. Both files are written whole, through a temporary file renamed
-//! over the old one, so a crash mid-write never leaves a half file.
+//! it. Both files are written through a temporary file renamed over the
+//! old one, so a crash mid-write never leaves a half file. Both files
+//! are shared by every window: a save puts in what this window changed,
+//! a setting or its book's place, and keeps the rest as the file has it.
 
 use std::path::{Path, PathBuf};
 
@@ -30,11 +32,16 @@ pub struct Config {
     pub last_dir: String,
     /// Whether the folder sidebar was open at the last toggle, and how
     /// wide it was left. Both are written when a gesture ends, not per
-    /// frame, so a drag does not hammer the disk.
+    /// frame, so a drag does not hammer the disk. Open on a first run,
+    /// so a fresh install shows where its files are; the first close
+    /// is remembered like any toggle.
     pub sidebar_open: bool,
     pub sidebar_width: f32,
     /// The panel tab last active, so the sidebar reopens where it was.
     pub sidebar_tab: crate::ui::sidebar::Tab,
+    /// Whether the sidebar lists dot files and folders; off by default,
+    /// the file managers' convention, flipped by Ctrl+Shift+H.
+    pub show_hidden: bool,
     /// Whether book text justifies; Ctrl+J flips it on a book.
     pub justify: bool,
     /// Whether markdown prose justifies; Ctrl+J flips it on a markdown
@@ -44,6 +51,26 @@ pub struct Config {
     /// Manual interface scale on top of the display's own factor, 1.0
     /// at the detected baseline. Adjusted in the settings dialog.
     pub ui_scale: f32,
+    /// Whether a file of lines (code, text, markdown in the editor)
+    /// shows its line numbers in the left margin; off by default, an
+    /// on/off row in the settings dialog.
+    pub line_numbers: bool,
+    /// Whether the corner of the page shows the file's word count; off
+    /// by default, an on/off row in the settings dialog.
+    pub word_count: bool,
+    /// Whether the open file is saved when the window loses focus; off
+    /// by default, since it writes without asking. An on/off row in the
+    /// settings dialog.
+    pub save_on_focus_loss: bool,
+    /// The open file is saved after a pause of this many seconds since
+    /// the last edit; 0, the default, never. A row in the settings
+    /// dialog offers a few choices up to a quarter of an hour; a value
+    /// written by hand is honored as it stands, up to the same limit.
+    pub save_after_pause: u32,
+    /// Where the welcome page's tips stand in their rotation: the index
+    /// of the next tip to show. Advances each time the page shows one,
+    /// at a launch with no file or on the link under the tip.
+    pub tip: u32,
     /// How the reader last exported; None until the first export, which
     /// seeds it from the fields above. A table, so it follows the plain
     /// values and precedes the window.
@@ -98,12 +125,18 @@ impl Default for Config {
             body_size: 22.0,
             code_size: 20.0,
             last_dir: String::new(),
-            sidebar_open: false,
+            sidebar_open: true,
             sidebar_width: crate::ui::sidebar::DEFAULT_WIDTH,
             sidebar_tab: crate::ui::sidebar::Tab::Files,
+            show_hidden: false,
             justify: true,
             justify_markdown: false,
             ui_scale: 1.0,
+            line_numbers: false,
+            word_count: false,
+            save_on_focus_loss: false,
+            save_after_pause: 0,
+            tip: 0,
             export: None,
             window: None,
         }
@@ -120,6 +153,13 @@ pub fn browse_dir(candidates: impl IntoIterator<Item = Option<PathBuf>>) -> Path
         .flatten()
         .find(|dir| dir.is_dir())
         .unwrap_or_else(|| PathBuf::from("."))
+}
+
+/// The user's home folder, the last browsing candidate before the
+/// working directory: a packaged app may start in a system folder
+/// (System32 for a Store app), which is no place to browse from.
+pub fn home_dir() -> Option<PathBuf> {
+    directories::BaseDirs::new().map(|base| base.home_dir().to_path_buf())
 }
 
 /// Location of the config file, None when the platform gives no home.
@@ -160,10 +200,55 @@ impl Positions {
     }
 
     pub fn load_from(path: &Path) -> Positions {
-        std::fs::read_to_string(path)
-            .ok()
-            .and_then(|text| toml::from_str(&text).ok())
-            .unwrap_or_default()
+        Self::read(path).unwrap_or_default()
+    }
+
+    /// The list of `path`, None for a file that is missing or does not
+    /// read.
+    fn read(path: &Path) -> Option<Positions> {
+        let text = std::fs::read_to_string(path).ok()?;
+        // A file cut down to nothing, by a full disk or by hand, is no
+        // empty list: it reads as a file that does not read.
+        if text.trim().is_empty() {
+            return None;
+        }
+        toml::from_str(&text).ok()
+    }
+
+    /// Takes the list as the file has it now: another window may have
+    /// filed its book since this one read it. A file that does not read
+    /// leaves the list in memory as it is.
+    pub fn refresh(&mut self) {
+        if let Some(fresh) = positions_path().and_then(|p| Self::read(&p)) {
+            *self = fresh;
+        }
+    }
+
+    /// Files a book's place and writes the list. Every window shares the
+    /// file, a book in each: the place goes into the list as the file
+    /// has it at this moment, or the window that closes last would put
+    /// back every other book's place as its own launch had read it.
+    pub fn file(&mut self, key: &str, offset: usize, direction: crate::layout::DirectionMode) {
+        match positions_path() {
+            Some(p) => self.file_to(&p, key, offset, direction),
+            None => self.remember(key, offset, direction),
+        }
+    }
+
+    pub fn file_to(
+        &mut self,
+        path: &Path,
+        key: &str,
+        offset: usize,
+        direction: crate::layout::DirectionMode,
+    ) {
+        with_lock(path, || {
+            if let Some(fresh) = Self::read(path) {
+                *self = fresh;
+            }
+            self.remember(key, offset, direction);
+            self.save_to(path);
+        });
     }
 
     pub fn save(&self) {
@@ -216,8 +301,33 @@ impl Positions {
     }
 }
 
+/// The settings as this Oryx last read or wrote them, the reference a
+/// save compares against. A second window shares the file, and each
+/// window writes at its exit at least (the window's size): a save puts
+/// in the settings this window changed and leaves the others as the
+/// file has them, or the last window to close would put back every
+/// setting as its own launch had read it.
+static SEEN: std::sync::Mutex<Option<toml::Table>> = std::sync::Mutex::new(None);
+
 pub fn load() -> Config {
-    path().map(|p| load_from(&p)).unwrap_or_default()
+    let (config, seen) = match path() {
+        Some(p) => load_with_baseline(&p),
+        None => (Config::default(), toml::Table::new()),
+    };
+    *SEEN.lock().unwrap_or_else(|e| e.into_inner()) = Some(seen);
+    config
+}
+
+/// The settings of `path` with the table a later `save_changes` compares
+/// against.
+pub fn load_with_baseline(path: &Path) -> (Config, toml::Table) {
+    let config = load_from(path);
+    let seen = table_of(&config);
+    (config, seen)
+}
+
+fn table_of(config: &Config) -> toml::Table {
+    toml::Table::try_from(config).expect("config serializes")
 }
 
 pub fn load_from(path: &Path) -> Config {
@@ -248,6 +358,7 @@ impl Config {
         self.body_size = held(self.body_size, defaults.body_size, SIZE_MIN, SIZE_MAX);
         self.code_size = held(self.code_size, defaults.code_size, SIZE_MIN, SIZE_MAX);
         self.ui_scale = held(self.ui_scale, defaults.ui_scale, UI_SCALE_MIN, UI_SCALE_MAX);
+        self.save_after_pause = self.save_after_pause.min(crate::edit::autosave::PAUSE_MAX);
         self.sidebar_width = held(
             self.sidebar_width,
             defaults.sidebar_width,
@@ -262,9 +373,65 @@ impl Config {
 }
 
 pub fn save(config: &Config) {
-    if let Some(p) = path() {
-        save_to(&p, config);
+    let Some(p) = path() else {
+        return;
+    };
+    let mut seen = SEEN.lock().unwrap_or_else(|e| e.into_inner());
+    let before = seen.take().unwrap_or_default();
+    *seen = Some(save_changes(&p, config, &before));
+}
+
+/// Writes the settings that moved since `seen` into the file as it is
+/// on disk now, and answers the new reference. A setting is one
+/// top-level key, the window's table and the export's each a whole: the
+/// last window to close decides the next launch's size, as expected. A
+/// file that is missing or does not read is written whole. Keys this
+/// version does not know stay in the file.
+pub fn save_changes(path: &Path, config: &Config, seen: &toml::Table) -> toml::Table {
+    with_lock(path, || merge_changes(path, config, seen))
+}
+
+/// Holds the lock file beside `path` while `write` runs, so two windows
+/// merging into one file never read it in the same moment and drop
+/// each other's change. A lock that cannot be taken, in a folder that
+/// refuses the file, lets the write go on as before.
+fn with_lock<T>(path: &Path, write: impl FnOnce() -> T) -> T {
+    let held = std::fs::File::create(path.with_extension("lock"))
+        .and_then(|file| file.lock().map(|()| file))
+        .ok();
+    let out = write();
+    drop(held);
+    out
+}
+
+fn merge_changes(path: &Path, config: &Config, seen: &toml::Table) -> toml::Table {
+    let current = table_of(config);
+    let on_disk = std::fs::read_to_string(path)
+        .ok()
+        .and_then(|text| text.parse::<toml::Table>().ok());
+    let merged = match on_disk {
+        Some(mut table) => {
+            for key in seen.keys().chain(current.keys()) {
+                if seen.get(key) == current.get(key) {
+                    continue;
+                }
+                match current.get(key) {
+                    Some(value) => table.insert(key.clone(), value.clone()),
+                    None => table.remove(key),
+                };
+            }
+            table
+        }
+        None => current.clone(),
+    };
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
     }
+    let text = toml::to_string(&merged).expect("config serializes");
+    if let Err(err) = save::write_atomic(path, text.as_bytes()) {
+        eprintln!("oryx: cannot save config {}: {err}", path.display());
+    }
+    current
 }
 
 pub fn save_to(path: &Path, config: &Config) {
@@ -284,6 +451,160 @@ mod tests {
 
     fn temp_path(name: &str) -> PathBuf {
         std::env::temp_dir().join(format!("oryx-config-{}-{name}", std::process::id()))
+    }
+
+    /// Two windows, a book in each, one positions file: the window that
+    /// closes last wrote the list as its launch had read it, and the
+    /// other book's place was gone.
+    #[test]
+    fn two_windows_keep_each_other_s_place_in_a_book() {
+        use crate::layout::DirectionMode;
+        let path = temp_path("two-books.toml");
+        let _ = std::fs::remove_file(&path);
+        let mut a = Positions::load_from(&path);
+        let mut b = Positions::load_from(&path);
+        a.file_to(&path, "holmes", 1275, DirectionMode::default());
+        b.file_to(&path, "small", 40, DirectionMode::default());
+        let on_disk = Positions::load_from(&path);
+        assert_eq!(
+            on_disk.lookup("holmes"),
+            Some(1275),
+            "the first window's book"
+        );
+        assert_eq!(on_disk.lookup("small"), Some(40));
+        // The window that filed last now knows the other's place too,
+        // for a book it opens later.
+        assert_eq!(b.lookup("holmes"), Some(1275));
+        // A window files its own book again over its older place.
+        a.file_to(&path, "holmes", 3000, DirectionMode::default());
+        let on_disk = Positions::load_from(&path);
+        assert_eq!(on_disk.lookup("holmes"), Some(3000));
+        assert_eq!(on_disk.lookup("small"), Some(40));
+        assert_eq!(on_disk.book.len(), 2);
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn a_positions_file_that_does_not_read_keeps_the_places_in_memory() {
+        use crate::layout::DirectionMode;
+        let path = temp_path("broken-books.toml");
+        let mut held = Positions::default();
+        held.remember("kept", 12, DirectionMode::default());
+        std::fs::write(&path, "book = [broken").unwrap();
+        held.file_to(&path, "new", 7, DirectionMode::default());
+        let on_disk = Positions::load_from(&path);
+        assert_eq!(on_disk.lookup("kept"), Some(12));
+        assert_eq!(on_disk.lookup("new"), Some(7));
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn an_empty_positions_file_keeps_the_places_in_memory() {
+        use crate::layout::DirectionMode;
+        let path = temp_path("empty-books.toml");
+        let mut held = Positions::default();
+        held.remember("kept", 12, DirectionMode::default());
+        std::fs::write(&path, "").unwrap();
+        held.file_to(&path, "new", 7, DirectionMode::default());
+        let on_disk = Positions::load_from(&path);
+        assert_eq!(on_disk.lookup("kept"), Some(12));
+        assert_eq!(on_disk.lookup("new"), Some(7));
+        std::fs::remove_file(&path).unwrap();
+        std::fs::remove_file(path.with_extension("lock")).ok();
+    }
+
+    /// Two windows writing in the same moment: each read of the file
+    /// happens under the lock, so neither merge is built on a file the
+    /// other is about to replace.
+    #[test]
+    fn two_windows_saving_at_once_lose_nothing() {
+        let path = temp_path("two-windows-at-once.toml");
+        save_to(&path, &Config::default());
+        let writer = |path: PathBuf, tips: bool| {
+            std::thread::spawn(move || {
+                let (mut config, mut seen) = load_with_baseline(&path);
+                for round in 0..150u32 {
+                    if tips {
+                        config.tip = round + 1;
+                    } else {
+                        config.show_hidden = round % 2 == 1;
+                    }
+                    seen = save_changes(&path, &config, &seen);
+                }
+            })
+        };
+        let a = writer(path.clone(), true);
+        let b = writer(path.clone(), false);
+        a.join().unwrap();
+        b.join().unwrap();
+        let on_disk = load_from(&path);
+        assert_eq!(on_disk.tip, 150, "the first window's last change");
+        assert!(on_disk.show_hidden, "and the second window's");
+        std::fs::remove_file(&path).unwrap();
+        std::fs::remove_file(path.with_extension("lock")).ok();
+    }
+
+    /// Two windows share the file. Each wrote its whole memory, so the
+    /// last to close put back every setting as its launch had read it.
+    #[test]
+    fn two_windows_keep_each_other_s_settings() {
+        let path = temp_path("two-windows.toml");
+        save_to(&path, &Config::default());
+        let (mut a, mut a_seen) = load_with_baseline(&path);
+        let (mut b, mut b_seen) = load_with_baseline(&path);
+        a.show_hidden = true;
+        a.theme = "oryx-paper".to_string();
+        a_seen = save_changes(&path, &a, &a_seen);
+        // The other window closes last and writes its size, as every
+        // exit does; it never touched the two settings.
+        b.window = Some(WindowState {
+            width: 640,
+            height: 480,
+            ..WindowState::default()
+        });
+        b.tip = 7;
+        b_seen = save_changes(&path, &b, &b_seen);
+        let on_disk = load_from(&path);
+        assert!(on_disk.show_hidden, "the first window's setting stays");
+        assert_eq!(on_disk.theme, "oryx-paper");
+        assert_eq!(on_disk.tip, 7, "and the second window's own changes land");
+        assert_eq!(
+            on_disk.window.map(|w| (w.width, w.height)),
+            Some((640, 480))
+        );
+        // A setting moved and moved back is a change each time.
+        a.show_hidden = false;
+        let _ = save_changes(&path, &a, &a_seen);
+        assert!(!load_from(&path).show_hidden);
+        assert_eq!(load_from(&path).tip, 7, "the other window's tip untouched");
+        let _ = b_seen;
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn a_save_over_an_unreadable_file_writes_everything() {
+        let path = temp_path("unreadable.toml");
+        std::fs::write(&path, "theme = [broken").unwrap();
+        let (mut config, seen) = load_with_baseline(&path);
+        config.word_count = true;
+        let _ = save_changes(&path, &config, &seen);
+        let on_disk = load_from(&path);
+        assert!(on_disk.word_count);
+        assert_eq!(on_disk.theme, Config::default().theme);
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn a_save_keeps_a_key_this_version_does_not_know() {
+        let path = temp_path("newer.toml");
+        std::fs::write(&path, "from_a_newer_oryx = 3\nword_count = false\n").unwrap();
+        let (mut config, seen) = load_with_baseline(&path);
+        config.word_count = true;
+        let _ = save_changes(&path, &config, &seen);
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("from_a_newer_oryx = 3"), "{text}");
+        assert!(text.contains("word_count = true"), "{text}");
+        std::fs::remove_file(&path).unwrap();
     }
 
     #[test]
@@ -411,9 +732,15 @@ mod tests {
             sidebar_open: true,
             sidebar_width: 320.0,
             sidebar_tab: crate::ui::sidebar::Tab::Outline,
+            show_hidden: true,
             justify: false,
             justify_markdown: true,
             ui_scale: 1.15,
+            line_numbers: true,
+            word_count: true,
+            save_on_focus_loss: true,
+            save_after_pause: 5,
+            tip: 7,
             export: None,
             window: None,
         };
@@ -443,7 +770,7 @@ mod tests {
         let loaded = load_from(&path);
         std::fs::remove_file(&path).unwrap();
         assert_eq!(loaded.theme, "nord");
-        assert!(!loaded.sidebar_open, "closed until the reader opens it");
+        assert!(loaded.sidebar_open, "open until the reader closes it");
         assert_eq!(loaded.sidebar_width, crate::ui::sidebar::DEFAULT_WIDTH);
         assert_eq!(
             loaded.sidebar_tab,
@@ -681,5 +1008,94 @@ mod tests {
         assert_eq!(loaded.theme, "nord");
         assert_eq!(loaded.body_size, 22.0);
         assert_eq!(loaded.last_dir, "");
+    }
+
+    #[test]
+    fn a_fresh_config_opens_the_sidebar() {
+        assert!(
+            Config::default().sidebar_open,
+            "a first run shows the panel; the first close keeps it closed"
+        );
+    }
+
+    #[test]
+    fn the_home_folder_is_the_last_candidate_before_the_working_directory() {
+        let home = home_dir().expect("this machine has a home folder");
+        assert!(home.is_dir());
+        assert_eq!(
+            browse_dir([None, None, Some(home.clone())]),
+            home,
+            "a first run browses home, not the folder the process started in"
+        );
+    }
+
+    #[test]
+    fn a_fresh_config_starts_at_the_first_tip() {
+        assert_eq!(Config::default().tip, 0);
+        let path = temp_path("tipless.toml");
+        std::fs::write(&path, "theme = \"nord\"\n").unwrap();
+        let loaded = load_from(&path);
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(
+            loaded.tip, 0,
+            "a config from before the tips starts at the first"
+        );
+    }
+
+    #[test]
+    fn line_numbers_start_off_and_an_older_config_keeps_them_so() {
+        assert!(!Config::default().line_numbers);
+        let path = temp_path("no-line-numbers-key.toml");
+        std::fs::write(&path, "theme = \"nord\"\n").unwrap();
+        let loaded = load_from(&path);
+        std::fs::remove_file(&path).unwrap();
+        assert!(!loaded.line_numbers);
+    }
+
+    #[test]
+    fn the_word_count_starts_off_and_an_older_config_keeps_it_so() {
+        assert!(!Config::default().word_count);
+        let path = temp_path("no-word-count-key.toml");
+        std::fs::write(&path, "theme = \"nord\"\n").unwrap();
+        let loaded = load_from(&path);
+        std::fs::remove_file(&path).unwrap();
+        assert!(!loaded.word_count);
+    }
+
+    #[test]
+    fn autosave_starts_off_and_an_older_config_keeps_it_so() {
+        let defaults = Config::default();
+        assert!(!defaults.save_on_focus_loss);
+        assert_eq!(defaults.save_after_pause, 0);
+        let path = temp_path("no-autosave-keys.toml");
+        std::fs::write(&path, "theme = \"nord\"\n").unwrap();
+        let loaded = load_from(&path);
+        std::fs::remove_file(&path).unwrap();
+        assert!(!loaded.save_on_focus_loss);
+        assert_eq!(loaded.save_after_pause, 0);
+    }
+
+    #[test]
+    fn a_hand_edited_pause_is_held_to_the_longest_choice() {
+        let path = temp_path("long-pause.toml");
+        std::fs::write(&path, "save_after_pause = 3600\n").unwrap();
+        let loaded = load_from(&path);
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(loaded.save_after_pause, 900);
+        let path = temp_path("odd-pause.toml");
+        std::fs::write(&path, "save_after_pause = 7\n").unwrap();
+        let loaded = load_from(&path);
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(loaded.save_after_pause, 7, "kept as written");
+    }
+
+    #[test]
+    fn hidden_files_start_hidden_and_an_older_config_keeps_it_so() {
+        assert!(!Config::default().show_hidden);
+        let path = temp_path("no-hidden-key.toml");
+        std::fs::write(&path, "theme = \"nord\"\n").unwrap();
+        let loaded = load_from(&path);
+        std::fs::remove_file(&path).unwrap();
+        assert!(!loaded.show_hidden);
     }
 }

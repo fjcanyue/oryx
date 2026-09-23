@@ -40,6 +40,24 @@ pub enum FileKind {
     Unknown,
 }
 
+/// The kind of a file with its text at hand: `detect` by name, and for
+/// a name that says nothing, what the text says about itself (a
+/// shebang, a modeline, a diff header, a JSON or INI shape) as a code
+/// file of that grammar. Plain when nothing answers. The open path and
+/// the editor's round trip use it; the sidebar keeps the cheap `detect`.
+pub fn detect_with_text(path: &Path, text: &str) -> FileKind {
+    match detect(path) {
+        FileKind::Unknown => {
+            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            match crate::style::highlight::sniff_language(name, text) {
+                Some(grammar) => FileKind::Code(grammar),
+                None => FileKind::Unknown,
+            }
+        }
+        kind => kind,
+    }
+}
+
 pub fn detect(path: &Path) -> FileKind {
     if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
         if let Ok(i) = WELL_KNOWN_NAMES.binary_search_by_key(&name, |(k, _)| k) {
@@ -84,9 +102,56 @@ pub fn detect(path: &Path) -> FileKind {
 
 /// A NUL byte near the start is the standard test, the one `git` and
 /// `grep -I` use: no text encoding Oryx renders produces one, and every
-/// container and executable format has one in its header.
+/// container and executable format has one in its header. A file whose
+/// head has none but is mostly bytes no text reader can show, invalid
+/// UTF-8 and control characters, is binary too: a cartridge ROM whose
+/// first zero sits past the window read that way, and its random
+/// characters had the shaper load every font on the system. Text keeps
+/// such bytes rare, a heavily accented Latin-1 file at 17 percent, so
+/// the line is drawn at 30.
 fn is_binary(bytes: &[u8]) -> bool {
-    bytes[..bytes.len().min(SNIFF)].contains(&0)
+    refusal(bytes).is_some()
+}
+
+/// Why a file's head is refused, in the words that end the message. A
+/// zero byte is no text in any encoding. A head of unreadable bytes
+/// without one may be text in an encoding older than UTF-8 (Cyrillic
+/// in CP1251 reads 83 percent unreadable, Japanese in Shift-JIS 55),
+/// which Oryx does not read: the message says what is true of both.
+fn refusal(bytes: &[u8]) -> Option<&'static str> {
+    let head = &bytes[..bytes.len().min(SNIFF)];
+    if head.contains(&0) {
+        return Some("is not a text file");
+    }
+    let controls = |text: &[u8]| {
+        text.iter()
+            .filter(|&&b| {
+                (b < 0x20 && !matches!(b, b'\t' | b'\n' | b'\r' | 0x0c | 0x1b)) || b == 0x7f
+            })
+            .count()
+    };
+    let mut unreadable = 0;
+    let mut rest = head;
+    while !rest.is_empty() {
+        match std::str::from_utf8(rest) {
+            Ok(_) => {
+                unreadable += controls(rest);
+                break;
+            }
+            Err(err) => {
+                let valid = err.valid_up_to();
+                unreadable += controls(&rest[..valid]);
+                // A sequence the window cut short is the window's fault,
+                // not the file's.
+                let Some(bad) = err.error_len() else {
+                    break;
+                };
+                unreadable += bad;
+                rest = &rest[valid + bad..];
+            }
+        }
+    }
+    (unreadable * 10 > head.len() * 3).then_some("is not UTF-8 text")
 }
 
 /// Whether a file on disk holds text, read from its first bytes. A file
@@ -182,10 +247,17 @@ pub struct Opened {
     /// replacement. Editing refuses such a file: byte fidelity cannot
     /// be promised back to disk over a lossy read.
     pub lossy: bool,
-    /// Offsets in the normalized text of each newline that was CRLF in
-    /// the file bytes. The splice ledger restores them on save, so the
-    /// normalization the viewer needs never reaches the disk.
+    /// Offsets in the normalized text of each newline the file bytes
+    /// had returns before, one entry per return: a Windows line break
+    /// lists its newline once, a damaged CR CR LF twice. The splice
+    /// ledger restores them on save, so the normalization the viewer
+    /// needs never reaches the disk.
     pub crlf: Vec<u32>,
+    /// The file breaks its lines with CR alone, the classic Mac OS way,
+    /// and has no LF at all: the text reads with LF in their place, and
+    /// the splice ledger writes CR back on save, for new lines too. A
+    /// file with any LF keeps a lone CR as text.
+    pub cr: bool,
     /// The file opened with a UTF-8 byte order mark, stripped from the
     /// text; the splice ledger writes it back first on save.
     pub bom: bool,
@@ -251,11 +323,12 @@ pub fn open(path: &Path, deadline: Option<Instant>) -> anyhow::Result<Opened> {
             toc,
             lossy: false,
             crlf: Vec::new(),
+            cr: false,
             bom: false,
         });
     }
-    if is_binary(&bytes) {
-        anyhow::bail!("{} is not a text file", path.display());
+    if let Some(why) = refusal(&bytes) {
+        anyhow::bail!("{} {why}", path.display());
     }
     let text = String::from_utf8_lossy(&bytes);
     let lossy = matches!(text, std::borrow::Cow::Owned(_));
@@ -271,25 +344,40 @@ pub fn open(path: &Path, deadline: Option<Instant>) -> anyhow::Result<Opened> {
     } else {
         text
     };
-    // Windows files carry CRLF; the plain-text path strips returns per
-    // line, and everything downstream (offsets, rendering, copy as
-    // markdown) assumes the source is clean of them. Each stripped
-    // return leaves its normalized offset behind, so the splice ledger
-    // can put every untouched ending back verbatim on save.
-    let (text, crlf) = if text.contains("\r\n") {
+    // Windows files carry CRLF, and a damaged file a run of returns
+    // before each line break (CR CR LF, an old Mac and a Windows
+    // conversion on top of each other). Every return before a line
+    // break leaves the text: everything downstream (offsets, the
+    // editor's line math, rendering, copy as markdown) assumes the
+    // source is clean of them. Each stripped return leaves the line
+    // break's normalized offset behind, one entry per return, so the
+    // splice ledger can put every untouched ending back verbatim on
+    // save. A return with no line break after it is text.
+    let (text, crlf, cr) = if text.contains("\r\n") {
         let mut out = String::with_capacity(text.len());
         let mut crlf = Vec::new();
-        let mut rest = &*text;
-        while let Some(i) = rest.find("\r\n") {
-            out.push_str(&rest[..i]);
-            crlf.push(out.len() as u32);
+        for piece in text.split_inclusive('\n') {
+            let Some(line) = piece.strip_suffix('\n') else {
+                out.push_str(piece);
+                break;
+            };
+            let head = line.trim_end_matches('\r');
+            out.push_str(head);
+            for _ in head.len()..line.len() {
+                crlf.push(out.len() as u32);
+            }
             out.push('\n');
-            rest = &rest[i + 2..];
         }
-        out.push_str(rest);
-        (std::borrow::Cow::Owned(out), crlf)
+        (std::borrow::Cow::Owned(out), crlf, false)
+    } else if text.contains('\r') && !text.contains('\n') {
+        // A classic Mac OS file: CR alone breaks its lines.
+        (
+            std::borrow::Cow::Owned(text.replace('\r', "\n")),
+            Vec::new(),
+            true,
+        )
     } else {
-        (text, Vec::new())
+        (text, Vec::new(), false)
     };
     let mut streamed = false;
     let mut document = match detect(path) {
@@ -311,7 +399,10 @@ pub fn open(path: &Path, deadline: Option<Instant>) -> anyhow::Result<Opened> {
             unreachable!("books returned before the sniff")
         }
         FileKind::Undisplayable => unreachable!("refused before the sniff"),
-        FileKind::Unknown => code_document(None, &text),
+        FileKind::Unknown => match detect_with_text(path, &text) {
+            FileKind::Code(grammar) => code_document(Some(grammar), &text),
+            _ => code_document(None, &text),
+        },
     };
     let pending = apply_budget(&mut document, deadline);
     Ok(Opened {
@@ -322,6 +413,7 @@ pub fn open(path: &Path, deadline: Option<Instant>) -> anyhow::Result<Opened> {
         toc: Vec::new(),
         lossy,
         crlf,
+        cr,
         bom,
     })
 }
@@ -423,6 +515,23 @@ pub fn fold(doc: &mut Document, arrival: &Arrival) {
     }
 }
 
+/// `text` with every return before a line break removed, the way the
+/// load cleans a file: what pasted text goes through, so a line break
+/// is always one byte inside the editor.
+pub fn without_returns(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for piece in text.split_inclusive('\n') {
+        match piece.strip_suffix('\n') {
+            Some(line) => {
+                out.push_str(line.trim_end_matches('\r'));
+                out.push('\n');
+            }
+            None => out.push_str(piece),
+        }
+    }
+    out
+}
+
 /// A short notice (an open error) rendered as a plain document.
 pub fn message(text: &str) -> Document {
     plain_document(text)
@@ -451,15 +560,13 @@ fn source_lines(text: &str) -> Vec<Range<u32>> {
 /// The whole file as a single code block; the budget pass highlights it.
 /// No token means no grammar, so the block renders in the code font
 /// unstyled. The lines are ranges into the source, so the file's text
-/// is held once.
+/// is held once. Every line is a row, trailing empty lines included, so
+/// an Enter at the end of the file opens a row the page can scroll to;
+/// the final newline ends the last row and opens none.
 pub(crate) fn code_document(token: Option<&str>, text: &str) -> Document {
-    let mut lines = source_lines(text);
-    while lines.last().is_some_and(|l| l.is_empty()) {
-        lines.pop();
-    }
     let mut block = Block::plain(BlockKind::CodeBlock {
         language: token.map(str::to_string),
-        lines: CodeBody::verbatim(lines),
+        lines: CodeBody::verbatim(source_lines(text)),
         highlights: Vec::new(),
         exact: 0,
     });
@@ -566,10 +673,24 @@ fn flush_plain(blocks: &mut Vec<Block>, spans: &mut Vec<Span>) {
 /// through to the content sniff. A suffixed variant (`Dockerfile.dev`)
 /// stays unknown and still opens as plain code through the sniff.
 static WELL_KNOWN_NAMES: &[(&str, &str)] = &[
+    (".bash_login", "sh"),
+    (".bash_logout", "sh"),
+    (".bash_profile", "sh"),
+    (".bashrc", "sh"),
+    (".gitconfig", "ini"),
+    (".gitmodules", "ini"),
+    (".npmrc", "ini"),
+    (".profile", "sh"),
+    (".zlogin", "sh"),
+    (".zprofile", "sh"),
+    (".zshenv", "sh"),
+    (".zshrc", "sh"),
     ("Containerfile", "dockerfile"),
     ("Dockerfile", "dockerfile"),
     ("GNUmakefile", "makefile"),
+    ("Jenkinsfile", "groovy"),
     ("Makefile", "makefile"),
+    ("PKGBUILD", "sh"),
     ("makefile", "makefile"),
 ];
 
@@ -691,8 +812,82 @@ static CODE_EXTENSIONS: &[(&str, &str)] = &[
     ("zsh", "bash"),
 ];
 
+/// The name of the temporary file a text piped into Oryx is written
+/// to: `piped` with the extension the asked kind names (`--as md`), or
+/// the one the text names by itself, or `txt`. The ordinary open path
+/// takes it from there.
+pub fn piped_name(kind: Option<&str>, text: &str) -> String {
+    let extension = match kind {
+        Some(kind) => kind.to_ascii_lowercase(),
+        None => crate::style::highlight::sniff_extension(text)
+            .unwrap_or("txt")
+            .to_string(),
+    };
+    format!("piped.{extension}")
+}
+
+/// Whether a kind asked for on the command line can stand as a file
+/// extension: letters, digits, and the few marks grammars use (`c++`,
+/// `objective-c`, `c#`).
+pub fn kind_is_plain(kind: &str) -> bool {
+    (1..=32).contains(&kind.len())
+        && kind
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || "+-#_".contains(c))
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_piped_text_is_named_by_what_it_is() {
+        use super::{detect, piped_name, FileKind};
+        use std::path::Path;
+        let diff = "diff --git a/src/app.rs b/src/app.rs\nindex 1d7918d..2323a24 100644\n--- a/src/app.rs\n+++ b/src/app.rs\n@@ -1,3 +1,4 @@\n fn main() {\n+    run();\n }\n";
+        assert_eq!(piped_name(None, diff), "piped.diff");
+        assert_eq!(
+            piped_name(None, "{\n  \"name\": \"oryx\",\n  \"fast\": true\n}\n"),
+            "piped.json"
+        );
+        assert_eq!(piped_name(None, "#!/bin/sh\necho hi\n"), "piped.sh");
+        assert_eq!(
+            piped_name(None, "#!/usr/bin/env python3\nprint(1)\n"),
+            "piped.py"
+        );
+        assert_eq!(
+            piped_name(None, "Just a few words.\nAnd a second line.\n"),
+            "piped.txt"
+        );
+        assert_eq!(piped_name(None, ""), "piped.txt");
+        assert_eq!(
+            piped_name(Some("md"), diff),
+            "piped.md",
+            "the asked kind wins"
+        );
+        assert_eq!(piped_name(Some("RS"), "fn main() {}"), "piped.rs");
+        assert_eq!(detect(Path::new("piped.md")), FileKind::Markdown);
+        assert!(matches!(detect(Path::new("piped.diff")), FileKind::Code(_)));
+        assert_eq!(detect(Path::new("piped.txt")), FileKind::Text);
+    }
+
+    #[test]
+    fn a_kind_is_letters_digits_and_a_few_marks() {
+        use super::kind_is_plain;
+        for kind in ["md", "diff", "c++", "objective-c", "c#", "f90", "x_y"] {
+            assert!(kind_is_plain(kind), "{kind}");
+        }
+        for kind in [
+            "",
+            "../x",
+            "a/b",
+            "a b",
+            "a.b",
+            "md\n",
+            "x".repeat(40).as_str(),
+        ] {
+            assert!(!kind_is_plain(kind), "{kind:?}");
+        }
+    }
+
     use super::*;
     use crate::doc::model::BlockKind;
     use std::path::PathBuf;
@@ -754,6 +949,48 @@ mod tests {
     }
 
     #[test]
+    fn a_code_document_keeps_its_trailing_empty_lines() {
+        let rows = |token: &str, text: &str| match &code_document(Some(token), text).blocks[0].kind
+        {
+            BlockKind::CodeBlock { lines, .. } => lines.len(),
+            _ => unreachable!(),
+        };
+        assert_eq!(rows("rs", "a\nb\n\n\n"), 4, "two empty lines, two rows");
+        assert_eq!(
+            rows("rs", "a\nb\n"),
+            2,
+            "the final newline ends the last row and opens none"
+        );
+        assert_eq!(rows("rs", "a\nb"), 2);
+        assert_eq!(rows("rs", ""), 0);
+        assert_eq!(
+            rows("md", "# t\n\n\n"),
+            3,
+            "the source view of a markdown file too"
+        );
+    }
+
+    #[test]
+    fn a_file_ending_in_blank_lines_round_trips() {
+        let dir = std::env::temp_dir().join("oryx_trailing_blank_lines");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("tail.rs");
+        std::fs::write(&path, "a\n\n\n").unwrap();
+        let opened = open(&path, None).unwrap();
+        std::fs::remove_dir_all(&dir).ok();
+        let BlockKind::CodeBlock { lines, .. } = &opened.document.blocks[0].kind else {
+            panic!("a code file");
+        };
+        assert_eq!(
+            lines.len(),
+            3,
+            "a row per line, the two empty ones included"
+        );
+        let led = crate::edit::splice::Ledger::new(opened.document.source.clone(), opened.crlf);
+        assert_eq!(led.emit(), b"a\n\n\n", "the bytes come back untouched");
+    }
+
+    #[test]
     fn crlf_positions_are_recorded_for_the_ledger() {
         let dir = std::env::temp_dir().join(format!("oryx-crlf-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -771,6 +1008,64 @@ mod tests {
         let opened = open(&clean, None).unwrap();
         assert!(opened.crlf.is_empty());
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A damaged file ends its lines in CR CR LF, an old Mac and a
+    /// Windows conversion on top of each other. Every return before a
+    /// line break leaves the text, so the editor's line math sees one
+    /// byte per line break, and each is on record so the save writes
+    /// the line back as it was.
+    #[test]
+    fn stray_returns_before_a_line_break_leave_the_text_and_go_on_record() {
+        let dir = std::env::temp_dir().join(format!("oryx-crcrlf-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("damaged.htm");
+        let bytes = b"one\r\r\ntwo\r\nthree\n\r\r\n";
+        std::fs::write(&path, bytes).unwrap();
+        let opened = open(&path, None).unwrap();
+        std::fs::remove_dir_all(&dir).ok();
+        assert_eq!(&*opened.document.source, "one\ntwo\nthree\n\n");
+        assert_eq!(
+            opened.crlf,
+            vec![3, 3, 7, 14, 14],
+            "one entry per return, at the offset of the line break it stood before"
+        );
+        let led = crate::edit::splice::Ledger::new(opened.document.source.clone(), opened.crlf);
+        assert_eq!(led.emit(), bytes, "the bytes come back untouched");
+    }
+
+    /// A classic Mac OS file breaks its lines with CR alone and has no
+    /// LF at all. It reads as lines, is marked, and saves with CR again.
+    #[test]
+    fn a_file_of_cr_line_breaks_reads_as_lines_and_is_marked() {
+        let dir = std::env::temp_dir().join(format!("oryx-cr-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("mac.txt");
+        let bytes = b"one\rtwo\r\rfour\r";
+        std::fs::write(&path, bytes).unwrap();
+        let opened = open(&path, None).unwrap();
+        assert_eq!(&*opened.document.source, "one\ntwo\n\nfour\n");
+        assert!(opened.cr, "the file's line break is CR");
+        assert!(opened.crlf.is_empty());
+        let led = crate::edit::splice::Ledger::new(opened.document.source.clone(), opened.crlf)
+            .with_cr(opened.cr);
+        assert_eq!(led.emit(), bytes, "the bytes come back untouched");
+        // A file with any LF keeps its lone returns as text: only a file
+        // with no LF at all is a CR file.
+        let mixed = dir.join("mixed.txt");
+        std::fs::write(&mixed, b"one\rtwo\nthree\n").unwrap();
+        let opened = open(&mixed, None).unwrap();
+        assert_eq!(&*opened.document.source, "one\rtwo\nthree\n");
+        assert!(!opened.cr);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn pasted_text_loses_its_returns_before_line_breaks_only() {
+        assert_eq!(without_returns("a\r\nb\r\r\nc\n"), "a\nb\nc\n");
+        assert_eq!(without_returns("a\rb\n"), "a\rb\n", "a lone return is text");
+        assert_eq!(without_returns("tail\r"), "tail\r", "no break, no strip");
+        assert_eq!(without_returns(""), "");
     }
 
     #[test]
@@ -1008,6 +1303,42 @@ mod tests {
         let mut late = vec![b'a'; SNIFF + 16];
         late[SNIFF + 8] = 0;
         assert!(!is_binary(&late), "a NUL past the window does not count");
+    }
+
+    /// A ROM whose first zero byte sits past the window: its head is
+    /// unreadable bytes from end to end, which no text file is. A
+    /// heavily accented Latin-1 file, a log full of escape codes and a
+    /// window cut inside a character all stay text.
+    #[test]
+    fn a_head_of_unreadable_bytes_marks_binary_without_a_nul() {
+        let mut rom = vec![0xFFu8; SNIFF];
+        rom.extend_from_slice(b"\x00\x00");
+        assert!(
+            is_binary(&rom),
+            "all high bytes, the first zero past the window"
+        );
+        let mut code = Vec::new();
+        for i in 0..SNIFF {
+            code.push((i * 7 % 250) as u8 + 1);
+        }
+        assert!(
+            is_binary(&code),
+            "machine code without a zero in the window"
+        );
+        let latin = b"caf\xe9 au lait, na\xefve r\xe9sum\xe9, cr\xe8me br\xfbl\xe9e.\n".repeat(200);
+        assert!(!is_binary(&latin), "Latin-1 text reads lossy, not binary");
+        let log = b"\x1b[31mERROR\x1b[0m something failed\n\x1b[32mOK\x1b[0m\n".repeat(300);
+        assert!(!is_binary(&log), "escape codes are text");
+        let mut cut = "\u{e9}".repeat(SNIFF).into_bytes();
+        cut.truncate(SNIFF);
+        assert!(
+            !is_binary(&cut),
+            "the window cutting a character is no fault"
+        );
+        let mostly_control: Vec<u8> = (0..SNIFF)
+            .map(|i| if i % 2 == 0 { 1 } else { b'a' })
+            .collect();
+        assert!(is_binary(&mostly_control), "half control characters");
     }
 
     fn temp_file(name: &str, content: &str) -> PathBuf {
@@ -1280,6 +1611,22 @@ mod tests {
     }
 
     #[test]
+    fn a_text_in_an_old_encoding_is_refused_as_not_utf8() {
+        // Russian prose in CP1251: every letter is a high byte, no zero
+        // byte anywhere. It is text, in an encoding Oryx does not read.
+        let line = b"\xc2\xf1\xe5 \xf1\xf7\xe0\xf1\xf2\xeb\xe8\xe2\xfb\xe5 \xf1\xe5\xec\xfc\xe8.\n";
+        let path =
+            std::env::temp_dir().join(format!("oryx-load-{}-cp1251.txt", std::process::id()));
+        std::fs::write(&path, line.repeat(40)).unwrap();
+        let Err(err) = open(&path, None) else {
+            panic!("a CP1251 file opened")
+        };
+        let err = err.to_string();
+        std::fs::remove_file(&path).unwrap();
+        assert!(err.ends_with("cp1251.txt is not UTF-8 text"), "{err}");
+    }
+
+    #[test]
     fn a_binary_file_is_refused_by_name() {
         let path = std::env::temp_dir().join(format!("oryx-load-{}-t.bin", std::process::id()));
         std::fs::write(&path, b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR").unwrap();
@@ -1321,5 +1668,52 @@ mod tests {
         for e in ["md", "markdown", "txt", "rs", "py", "toml", "yaml"] {
             assert!(exts.contains(&e), "{e} missing");
         }
+    }
+
+    /// The common shell and git files without an extension are named in
+    /// the table, since the grammars know only some of them.
+    #[test]
+    fn well_known_dotfiles_have_their_token() {
+        for (name, token) in [
+            (".zshrc", "sh"),
+            (".zshenv", "sh"),
+            (".bash_profile", "sh"),
+            (".profile", "sh"),
+            ("PKGBUILD", "sh"),
+            (".gitconfig", "ini"),
+            (".gitmodules", "ini"),
+            ("Jenkinsfile", "groovy"),
+        ] {
+            assert_eq!(detect(Path::new(name)), FileKind::Code(token), "{name}");
+        }
+    }
+
+    /// Opened, a file without an extension carries the grammar its text
+    /// or its name gives away, and prose stays a plain code document.
+    #[test]
+    fn files_without_an_extension_open_with_their_colors() {
+        let dir = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/noext"));
+        let language = |name: &str| -> Option<String> {
+            let opened = open(&dir.join(name), None).expect(name);
+            match &opened.document.blocks[0].kind {
+                BlockKind::CodeBlock { language, .. } => language.clone(),
+                other => panic!("{name}: not a code document: {other:?}"),
+            }
+        };
+        assert_eq!(language("script").as_deref(), Some("Python"));
+        assert_eq!(language("modeline").as_deref(), Some("Ruby"));
+        assert_eq!(language("emacs").as_deref(), Some("Lisp"));
+        assert_eq!(language(".bashrc").as_deref(), Some("sh"));
+        assert_eq!(language(".zshrc").as_deref(), Some("sh"));
+        assert_eq!(language(".gitconfig").as_deref(), Some("ini"));
+        assert_eq!(language("patch").as_deref(), Some("Diff"));
+        assert_eq!(language("settings").as_deref(), Some("JSON"));
+        assert_eq!(language("config").as_deref(), Some("INI"));
+        assert_eq!(language("README"), None, "prose stays plain");
+        assert_eq!(
+            detect_with_text(&dir.join("script"), "#!/usr/bin/env python3\n"),
+            FileKind::Code("Python"),
+            "the kind with the text at hand, for the editor's round trip"
+        );
     }
 }

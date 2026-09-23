@@ -17,6 +17,82 @@ pub fn enter_text(line: &str, col: usize) -> String {
     text
 }
 
+/// The bytes Shift+Enter inserts in a markdown source with the caret
+/// `col` bytes into `line`: markdown's hard break, two spaces at the
+/// line's end, less the spaces already standing before the caret, then
+/// the new line opened where the text continues. A paragraph carries
+/// its indentation, a quote its marks, and a list item the columns of
+/// its marker and task box as spaces, so the break stays inside the
+/// item and opens no new one. None when no text stands between the
+/// line's prefix and the caret: a break there would end nothing, and
+/// two spaces alone on a line are a blank line.
+pub fn hard_break(line: &str, col: usize) -> Option<String> {
+    let col = col.min(line.len());
+    let (_, quote) = marker_seat(line);
+    let marker = list_marker(&line[quote..]).map_or(0, |(len, _)| len);
+    let prefix = quote + marker;
+    if col < prefix || line[prefix..col].trim().is_empty() {
+        return None;
+    }
+    let head = &line[..col];
+    let standing = head.len() - head.trim_end_matches(' ').len();
+    let mut text = " ".repeat(2usize.saturating_sub(standing));
+    text.push('\n');
+    text.push_str(&line[..quote]);
+    text.push_str(&" ".repeat(marker));
+    Some(text)
+}
+
+/// The caret's line as Ctrl+C and Ctrl+X take it when nothing is
+/// selected.
+#[derive(Debug, PartialEq, Eq)]
+pub struct LineTake {
+    /// The bytes a cut removes.
+    pub cut: std::ops::Range<usize>,
+    /// The clipboard's text: the line and one newline, so a paste at a
+    /// line's start puts a whole line back.
+    pub text: String,
+    /// Where a cut leaves the caret.
+    pub caret: usize,
+}
+
+/// The line holding `caret`. A cut removes the line through its own
+/// ending, and the caret stands where the next line moved up to. The
+/// last line has no ending of its own: it takes the one before it, so
+/// no empty line is left behind, and the caret goes to the start of
+/// the line that is now last. None in an empty file.
+pub fn line_take(source: &str, caret: usize) -> Option<LineTake> {
+    if source.is_empty() {
+        return None;
+    }
+    let caret = caret.min(source.len());
+    let start = source[..caret].rfind('\n').map_or(0, |i| i + 1);
+    let end = source[caret..]
+        .find('\n')
+        .map_or(source.len(), |i| caret + i);
+    let text = format!("{}\n", &source[start..end]);
+    let (cut, caret) = if end < source.len() {
+        (start..end + 1, start)
+    } else if start > 0 {
+        let above = source[..start - 1].rfind('\n').map_or(0, |i| i + 1);
+        (start - 1..end, above)
+    } else {
+        (start..end, 0)
+    };
+    Some(LineTake { cut, text, caret })
+}
+
+/// Where a line taken by `line_take` is pasted with the caret at
+/// `caret` and nothing selected: at the start of the caret's line,
+/// wherever the caret stands in it, as VS Code and Zed do, so a whole
+/// line never splits another. Answers the insert position and the
+/// caret after it, on the letter it was on.
+pub fn line_paste(source: &str, caret: usize, text: &str) -> (usize, usize) {
+    let caret = caret.min(source.len());
+    let start = source[..caret].rfind('\n').map_or(0, |i| i + 1);
+    (start, caret + text.len())
+}
+
 /// What Enter does after a markdown marker: continue the construct on
 /// the new line, or end it when the item stands empty.
 #[derive(Debug, PartialEq, Eq)]
@@ -116,14 +192,221 @@ fn list_marker(rest: &str) -> Option<(usize, String)> {
 /// True when Tab nests the whole item rather than inserting: the line
 /// is a markdown list item, quoted or not, and the caret sits at or
 /// before its first content byte, which is where Enter's continuation
-/// leaves it. A bare quote line never nests, since four leading spaces
-/// would turn the quote into an indented code block.
+/// leaves it. A bare quote line never nests: it holds no item, and
+/// four columns after its marks would make its text a code block.
 pub fn tab_nests(line: &str, col: usize) -> bool {
     let (_, quote) = marker_seat(line);
     match list_marker(&line[quote..]) {
         Some((len, _)) => col <= quote + len,
         None => false,
     }
+}
+
+/// Why Tab leaves a run of markdown list items where they are.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NestRefusal {
+    /// No list item stands above to nest under.
+    NoItemAbove,
+    /// The first item is already a level below the item above it.
+    AlreadyNested,
+}
+
+impl NestRefusal {
+    pub fn message(self) -> &'static str {
+        match self {
+            NestRefusal::NoItemAbove => "No list item above to nest under",
+            NestRefusal::AlreadyNested => "Already nested under the item above",
+        }
+    }
+}
+
+/// The columns a line's leading whitespace spans, a tab reaching the
+/// next multiple of four as markdown counts it.
+fn indent_columns(indent: &str) -> usize {
+    indent.bytes().fold(0, |col, b| match b {
+        b'\t' => col + 4 - col % 4,
+        _ => col + 1,
+    })
+}
+
+/// A line's quote marks: how many, and the byte where its own text
+/// starts, after each `>` and the one space that belongs to it. Up to
+/// three spaces may stand before the first mark; with four columns the
+/// line is no quote, and an unquoted line answers zero twice.
+fn quote_seat(line: &str) -> (usize, usize) {
+    let b = line.as_bytes();
+    let lead = b.iter().take_while(|c| **c == b' ').count();
+    if lead > 3 {
+        return (0, 0);
+    }
+    let (mut depth, mut i) = (0, lead);
+    while b.get(i) == Some(&b'>') {
+        depth += 1;
+        i += 1;
+        if b.get(i) == Some(&b' ') {
+            i += 1;
+        }
+    }
+    if depth == 0 {
+        (0, 0)
+    } else {
+        (depth, i)
+    }
+}
+
+/// The indentation of a list item in columns, given the line's text
+/// after its quote marks; None for any other line.
+fn item_columns(text: &str) -> Option<usize> {
+    let (indent, quote) = marker_seat(text);
+    (quote == indent && list_marker(&text[indent..]).is_some())
+        .then(|| indent_columns(&text[..indent]))
+}
+
+/// The column a list item's own text starts at: its indent, its marker
+/// and the space after, the column a nested item has to reach. A
+/// bullet's is two, `1.` has three, `10.` four.
+fn item_content_column(text: &str) -> Option<usize> {
+    let (indent, quote) = marker_seat(text);
+    if quote != indent {
+        return None;
+    }
+    let rest = &text[indent..];
+    list_marker(rest)?;
+    let head = if rest.starts_with(['-', '*', '+']) {
+        1
+    } else {
+        rest.bytes().take_while(u8::is_ascii_digit).count() + 1
+    };
+    let space = rest[head..]
+        .bytes()
+        .take_while(|c| *c == b' ' || *c == b'\t')
+        .count();
+    Some(indent_columns(&text[..indent]) + head + space)
+}
+
+/// The fence a line opens or closes, given the line's text after its
+/// quote marks: a backtick or a tilde run of three at the margin, up to
+/// three spaces in.
+fn fence_mark(text: &str) -> Option<char> {
+    let at_margin = text.trim_start_matches(' ');
+    if text.len() - at_margin.len() > 3 {
+        return None;
+    }
+    if at_margin.starts_with("```") {
+        Some('`')
+    } else if at_margin.starts_with("~~~") {
+        Some('~')
+    } else {
+        None
+    }
+}
+
+/// Where a YAML frontmatter ends: the offset past its closing `---`
+/// line, for a file that opens with one.
+fn frontmatter_end(source: &str) -> Option<usize> {
+    let mut at = 0;
+    for (index, line) in source.split_inclusive('\n').enumerate() {
+        let text = line.trim_end_matches(['\n', '\r']);
+        if index == 0 {
+            if text != "---" {
+                return None;
+            }
+        } else if text == "---" {
+            return Some(at + line.len());
+        }
+        at += line.len();
+    }
+    None
+}
+
+/// How far up the item above is looked for. Past this much text that
+/// ended no list there is none, and a Tab held down stays free: the
+/// cap `indent_unit` keeps, for the same reason.
+const ABOVE_CAP: usize = 64 * 1024;
+
+/// The outliner's rule, which is markdown's too: a list item sits at
+/// most one level below the item above it. Indented any further, or
+/// with no item above, it stops being a list item: after a blank line
+/// four columns make an indented code block, and under a paragraph the
+/// line joins it as text. Answers the refusal for one more indent over
+/// the lines `start..end` when every one of them is a list item under
+/// the same quote marks, none included; the first decides for the run.
+/// Any other selection indents freely, four columns being how a code
+/// block is asked for.
+///
+/// The item above is the nearest one going up under the same quote
+/// marks, across blank lines, the indented lines of an item's own
+/// text, and margin lines that reach an item without a blank line
+/// between, its lazy continuation. A margin line cut off from every
+/// item by a blank line is a paragraph of the document, and it ended
+/// the list. A line under other quote marks counts as a margin line,
+/// and a blank one under fewer marks ended the quote, the list with it.
+pub fn nest_refusal(source: &str, start: usize, end: usize) -> Option<NestRefusal> {
+    let mut lines = source[start..end]
+        .split('\n')
+        .map(|line| {
+            let (depth, seat) = quote_seat(line);
+            (depth, &line[seat..])
+        })
+        .filter(|(_, text)| !text.trim().is_empty());
+    let (depth, first) = lines.next()?;
+    let current = item_columns(first)?;
+    if !lines.all(|(d, text)| d == depth && item_columns(text).is_some()) {
+        return None;
+    }
+    let mut margin_run = false;
+    let frontmatter = frontmatter_end(source);
+    let head = &source[..start];
+    let mut cursor = head.len();
+    let mut fence = None;
+    for raw in head.rsplit('\n') {
+        let line_start = cursor - raw.len();
+        cursor = line_start.saturating_sub(1);
+        if line_start == start {
+            continue;
+        }
+        // The frontmatter is the document's own, like a paragraph at
+        // the margin: nothing in it is the item above.
+        if start - line_start > ABOVE_CAP || frontmatter.is_some_and(|end| line_start < end) {
+            return Some(NestRefusal::NoItemAbove);
+        }
+        let line = raw.strip_suffix('\r').unwrap_or(raw);
+        let (d, seat) = quote_seat(line);
+        let text = &line[seat..];
+        // A fenced code block is skipped whole, whatever its lines look
+        // like; going up, its closing fence comes first. It ended the
+        // list above it as a paragraph at the margin does.
+        if let Some(mark) = fence_mark(text) {
+            fence = match fence {
+                Some(open) if open == mark => None,
+                Some(open) => Some(open),
+                None => Some(mark),
+            };
+            margin_run = true;
+            continue;
+        }
+        if fence.is_some() {
+            continue;
+        }
+        let blank = text.trim().is_empty();
+        if d != depth {
+            if blank && d < depth {
+                return Some(NestRefusal::NoItemAbove);
+            }
+            margin_run = true;
+        } else if blank {
+            if margin_run {
+                return Some(NestRefusal::NoItemAbove);
+            }
+        } else if let Some(above) = item_content_column(text) {
+            // Nested once the item's indent reaches the text of the
+            // item above: two columns under a bullet, three under `1.`.
+            return (current >= above).then_some(NestRefusal::AlreadyNested);
+        } else if !text.starts_with([' ', '\t']) {
+            margin_run = true;
+        }
+    }
+    Some(NestRefusal::NoItemAbove)
 }
 
 /// The seat a list marker would stand on: the byte width of the line's
@@ -161,14 +444,18 @@ impl IndentUnit {
 }
 
 /// The file's dominant indent: a tab where tab-led lines dominate, the
-/// dominant space step where space-led lines do, a tab where the file
-/// offers no evidence. The step is the most common leading-width
+/// dominant space step where space-led lines do. A file that offers no
+/// evidence, every new one, answers by its kind: four spaces in
+/// markdown, where a hard tab is flagged by the linters and four
+/// columns nest under every list marker (a line under `1. ` needs
+/// three), a tab elsewhere, which Go and Makefiles require.
+/// The step is the most common leading-width
 /// difference between a line and the nearest less-indented line above,
 /// kept inside 2..=8; ties go to the smaller step. The scan caps at
 /// the first 64KB, which carries any real file's indentation habits:
 /// the full pass read 9.5ms on the 8MB fixture, too slow for a held
 /// key, and the capped one is free at human rate.
-pub fn indent_unit(source: &str) -> IndentUnit {
+pub fn indent_unit(source: &str, markdown: bool) -> IndentUnit {
     let mut cap = source.len().min(64 * 1024);
     while !source.is_char_boundary(cap) {
         cap -= 1;
@@ -198,6 +485,9 @@ pub fn indent_unit(source: &str) -> IndentUnit {
             Some(_) => stack.clear(),
             None => {}
         }
+    }
+    if tabs == 0 && spaces == 0 && markdown {
+        return IndentUnit::Spaces(4);
     }
     if spaces == 0 || tabs >= spaces {
         return IndentUnit::Tab;
@@ -234,6 +524,43 @@ pub fn reindent(region: &str, unit: &IndentUnit, outdent: bool) -> (String, Vec<
         deltas.push(delta);
     }
     (out, deltas)
+}
+
+/// `reindent` for a markdown source. A quoted line keeps its marks at
+/// the margin and takes or gives the indent after them: in front of
+/// the `>`, four columns would end the quote and leave `> - item` as
+/// text or code. Answers, per line, the byte column where the line
+/// changed beside the delta, `ride_rewrite`'s form.
+pub fn reindent_markdown(
+    region: &str,
+    unit: &IndentUnit,
+    outdent: bool,
+) -> (String, Vec<(usize, i64)>) {
+    let mut out = String::with_capacity(region.len() + 64);
+    let mut edits = Vec::with_capacity(8);
+    for (i, line) in region.split('\n').enumerate() {
+        if i > 0 {
+            out.push('\n');
+        }
+        let (_, seat) = quote_seat(line);
+        let (marks, text) = line.split_at(seat);
+        out.push_str(marks);
+        let delta = if outdent {
+            let cut = outdent_cut(text, unit);
+            out.push_str(&text[cut..]);
+            -(cut as i64)
+        } else if text.trim().is_empty() {
+            out.push_str(text);
+            0
+        } else {
+            let ins = unit.text();
+            out.push_str(&ins);
+            out.push_str(text);
+            ins.len() as i64
+        };
+        edits.push((seat, delta));
+    }
+    (out, edits)
 }
 
 /// A list kind the line keys set.
@@ -478,6 +805,35 @@ pub fn wrap_pair(typed: &str, markdown: bool) -> Option<(&'static str, &'static 
     }
 }
 
+/// The word the caret stands in or at an end of: a run of letters,
+/// digits and underscores. None between two spaces or in an empty file.
+fn word_at(source: &str, at: usize) -> Option<std::ops::Range<usize>> {
+    let is_word = |c: char| c.is_alphanumeric() || c == '_';
+    let start = source[..at]
+        .char_indices()
+        .rev()
+        .take_while(|(_, c)| is_word(*c))
+        .last()
+        .map_or(at, |(i, _)| i);
+    let end = source[at..]
+        .char_indices()
+        .find(|(_, c)| !is_word(*c))
+        .map_or(source.len(), |(i, _)| at + i);
+    (end > start).then_some(start..end)
+}
+
+/// The run of non-blank characters the caret stands in or at an end
+/// of, when it is an address.
+fn address_at(source: &str, at: usize) -> Option<std::ops::Range<usize>> {
+    let start = source[..at].rfind(char::is_whitespace).map_or(0, |i| {
+        i + source[i..].chars().next().map_or(1, char::len_utf8)
+    });
+    let end = source[at..]
+        .find(char::is_whitespace)
+        .map_or(source.len(), |i| at + i);
+    (end > start && is_url(&source[start..end])).then_some(start..end)
+}
+
 /// One splice that wraps or unwraps a mark: the bytes to replace, the
 /// text that goes there, the inner text's range afterwards, and where
 /// the caret stands.
@@ -494,9 +850,11 @@ pub struct MarkEdit {
 /// carries the mark at both ends, or sits just inside a pair of them,
 /// loses the pair; anything else gains one. A single star just outside
 /// is not a pair when it belongs to a double, so italic inside bold
-/// adds its own star. With no selection and no word, an empty pair
-/// opens with the caret inside; with a word, the caret keeps its
-/// letter. The inner range is what stays selected.
+/// adds its own star. With no selection the caret's place among the
+/// line's marks decides first (`toggle_at_caret`); then, with no word,
+/// an empty pair opens with the caret inside, and with a word the
+/// caret keeps its letter, or goes past the closing mark from the
+/// word's end. The inner range is what stays selected.
 pub fn toggle_mark(
     source: &str,
     selection: Option<std::ops::Range<usize>>,
@@ -504,21 +862,14 @@ pub fn toggle_mark(
     mark: &str,
 ) -> MarkEdit {
     let m = mark.len();
-    let word = |at: usize| -> Option<std::ops::Range<usize>> {
-        let is_word = |c: char| c.is_alphanumeric() || c == '_';
-        let start = source[..at]
-            .char_indices()
-            .rev()
-            .take_while(|(_, c)| is_word(*c))
-            .last()
-            .map_or(at, |(i, _)| i);
-        let end = source[at..]
-            .char_indices()
-            .find(|(_, c)| !is_word(*c))
-            .map_or(source.len(), |(i, _)| at + i);
-        (end > start).then_some(start..end)
-    };
-    let (range, pinned) = match selection.filter(|r| !r.is_empty()) {
+    let word = |at: usize| word_at(source, at);
+    let selection = selection.filter(|r| !r.is_empty());
+    if selection.is_none() {
+        if let Some(edit) = toggle_at_caret(source, caret, mark) {
+            return edit;
+        }
+    }
+    let (range, pinned) = match selection {
         Some(r) => (r, None),
         None => match word(caret) {
             Some(r) => (r, Some(caret)),
@@ -577,7 +928,15 @@ pub fn toggle_mark(
         };
     }
     let inner = range.start + m..range.end + m;
-    let caret = pinned.map_or(inner.end, |p| ride(p, range.start, m as i64));
+    // A caret at the word's end is someone writing on: it goes past the
+    // closing mark, so the next letters land outside the mark.
+    let caret = pinned.map_or(inner.end, |p| {
+        if p == range.end {
+            inner.end + m
+        } else {
+            ride(p, range.start, m as i64)
+        }
+    });
     MarkEdit {
         replace: range,
         text: format!("{mark}{text}{mark}"),
@@ -586,16 +945,138 @@ pub fn toggle_mark(
     }
 }
 
+/// What the key does by where the caret stands among the marks of its
+/// own line, nothing selected. On an empty pair the pair goes. Right
+/// before a run's closing mark the caret steps over it and the text
+/// stays, the word processor's "off for what comes next". Anywhere
+/// else inside a run the run loses its marks, however many words it
+/// holds. None everywhere else, and on a line whose marks do not pair,
+/// where the word under the caret decides as before.
+fn toggle_at_caret(source: &str, caret: usize, mark: &str) -> Option<MarkEdit> {
+    let m = mark.len();
+    let sign = mark.as_bytes()[0];
+    let line_start = source[..caret].rfind('\n').map_or(0, |i| i + 1);
+    let line_end = source[caret..]
+        .find('\n')
+        .map_or(source.len(), |i| caret + i);
+    let line = &source[line_start..line_end];
+    let at = caret - line_start;
+    let b = line.as_bytes();
+
+    // The empty pair: the mark on both sides and no more of its sign
+    // around it, with no word pressed against the closing mark, which
+    // would make that mark an opening one.
+    if at >= m
+        && line[..at].ends_with(mark)
+        && line[at..].starts_with(mark)
+        && (at == m || b[at - m - 1] != sign)
+        && b.get(at + m)
+            .is_none_or(|c| *c != sign && !c.is_ascii_alphanumeric())
+    {
+        let open = caret - m;
+        return Some(MarkEdit {
+            replace: open..caret + m,
+            text: String::new(),
+            inner: open..open,
+            caret: open,
+        });
+    }
+
+    let (open, close) = marked_runs(line, mark)?
+        .into_iter()
+        .find(|(open, close)| open + m <= at && at <= *close)?;
+    if at == close {
+        return Some(MarkEdit {
+            replace: caret..caret,
+            text: String::new(),
+            inner: caret..caret,
+            caret: caret + m,
+        });
+    }
+    let text = &line[open + m..close];
+    let start = line_start + open;
+    Some(MarkEdit {
+        replace: start..line_start + close + m,
+        text: text.to_string(),
+        inner: start..start + text.len(),
+        caret: caret - m,
+    })
+}
+
+/// The runs `mark` wraps on one line, as the byte positions of each
+/// opening and closing mark. A run of the mark's sign is read the way
+/// markdown pairs it: two stars a bold mark, one an italic mark, three
+/// one of each; one backtick a code mark. A sign after a backslash, a
+/// star inside inline code, and a run with whitespace on both sides (a
+/// bullet, a product) are text. None when the marks do not pair, an
+/// odd count or a mark facing the wrong way.
+fn marked_runs(line: &str, mark: &str) -> Option<Vec<(usize, usize)>> {
+    let sign = mark.as_bytes()[0];
+    let code = if sign == b'`' {
+        Vec::new()
+    } else {
+        marked_runs(line, "`").unwrap_or_default()
+    };
+    let b = line.as_bytes();
+    // Each mark found: its position, whether it may open, may close.
+    let mut found: Vec<(usize, bool, bool)> = Vec::new();
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] != sign {
+            i += 1;
+            continue;
+        }
+        let mut start = i;
+        while i < b.len() && b[i] == sign {
+            i += 1;
+        }
+        if start > 0 && b[start - 1] == b'\\' {
+            start += 1;
+        }
+        let len = i - start;
+        if code
+            .iter()
+            .any(|(open, close)| *open < start && start < *close)
+        {
+            continue;
+        }
+        let opens = b.get(i).is_some_and(|c| !c.is_ascii_whitespace());
+        let closes = start > 0 && !b[start - 1].is_ascii_whitespace();
+        if !opens && !closes {
+            continue;
+        }
+        match mark {
+            "**" => found.extend((0..len / 2).map(|k| (start + 2 * k, opens, closes))),
+            "*" if len % 2 == 1 => found.push((start + len - 1, opens, closes)),
+            "`" if len == 1 => found.push((start, true, true)),
+            _ => {}
+        }
+    }
+    if found.len() % 2 == 1 {
+        return None;
+    }
+    found
+        .chunks(2)
+        .map(|pair| (pair[0].1 && pair[1].2).then_some((pair[0].0, pair[1].0)))
+        .collect()
+}
+
 /// Ctrl+K: the selection becomes a link's text with the caret in the
 /// empty parentheses; a selection that is itself an address becomes
-/// the target with the caret in the empty brackets; with no selection
-/// an empty link opens with the caret in the brackets.
+/// the target with the caret in the empty brackets. With no selection
+/// the address under the caret, else the word under it, stands for the
+/// selection, as the word does for the bold key; with neither, an
+/// empty link opens with the caret in the brackets.
 pub fn link_edit(
     source: &str,
     selection: Option<std::ops::Range<usize>>,
     caret: usize,
 ) -> MarkEdit {
-    let (replace, text, caret) = match selection.filter(|r| !r.is_empty()) {
+    let taken = selection
+        .filter(|r| !r.is_empty())
+        .or_else(|| address_at(source, caret))
+        .or_else(|| word_at(source, caret));
+    let (replace, text, caret) = match taken {
         Some(r) => {
             let inner = &source[r.clone()];
             if is_url(inner) {
@@ -953,6 +1434,122 @@ fn outdent_cut(line: &str, unit: &IndentUnit) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_hard_break_ends_the_line_with_two_spaces() {
+        assert_eq!(hard_break("one two", 7).as_deref(), Some("  \n"));
+        assert_eq!(
+            hard_break("one two", 3).as_deref(),
+            Some("  \n"),
+            "in the middle of a line"
+        );
+        assert_eq!(
+            hard_break("  indented text", 15).as_deref(),
+            Some("  \n  "),
+            "the line's own indentation carries"
+        );
+    }
+
+    #[test]
+    fn a_hard_break_adds_only_the_spaces_that_are_missing() {
+        assert_eq!(hard_break("one ", 4).as_deref(), Some(" \n"));
+        assert_eq!(hard_break("one  ", 5).as_deref(), Some("\n"));
+        assert_eq!(hard_break("one   ", 6).as_deref(), Some("\n"));
+    }
+
+    #[test]
+    fn a_hard_break_stays_inside_its_item_and_its_quote() {
+        assert_eq!(
+            hard_break("- item", 6).as_deref(),
+            Some("  \n  "),
+            "under the item's text, no marker"
+        );
+        assert_eq!(hard_break("10. item", 8).as_deref(), Some("  \n    "));
+        assert_eq!(
+            hard_break("  - [ ] task", 12).as_deref(),
+            Some("  \n        "),
+            "under the task's text, past the box"
+        );
+        assert_eq!(hard_break("> quoted", 8).as_deref(), Some("  \n> "));
+        assert_eq!(hard_break("> - item", 8).as_deref(), Some("  \n>   "));
+    }
+
+    #[test]
+    fn a_hard_break_needs_text_before_it() {
+        assert_eq!(hard_break("", 0), None);
+        assert_eq!(hard_break("text", 0), None);
+        assert_eq!(hard_break("   ", 3), None, "spaces alone are no text");
+        assert_eq!(hard_break("- ", 2), None, "an empty item");
+        assert_eq!(hard_break("- item", 1), None, "inside the marker");
+        assert_eq!(hard_break("> ", 2), None);
+    }
+
+    #[test]
+    fn a_hard_break_renders_as_a_line_break_in_the_item() {
+        let line = "- one two";
+        let text = hard_break(line, 5).expect("text stands before the caret");
+        let source = format!("{}{}{}\n", &line[..5], text, &line[5..]);
+        assert_eq!(source, "- one  \n   two\n");
+        let doc = crate::doc::markdown::parse(source);
+        assert_eq!(doc.blocks.len(), 1, "one item still");
+    }
+
+    #[test]
+    fn a_line_is_taken_with_its_ending() {
+        let take = line_take("a\nbee\nc", 4).expect("a line");
+        assert_eq!(
+            (take.cut.clone(), take.text.as_str(), take.caret),
+            (2..6, "bee\n", 2)
+        );
+        let take = line_take("a\nb", 0).expect("the first line");
+        assert_eq!(
+            (take.cut.clone(), take.text.as_str(), take.caret),
+            (0..2, "a\n", 0)
+        );
+        let take = line_take("a\n\nb", 2).expect("an empty line");
+        assert_eq!(
+            (take.cut.clone(), take.text.as_str(), take.caret),
+            (2..3, "\n", 2)
+        );
+    }
+
+    #[test]
+    fn the_last_line_takes_the_ending_before_it() {
+        let take = line_take("a\nb", 3).expect("the last line");
+        assert_eq!(take.text, "b\n", "the clipboard always gets a whole line");
+        assert_eq!(take.cut, 1..3, "no empty line is left behind");
+        assert_eq!(take.caret, 0, "the start of the line that is now last");
+
+        let take = line_take("one\ntwo\nthree", 9).expect("the last of three");
+        assert_eq!((take.cut.clone(), take.caret), (7..13, 4));
+
+        let take = line_take("a\nb\n", 2).expect("a last line with its own ending");
+        assert_eq!(
+            (take.cut.clone(), take.text.as_str(), take.caret),
+            (2..4, "b\n", 2)
+        );
+    }
+
+    #[test]
+    fn a_taken_line_is_pasted_above_the_carets_line() {
+        assert_eq!(
+            line_paste("one\ntwo", 5, "one\n"),
+            (4, 9),
+            "from the middle of two: in front of it, the caret on the same letter"
+        );
+        assert_eq!(line_paste("one\ntwo", 0, "x\n"), (0, 2), "the first line");
+        assert_eq!(line_paste("one\n", 4, "x\n"), (4, 6), "the empty last row");
+    }
+
+    #[test]
+    fn a_lone_line_and_an_empty_file() {
+        let take = line_take("abc", 1).expect("the only line");
+        assert_eq!(
+            (take.cut.clone(), take.text.as_str(), take.caret),
+            (0..3, "abc\n", 0)
+        );
+        assert_eq!(line_take("", 0), None, "nothing to take");
+    }
 
     #[test]
     fn enter_carries_the_indent() {
@@ -1323,8 +1920,18 @@ mod tests {
         );
         assert_eq!(
             toggle_mark("a word b", None, 6, "**"),
-            e(2..6, "**word**", 4..8, 8),
-            "at the word's end"
+            e(2..6, "**word**", 4..8, 10),
+            "at the word's end the caret goes past the closing mark, to write on"
+        );
+        assert_eq!(
+            toggle_mark("a word b", None, 6, "*"),
+            e(2..6, "*word*", 3..7, 8),
+            "italic the same"
+        );
+        assert_eq!(
+            toggle_mark("a word b", None, 6, "`"),
+            e(2..6, "`word`", 3..7, 8),
+            "inline code the same"
         );
         assert_eq!(
             toggle_mark("a word b", None, 2, "*"),
@@ -1349,6 +1956,111 @@ mod tests {
         );
     }
 
+    /// A `MarkEdit`, written short.
+    fn mark_edit(
+        replace: std::ops::Range<usize>,
+        text: &str,
+        inner: std::ops::Range<usize>,
+        caret: usize,
+    ) -> MarkEdit {
+        MarkEdit {
+            replace,
+            text: text.to_string(),
+            inner,
+            caret,
+        }
+    }
+
+    #[test]
+    fn the_key_again_before_the_closing_mark_steps_over_it() {
+        assert_eq!(
+            toggle_mark("**two words**", None, 11, "**"),
+            mark_edit(11..11, "", 11..11, 13),
+            "bold off for what comes next, the text untouched"
+        );
+        assert_eq!(
+            toggle_mark("an *old tale* here", None, 12, "*"),
+            mark_edit(12..12, "", 12..12, 13)
+        );
+        assert_eq!(
+            toggle_mark("a `x y` b", None, 6, "`"),
+            mark_edit(6..6, "", 6..6, 7)
+        );
+    }
+
+    #[test]
+    fn the_key_again_on_an_empty_pair_removes_it() {
+        assert_eq!(
+            toggle_mark("a **** b", None, 4, "**"),
+            mark_edit(2..6, "", 2..2, 2)
+        );
+        assert_eq!(
+            toggle_mark("a ** b", None, 3, "*"),
+            mark_edit(2..4, "", 2..2, 2)
+        );
+        assert_eq!(
+            toggle_mark("``", None, 1, "`"),
+            mark_edit(0..2, "", 0..0, 0)
+        );
+        assert_eq!(
+            toggle_mark("**word**", None, 1, "*"),
+            mark_edit(1..1, "**", 2..2, 2),
+            "between the stars of a bold mark is no empty italic pair"
+        );
+    }
+
+    #[test]
+    fn the_key_inside_a_marked_run_removes_its_marks() {
+        assert_eq!(
+            toggle_mark("**two words**", None, 9, "**"),
+            mark_edit(0..13, "two words", 0..9, 7),
+            "a run of two words, the caret inside the second"
+        );
+        assert_eq!(
+            toggle_mark("**two words**", None, 2, "**"),
+            mark_edit(0..13, "two words", 0..9, 0),
+            "right after the opening mark"
+        );
+        assert_eq!(
+            toggle_mark("say `let x = 1` now", None, 9, "`"),
+            mark_edit(4..15, "let x = 1", 4..13, 8)
+        );
+        assert_eq!(
+            toggle_mark("`a ** b` and **c d**", None, 17, "**"),
+            mark_edit(13..20, "c d", 13..16, 15),
+            "stars inside code are text"
+        );
+    }
+
+    #[test]
+    fn a_line_that_is_unclear_keeps_the_word_behavior() {
+        assert_eq!(
+            toggle_mark("**a word b**", None, 6, "*"),
+            mark_edit(4..8, "*word*", 5..9, 7),
+            "italic inside bold: no italic run here, the word is wrapped"
+        );
+        assert_eq!(
+            toggle_mark("* item one", None, 8, "*"),
+            mark_edit(7..10, "*one*", 8..11, 9),
+            "a bullet's star is no mark"
+        );
+        assert_eq!(
+            toggle_mark("2 * 3 and a*b*c", None, 12, "*"),
+            mark_edit(11..14, "b", 11..12, 11),
+            "a star between spaces is text; the pair around b is a run"
+        );
+        assert_eq!(
+            toggle_mark("a*b **x y**", None, 8, "*"),
+            mark_edit(8..9, "*y*", 9..10, 9),
+            "one star alone: unclear, the word is wrapped"
+        );
+        assert_eq!(
+            toggle_mark("**open and no end", None, 8, "**"),
+            mark_edit(7..10, "**and**", 9..12, 10),
+            "an opening mark alone"
+        );
+    }
+
     #[test]
     fn a_link_wraps_the_selection_or_opens_empty() {
         let e = |replace: std::ops::Range<usize>, text: &str, caret: usize| MarkEdit {
@@ -1363,14 +2075,46 @@ mod tests {
             "the caret in the parentheses"
         );
         assert_eq!(
-            link_edit("ab", None, 1),
-            e(1..1, "[]()", 2),
-            "the caret in the brackets"
+            link_edit("a  b", None, 2),
+            e(2..2, "[]()", 3),
+            "no word: an empty link, the caret in the brackets"
         );
+        assert_eq!(link_edit("", None, 0), e(0..0, "[]()", 1));
         assert_eq!(
             link_edit("see https://x.y now", Some(4..15), 15),
             e(4..15, "[](https://x.y)", 5),
             "a selected address becomes the target, the caret in the brackets"
+        );
+    }
+
+    #[test]
+    fn a_link_takes_the_word_or_the_address_under_the_caret() {
+        let e = |replace: std::ops::Range<usize>, text: &str, caret: usize| MarkEdit {
+            replace,
+            text: text.to_string(),
+            inner: caret..caret,
+            caret,
+        };
+        assert_eq!(
+            link_edit("see link now", None, 6),
+            e(4..8, "[link]()", 11),
+            "inside the word: its text, the caret in the parentheses"
+        );
+        assert_eq!(
+            link_edit("see link", None, 8),
+            e(4..8, "[link]()", 11),
+            "at the word's end"
+        );
+        assert_eq!(link_edit("ab", None, 1), e(0..2, "[ab]()", 5));
+        assert_eq!(
+            link_edit("see https://x.y now", None, 9),
+            e(4..15, "[](https://x.y)", 5),
+            "on an address: the target, the caret in the brackets"
+        );
+        assert_eq!(
+            link_edit("see https://x.y now", None, 15),
+            e(4..15, "[](https://x.y)", 5),
+            "at the address's end"
         );
     }
 
@@ -1667,34 +2411,288 @@ mod tests {
         assert!(!tab_nests("    code", 4));
     }
 
+    /// The refusal for a Tab over the whole of `region`, found in
+    /// `source` by its text.
+    fn refusal_in(source: &str, region: &str) -> Option<NestRefusal> {
+        let start = source.find(region).expect("the region is in the source");
+        nest_refusal(source, start, start + region.len())
+    }
+
+    #[test]
+    fn a_numbered_item_two_columns_in_is_a_sibling_and_may_nest() {
+        assert_eq!(
+            refusal_in("1. a\n  1. b\n", "  1. b"),
+            None,
+            "`1.` has three columns"
+        );
+        assert_eq!(
+            refusal_in("1. a\n   1. b\n", "   1. b"),
+            Some(NestRefusal::AlreadyNested)
+        );
+        assert_eq!(
+            refusal_in("- a\n  - b\n", "  - b"),
+            Some(NestRefusal::AlreadyNested)
+        );
+        assert_eq!(
+            refusal_in("- [ ] a\n  - [ ] b\n", "  - [ ] b"),
+            Some(NestRefusal::AlreadyNested),
+            "the task box is the item's text"
+        );
+        assert_eq!(
+            refusal_in("10. a\n   10. b\n", "   10. b"),
+            None,
+            "`10.` has four"
+        );
+    }
+
+    #[test]
+    fn a_fenced_block_and_the_frontmatter_hold_no_item_above() {
+        assert_eq!(
+            refusal_in("a\n\n```\n- one\n- two\n```\n\n- real\n", "- real"),
+            Some(NestRefusal::NoItemAbove),
+            "a markdown file showing markdown"
+        );
+        assert_eq!(
+            refusal_in("---\ntags:\n  - a\n  - b\n---\n\n- item\n", "- item"),
+            Some(NestRefusal::NoItemAbove),
+            "a YAML frontmatter"
+        );
+        assert_eq!(
+            refusal_in("- a\n\n~~~\ntext\n~~~\n\n- b\n", "- b"),
+            Some(NestRefusal::NoItemAbove),
+            "a fence between two items ended the first list"
+        );
+        assert_eq!(
+            refusal_in("- a\n  ```\n  - not one\n  ```\n- b\n", "- b"),
+            None,
+            "a fence inside the item above is the item's own text"
+        );
+    }
+
+    #[test]
+    fn the_look_for_the_item_above_stops_after_sixty_four_kilobytes() {
+        let quoted = "> text\n".repeat(20);
+        assert_eq!(refusal_in(&format!("- a\n{quoted}- b\n"), "- b"), None);
+        let quoted = "> text\n".repeat(ABOVE_CAP / 7 + 2);
+        assert_eq!(
+            refusal_in(&format!("- a\n{quoted}- b\n"), "- b"),
+            Some(NestRefusal::NoItemAbove)
+        );
+    }
+
+    #[test]
+    fn an_item_nests_under_the_item_above_it() {
+        assert_eq!(refusal_in("- a\n- b\n", "- b"), None);
+        assert_eq!(refusal_in("1. a\n1. b\n", "1. b"), None);
+        assert_eq!(refusal_in("- a\n\n- b\n", "- b"), None, "a loose list");
+        assert_eq!(
+            refusal_in("- a\n  more of a\n- b\n", "- b"),
+            None,
+            "the item's own text stands between"
+        );
+        assert_eq!(
+            refusal_in("- a\nlazy text of a\n- b\n", "- b"),
+            None,
+            "a lazy line still belongs to the item"
+        );
+        assert_eq!(
+            refusal_in("- a\n    - b\n- c\n", "- c"),
+            None,
+            "under a deeper item, one level below it"
+        );
+        assert_eq!(
+            refusal_in("- a\n- b\n- c\n", "- b\n- c"),
+            None,
+            "a selection"
+        );
+    }
+
+    #[test]
+    fn an_item_with_nothing_above_does_not_nest() {
+        let no = Some(NestRefusal::NoItemAbove);
+        assert_eq!(
+            refusal_in("- a\n- b\n", "- a\n- b"),
+            no,
+            "the file's first lines"
+        );
+        assert_eq!(
+            refusal_in("Why a code block:\n\n- a\n- b\n- c\n", "- a\n- b\n- c"),
+            no,
+            "the user's file of 21/09/2026: four spaces after a blank line are code"
+        );
+        assert_eq!(
+            refusal_in("A paragraph.\n- a\n", "- a"),
+            no,
+            "indented, the item would join the paragraph as text"
+        );
+        assert_eq!(
+            refusal_in("- a\n\nA paragraph.\n\n- b\n", "- b"),
+            no,
+            "a paragraph at the margin ended the list above"
+        );
+    }
+
+    #[test]
+    fn an_item_already_a_level_down_does_not_nest_again() {
+        assert_eq!(
+            refusal_in("- a\n    - b\n", "    - b"),
+            Some(NestRefusal::AlreadyNested)
+        );
+        assert_eq!(
+            refusal_in("- a\n\t- b\n", "\t- b"),
+            Some(NestRefusal::AlreadyNested),
+            "a tab is a level too"
+        );
+    }
+
+    #[test]
+    fn the_rule_holds_inside_a_quote() {
+        assert_eq!(refusal_in("> - a\n> - b\n", "> - b"), None);
+        assert_eq!(
+            refusal_in("> - a\n>\n> - b\n", "> - b"),
+            None,
+            "a loose list inside the quote"
+        );
+        assert_eq!(
+            refusal_in("> - a\n", "> - a"),
+            Some(NestRefusal::NoItemAbove)
+        );
+        assert_eq!(
+            refusal_in("> - a\n\n> - b\n", "> - b"),
+            Some(NestRefusal::NoItemAbove),
+            "a bare blank line ended the quote above"
+        );
+        assert_eq!(
+            refusal_in("- a\n> - b\n", "> - b"),
+            Some(NestRefusal::NoItemAbove),
+            "an item outside the quote is not above it"
+        );
+        assert_eq!(
+            refusal_in("> - a\n>     - b\n", ">     - b"),
+            Some(NestRefusal::AlreadyNested)
+        );
+    }
+
+    #[test]
+    fn a_quoted_line_takes_its_indent_after_the_quote_marks() {
+        let four = IndentUnit::Spaces(4);
+        let (text, edits) = reindent_markdown("> - b", &four, false);
+        assert_eq!((text.as_str(), edits), (">     - b", vec![(2, 4)]));
+        let (text, edits) = reindent_markdown("> > - b", &four, false);
+        assert_eq!((text.as_str(), edits), ("> >     - b", vec![(4, 4)]));
+        let (text, edits) = reindent_markdown("- b\n\n> c\n>", &four, false);
+        assert_eq!(
+            text, "    - b\n\n>     c\n>",
+            "blank lines stay, quoted or not"
+        );
+        assert_eq!(edits, vec![(0, 4), (0, 0), (2, 4), (1, 0)]);
+
+        let depths: Vec<u8> = crate::doc::markdown::parse("> - a\n>     - b\n")
+            .blocks
+            .iter()
+            .filter_map(|b| match b.kind {
+                crate::doc::model::BlockKind::ListItem { depth, .. } => Some(depth),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(depths.len(), 2);
+        assert!(depths[1] > depths[0], "the item nests inside the quote");
+    }
+
+    #[test]
+    fn a_quoted_line_gives_its_indent_back_and_keeps_its_own_space() {
+        let four = IndentUnit::Spaces(4);
+        let (text, edits) = reindent_markdown(">     - b", &four, true);
+        assert_eq!((text.as_str(), edits), ("> - b", vec![(2, -4)]));
+        let (text, edits) = reindent_markdown("> - b", &four, true);
+        assert_eq!((text.as_str(), edits), ("> - b", vec![(2, 0)]));
+        let (text, _) = reindent_markdown("    > - b", &four, true);
+        assert_eq!(
+            text, "> - b",
+            "four columns before the mark are no quote: cut at the margin"
+        );
+    }
+
+    #[test]
+    fn lines_that_are_not_all_items_indent_freely() {
+        assert_eq!(refusal_in("text\n- a\n", "text\n- a"), None);
+        assert_eq!(refusal_in("plain\n", "plain"), None);
+        assert_eq!(refusal_in("\n\n", "\n"), None, "nothing to indent");
+    }
+
     #[test]
     fn the_unit_follows_the_dominant_indentation() {
         assert_eq!(
-            indent_unit("all:\n\tcc -o all main.c\n\tstrip all\n"),
+            indent_unit("all:\n\tcc -o all main.c\n\tstrip all\n", false),
             IndentUnit::Tab,
             "tab-led lines dominate a Makefile"
         );
         assert_eq!(
-            indent_unit("- a\n  - b\n  - c\n"),
+            indent_unit("- a\n  - b\n  - c\n", false),
             IndentUnit::Spaces(2),
             "two-space nesting reads as a two-space step"
         );
         assert_eq!(
-            indent_unit("fn main() {\n    if x {\n        y();\n    }\n}\n"),
+            indent_unit("fn main() {\n    if x {\n        y();\n    }\n}\n", false),
             IndentUnit::Spaces(4),
             "four-space blocks read as a four-space step"
         );
         assert_eq!(
-            indent_unit("\ta\n\tb\n  c\n"),
+            indent_unit("\ta\n\tb\n  c\n", false),
             IndentUnit::Tab,
             "tabs outnumber spaces"
         );
         assert_eq!(
-            indent_unit("plain\nlines\n"),
+            indent_unit("plain\nlines\n", false),
             IndentUnit::Tab,
             "no evidence answers a tab"
         );
-        assert_eq!(indent_unit(""), IndentUnit::Tab);
+        assert_eq!(indent_unit("", false), IndentUnit::Tab);
+    }
+
+    #[test]
+    fn a_markdown_file_without_evidence_indents_with_four_spaces() {
+        assert_eq!(indent_unit("", true), IndentUnit::Spaces(4), "a new file");
+        assert_eq!(
+            indent_unit("# Title\n\nA paragraph.\n\n- a\n- b\n", true),
+            IndentUnit::Spaces(4),
+            "text at the margin is no evidence"
+        );
+    }
+
+    #[test]
+    fn a_markdown_file_keeps_the_indent_it_already_has() {
+        assert_eq!(
+            indent_unit("- a\n  - b\n  - c\n", true),
+            IndentUnit::Spaces(2),
+            "two-space nesting stays two"
+        );
+        assert_eq!(
+            indent_unit("- a\n\t- b\n\t- c\n", true),
+            IndentUnit::Tab,
+            "a file nested with tabs stays on tabs"
+        );
+    }
+
+    #[test]
+    fn four_spaces_nest_under_a_numbered_item() {
+        let (text, _) = reindent("1. b", &indent_unit("1. a\n1. b\n", true), false);
+        assert_eq!(text, "    1. b");
+        let depths = |source: String| -> Vec<u8> {
+            crate::doc::markdown::parse(source)
+                .blocks
+                .iter()
+                .filter_map(|b| match b.kind {
+                    crate::doc::model::BlockKind::ListItem { depth, .. } => Some(depth),
+                    _ => None,
+                })
+                .collect()
+        };
+        let nested = depths(format!("1. a\n{text}\n"));
+        assert_eq!(nested.len(), 2);
+        assert!(nested[1] > nested[0], "four spaces nest the item");
+        let flat = depths("1. a\n  1. b\n".to_string());
+        assert_eq!(flat[0], flat[1], "two would not, which is why four");
     }
 
     #[test]

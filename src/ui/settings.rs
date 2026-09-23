@@ -1,9 +1,11 @@
-//! Settings overlay: body and code font families and sizes, applied live
-//! and persisted by the app. Zoom stepping helpers live here too; zoom is
-//! session state and never saved.
+//! Settings overlay: body and code font families and sizes, the on/off
+//! rows and the autosave pause, applied live and persisted by the app.
+//! Zoom stepping helpers live here too; zoom is session state and never
+//! saved.
 
 use winit::keyboard::{Key, NamedKey};
 
+use crate::edit::autosave;
 use crate::paint::painter::Painter;
 use crate::style::fonts::BODY_FAMILY;
 use crate::style::theme::Theme;
@@ -20,15 +22,29 @@ const FOOTER_H: f32 = 30.0;
 // list must be at least a row tall for the cover to be complete.
 const _: () = assert!(HEADER_H + PAD / 2.0 >= LIST_ROW_H && FOOTER_H + PAD / 2.0 >= LIST_ROW_H);
 const PANEL_W: f32 = 420.0;
+/// Where the values start, as a share of the panel's width: past the
+/// longest label in bold, "save on focus loss", with air between.
+const VALUE_COLUMN: f32 = 0.46;
 const RADIUS: f32 = 8.0;
 
-const ROWS: [&str; 5] = [
+const ROWS: [&str; 9] = [
     "body font",
     "code font",
     "body size",
     "code size",
     "interface scale",
+    "line numbers",
+    "word count",
+    "save on focus loss",
+    "save after a pause",
 ];
+
+/// The on/off rows' places in `ROWS`.
+const LINE_NUMBERS_ROW: usize = 5;
+const WORD_COUNT_ROW: usize = 6;
+const SAVE_FOCUS_ROW: usize = 7;
+/// The pause row steps through `autosave::PAUSES`.
+const SAVE_PAUSE_ROW: usize = 8;
 
 /// Font size bounds for both families.
 pub const SIZE_MIN: f32 = 8.0;
@@ -92,21 +108,42 @@ pub struct Settings {
     body_size: f32,
     code_size: f32,
     ui_scale: f32,
+    line_numbers: bool,
+    word_count: bool,
+    save_on_focus_loss: bool,
+    save_after_pause: u32,
     row: usize,
     pick: Option<Pick>,
     drag: PanelDrag,
     geometry: Geometry,
 }
 
+/// What the dialog opens on: the settings as the app holds them.
+pub struct Values {
+    pub body_family: String,
+    pub code_family: String,
+    pub body_size: f32,
+    pub code_size: f32,
+    pub ui_scale: f32,
+    pub line_numbers: bool,
+    pub word_count: bool,
+    pub save_on_focus_loss: bool,
+    pub save_after_pause: u32,
+}
+
 impl Settings {
-    pub fn new(
-        families: Vec<String>,
-        body_family: String,
-        code_family: String,
-        body_size: f32,
-        code_size: f32,
-        ui_scale: f32,
-    ) -> Settings {
+    pub fn new(families: Vec<String>, values: Values) -> Settings {
+        let Values {
+            body_family,
+            code_family,
+            body_size,
+            code_size,
+            ui_scale,
+            line_numbers,
+            word_count,
+            save_on_focus_loss,
+            save_after_pause,
+        } = values;
         Settings {
             families,
             body_family,
@@ -114,6 +151,10 @@ impl Settings {
             body_size,
             code_size,
             ui_scale,
+            line_numbers,
+            word_count,
+            save_on_focus_loss,
+            save_after_pause,
             row: 0,
             pick: None,
             drag: PanelDrag::default(),
@@ -161,7 +202,38 @@ impl Settings {
         self.view_change()
     }
 
+    /// An on/off row answers either arrow, Space and Enter the same
+    /// way: it flips. None for a row that is not one.
+    fn flip(&mut self) -> Option<OverlayResult> {
+        match self.row {
+            LINE_NUMBERS_ROW => {
+                self.line_numbers = !self.line_numbers;
+                Some(OverlayResult::Apply(Action::SetLineNumbers(
+                    self.line_numbers,
+                )))
+            }
+            WORD_COUNT_ROW => {
+                self.word_count = !self.word_count;
+                Some(OverlayResult::Apply(Action::SetWordCount(self.word_count)))
+            }
+            SAVE_FOCUS_ROW => {
+                self.save_on_focus_loss = !self.save_on_focus_loss;
+                Some(OverlayResult::Apply(Action::SetSaveOnFocusLoss(
+                    self.save_on_focus_loss,
+                )))
+            }
+            _ => None,
+        }
+    }
+
     fn step_row(&mut self, delta: f32) -> OverlayResult {
+        if let Some(flipped) = self.flip() {
+            return flipped;
+        }
+        if self.row == SAVE_PAUSE_ROW {
+            self.save_after_pause = autosave::step_pause(self.save_after_pause, delta as i32);
+            return OverlayResult::Apply(Action::SetSaveAfterPause(self.save_after_pause));
+        }
         match self.row {
             2 => self.body_size = step_size(self.body_size, delta),
             3 => self.code_size = step_size(self.code_size, delta),
@@ -229,7 +301,7 @@ impl Overlay for Settings {
             panel: (px, py, panel_w, panel_h),
             center,
             rows_top,
-            value_x: px + panel_w * 0.42,
+            value_x: px + panel_w * VALUE_COLUMN,
             list_top,
             list_h,
         };
@@ -359,6 +431,15 @@ impl Overlay for Settings {
                             let value = match index {
                                 2 => format!("{}", self.body_size as i32),
                                 3 => format!("{}", self.code_size as i32),
+                                LINE_NUMBERS_ROW | WORD_COUNT_ROW | SAVE_FOCUS_ROW => {
+                                    let on = match index {
+                                        LINE_NUMBERS_ROW => self.line_numbers,
+                                        WORD_COUNT_ROW => self.word_count,
+                                        _ => self.save_on_focus_loss,
+                                    };
+                                    if on { "on" } else { "off" }.to_string()
+                                }
+                                SAVE_PAUSE_ROW => autosave::pause_label(self.save_after_pause),
                                 _ => format!("{}%", ui_scale_label(self.ui_scale)),
                             };
                             let text = format!("\u{2039}  {value}  \u{203A}");
@@ -408,6 +489,11 @@ impl Overlay for Settings {
             Key::Named(NamedKey::ArrowDown) => self.row = (self.row + 1).min(ROWS.len() - 1),
             Key::Named(NamedKey::ArrowUp) => self.row = self.row.saturating_sub(1),
             Key::Named(NamedKey::Enter) if self.row < 2 => self.open_pick(),
+            Key::Named(NamedKey::Enter | NamedKey::Space) => {
+                if let Some(flipped) = self.flip() {
+                    return flipped;
+                }
+            }
             Key::Named(NamedKey::ArrowRight) => return self.step_row(1.0),
             Key::Named(NamedKey::ArrowLeft) => return self.step_row(-1.0),
             _ => {}
@@ -425,8 +511,14 @@ impl Overlay for Settings {
             return OverlayResult::Open;
         }
         if let Some(pick) = self.pick.as_mut() {
+            // The pad above the list and the hint below it are no rows:
+            // the rows scrolled out of sight lie under them.
+            let list_top = self.geometry.list_top;
+            if y < list_top || y >= list_top + self.geometry.list_h {
+                return OverlayResult::Open;
+            }
             let scroll = pick.scroll;
-            let index = ((y - self.geometry.list_top + scroll) / LIST_ROW_H).floor() as usize;
+            let index = ((y - list_top + scroll) / LIST_ROW_H).floor() as usize;
             if index < self.families.len() {
                 return self.choose(index);
             }
@@ -508,16 +600,63 @@ mod tests {
                 "DejaVu Sans".to_string(),
                 "Other Font".to_string(),
             ],
-            "DejaVu Sans".to_string(),
-            "Courier Prime".to_string(),
-            22.0,
-            20.0,
-            1.0,
+            Values {
+                body_family: "DejaVu Sans".to_string(),
+                code_family: "Courier Prime".to_string(),
+                body_size: 22.0,
+                code_size: 20.0,
+                ui_scale: 1.0,
+                line_numbers: false,
+                word_count: false,
+                save_on_focus_loss: false,
+                save_after_pause: 0,
+            },
         )
     }
 
     fn press(s: &mut Settings, key: NamedKey) -> OverlayResult {
         s.key(&Key::Named(key), false, false)
+    }
+
+    #[test]
+    fn a_click_off_the_font_list_chooses_no_font() {
+        let families = (0..30).map(|i| format!("Family {i:02}")).collect();
+        let mut s = Settings::new(
+            families,
+            Values {
+                body_family: "Family 03".to_string(),
+                code_family: "Family 04".to_string(),
+                body_size: 22.0,
+                code_size: 20.0,
+                ui_scale: 1.0,
+                line_numbers: false,
+                word_count: false,
+                save_on_focus_loss: false,
+                save_after_pause: 0,
+            },
+        );
+        press(&mut s, NamedKey::Enter);
+        assert!(s.pick.is_some(), "the font list is open");
+        s.geometry = Geometry {
+            panel: (0.0, 0.0, 420.0, 400.0),
+            list_top: 51.0,
+            list_h: 300.0,
+            ..Geometry::default()
+        };
+        // The hint under the list, and the pad between the header and
+        // the first row: neither is a row of the list.
+        for y in [380.0, 47.0] {
+            assert!(
+                matches!(s.click(200.0, y), OverlayResult::Open),
+                "a click at y {y} chooses nothing"
+            );
+            assert!(s.pick.is_some(), "and the list stays open");
+        }
+        // A row of the list still answers.
+        assert!(matches!(
+            s.click(200.0, 60.0),
+            OverlayResult::Apply(Action::SetView { .. })
+        ));
     }
 
     #[test]
@@ -560,6 +699,103 @@ mod tests {
             step_ui_scale(UI_SCALE_MIN, -UI_SCALE_STEP),
             UI_SCALE_MIN
         ));
+    }
+
+    #[test]
+    fn the_line_numbers_row_flips_with_the_arrows_space_and_enter() {
+        let mut s = settings();
+        for _ in 0..LINE_NUMBERS_ROW {
+            press(&mut s, NamedKey::ArrowDown);
+        }
+        let mut seen = Vec::new();
+        for key in [
+            NamedKey::ArrowRight,
+            NamedKey::ArrowLeft,
+            NamedKey::Space,
+            NamedKey::Enter,
+        ] {
+            let OverlayResult::Apply(Action::SetLineNumbers(on)) = press(&mut s, key) else {
+                panic!("{key:?} flips the row");
+            };
+            seen.push(on);
+        }
+        assert_eq!(seen, [true, false, true, false]);
+    }
+
+    #[test]
+    fn the_word_count_row_flips_with_the_arrows_space_and_enter() {
+        let mut s = settings();
+        for _ in 0..WORD_COUNT_ROW {
+            press(&mut s, NamedKey::ArrowDown);
+        }
+        let mut seen = Vec::new();
+        for key in [
+            NamedKey::ArrowRight,
+            NamedKey::ArrowLeft,
+            NamedKey::Space,
+            NamedKey::Enter,
+        ] {
+            let OverlayResult::Apply(Action::SetWordCount(on)) = press(&mut s, key) else {
+                panic!("{key:?} flips the row");
+            };
+            seen.push(on);
+        }
+        assert_eq!(seen, [true, false, true, false]);
+    }
+
+    #[test]
+    fn the_focus_save_row_flips_with_the_arrows_space_and_enter() {
+        let mut s = settings();
+        for _ in 0..SAVE_FOCUS_ROW {
+            press(&mut s, NamedKey::ArrowDown);
+        }
+        let mut seen = Vec::new();
+        for key in [
+            NamedKey::ArrowRight,
+            NamedKey::ArrowLeft,
+            NamedKey::Space,
+            NamedKey::Enter,
+        ] {
+            let OverlayResult::Apply(Action::SetSaveOnFocusLoss(on)) = press(&mut s, key) else {
+                panic!("{key:?} flips the row");
+            };
+            seen.push(on);
+        }
+        assert_eq!(seen, [true, false, true, false]);
+    }
+
+    #[test]
+    fn the_pause_row_steps_through_its_choices_from_off() {
+        let mut s = settings();
+        for _ in 0..20 {
+            press(&mut s, NamedKey::ArrowDown);
+        }
+        assert_eq!(s.row, SAVE_PAUSE_ROW, "the last row, and Down stops there");
+        let mut seen = Vec::new();
+        for key in [
+            NamedKey::ArrowLeft,
+            NamedKey::ArrowRight,
+            NamedKey::ArrowRight,
+            NamedKey::ArrowLeft,
+        ] {
+            let OverlayResult::Apply(Action::SetSaveAfterPause(seconds)) = press(&mut s, key)
+            else {
+                panic!("{key:?} steps the row");
+            };
+            seen.push(seconds);
+        }
+        assert_eq!(seen, [0, 5, 15, 5], "Left at off stays off");
+        assert!(
+            matches!(press(&mut s, NamedKey::Enter), OverlayResult::Open),
+            "a number has nothing to flip"
+        );
+    }
+
+    #[test]
+    fn the_autosave_rows_stand_last() {
+        assert_eq!(ROWS.len(), SAVE_PAUSE_ROW + 1);
+        assert_eq!(ROWS.get(SAVE_FOCUS_ROW), Some(&"save on focus loss"));
+        assert_eq!(ROWS.get(SAVE_PAUSE_ROW), Some(&"save after a pause"));
     }
 
     #[test]

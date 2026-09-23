@@ -40,6 +40,11 @@ pub struct ViewConfig {
     /// The layout is bound for the page export: marks that only guide a
     /// reader on screen, the page break's dashed line, are left out.
     pub print: bool,
+    /// The room the line numbers need left of a file of lines, zero
+    /// when they are off. The page's own margin usually holds it and
+    /// nothing moves; a wider need steps the lines right by the
+    /// difference. A rendered page ignores it.
+    pub gutter: f32,
 }
 
 impl Default for ViewConfig {
@@ -54,6 +59,7 @@ impl Default for ViewConfig {
             comic: ComicFit::Width,
             direction: DirectionMode::Auto,
             print: false,
+            gutter: 0.0,
         }
     }
 }
@@ -435,6 +441,17 @@ impl LayoutDoc {
                 let base = model_text(doc, run.block, run.span);
                 &base[start as usize..(start + len) as usize]
             }
+        }
+    }
+
+    /// The whole display text of the span a model reference slices, the
+    /// run's own bytes included: the highlight boxes and the match
+    /// anchors read past a run's visible end into the whitespace layout
+    /// trimmed there. Empty for a side reference.
+    pub fn span_text<'a>(&self, doc: &'a Document, run: &TextRun) -> &'a str {
+        match run.text {
+            TextRef::Side { .. } => "",
+            TextRef::Model { .. } => model_text(doc, run.block, run.span),
         }
     }
 
@@ -872,6 +889,42 @@ impl LayoutDoc {
         Some(entry.y)
     }
 
+    /// The line of code block `block` standing at height `y`, from the
+    /// block table: the last of its `lines` whose top is at or above
+    /// `y`, the inverse of `approx_top`. None before the pass places
+    /// the block, and for a block that is not code.
+    pub fn code_line_at(&self, block: usize, lines: usize, y: f32) -> Option<usize> {
+        let position = *self.table.position_of_block.get(block)?;
+        if position == u32::MAX {
+            return None;
+        }
+        let position = position as usize;
+        if self.table.entries[position].flags & ENTRY_CODE == 0 {
+            return None;
+        }
+        let (mut at, mut past) = (0, lines.max(1));
+        while at + 1 < past {
+            let mid = at + (past - at) / 2;
+            if self.table.code_line_top(position, mid) <= y {
+                at = mid;
+            } else {
+                past = mid;
+            }
+        }
+        Some(at)
+    }
+
+    /// The recorded top and bottom of a block, from the block table.
+    /// None before the pass places the block.
+    pub fn block_span(&self, block: usize) -> Option<Range<f32>> {
+        let position = *self.table.position_of_block.get(block)?;
+        if position == u32::MAX {
+            return None;
+        }
+        let entry = &self.table.entries[position as usize];
+        Some(entry.y..entry.bottom().max(entry.y))
+    }
+
     /// Where the first glyph of line `line` of code block `block`
     /// stands, from the block table alone: the caret's seat on a line
     /// the layout holds no glyphs for. None before the pass places the
@@ -983,6 +1036,38 @@ impl LayoutPass {
         if let Some(pool) = &self.pool {
             pool.begin();
         }
+    }
+
+    /// Follows a recolor that rebuilt the runs `run_lo..run_hi` into a
+    /// span `delta` longer. An open code block holds the run count at
+    /// its start across steps, to drop the block whole or to align it
+    /// when it closes; runs added before that start move it. A rebuild
+    /// reaching into the block's own lines leaves the start at its
+    /// first record's. The family table only grows under a recolor, and
+    /// the names it added stay, since recolored runs carry their ids.
+    fn follow_recolor(&mut self, lay: &LayoutDoc, run_lo: usize, run_hi: usize, delta: isize) {
+        let Some(open) = self.open.as_mut() else {
+            return;
+        };
+        let first_record = lay.code_lines.get(open.counts.code).map(|c| c.runs.start);
+        let moved = |start: usize| {
+            if start <= run_lo {
+                start
+            } else if start >= run_hi {
+                start.wrapping_add_signed(delta)
+            } else {
+                first_record.unwrap_or(start)
+            }
+        };
+        open.counts.runs = moved(open.counts.runs);
+        open.frame.marks.runs = moved(open.frame.marks.runs);
+        open.counts.families = open.counts.families.max(lay.families.len());
+    }
+
+    /// True while the pass stands inside a code block it places line by
+    /// line: the block's element counts are held across steps.
+    pub fn has_open_code(&self) -> bool {
+        self.open.is_some()
     }
 
     /// Bounds retention around a scroll position: blocks outside the
@@ -1186,7 +1271,7 @@ struct FillPlan {
 
 impl FillPlan {
     fn is_empty(&self) -> bool {
-        self.positions.is_empty() && self.extend.as_ref().map_or(true, |(_, l)| l.is_empty())
+        self.positions.is_empty() && self.extend.as_ref().is_none_or(|(_, l)| l.is_empty())
     }
 }
 
@@ -1518,9 +1603,16 @@ pub fn layout_begin(
     cfg: &ViewConfig,
     viewport_width: f32,
 ) -> (LayoutDoc, LayoutPass) {
-    let margin = metrics::MARGIN_RATIO * viewport_width;
+    let right = metrics::MARGIN_RATIO * viewport_width;
+    // A file of lines keeps room for its line numbers on the left: the
+    // margin itself while the digits fit it, more when they do not.
+    let margin = if doc.code_file || doc.plain_file {
+        right.max(cfg.gutter)
+    } else {
+        right
+    };
     let vertical_margin = metrics::VERTICAL_MARGIN_EM * cfg.body_size * cfg.zoom;
-    let content_width = (viewport_width - 2.0 * margin).max(50.0);
+    let content_width = (viewport_width - margin - right).max(50.0);
 
     // Footnote definitions collect at the document end under a rule,
     // wherever the source declared them. Model indices stay untouched so
@@ -2457,6 +2549,55 @@ impl LayoutDoc {
         self.index = YIndex::default();
     }
 
+    /// Whether the code line records, the run vector and the window's
+    /// marks agree: every record's runs lie inside the vector and rise
+    /// with the records, the marks rise and stay inside both, and each
+    /// position's records lie inside the position's own runs. The error
+    /// names the first thing out of step. Every operation that moves
+    /// runs has to leave this true; the tests hold them to it.
+    pub fn records_consistent(&self) -> Result<(), String> {
+        let runs = self.runs.len();
+        let mut floor = 0;
+        for (i, record) in self.code_lines.iter().enumerate() {
+            let range = &record.runs;
+            if range.start > range.end || range.end > runs || range.start < floor {
+                return Err(format!(
+                    "record {i} (block {}, line {}) holds runs {range:?} after {floor}, of {runs}",
+                    record.block, record.line
+                ));
+            }
+            floor = range.end;
+        }
+        let Some(window) = self.window.as_ref() else {
+            return Ok(());
+        };
+        let (mut lo_runs, mut lo_code) = (0, 0);
+        for (i, mark) in window.marks.iter().enumerate() {
+            if mark.runs < lo_runs
+                || mark.code < lo_code
+                || mark.runs > runs
+                || mark.code > self.code_lines.len()
+            {
+                return Err(format!(
+                    "mark {i} ends at run {} and record {} after {lo_runs} and {lo_code}, of {runs} and {}",
+                    mark.runs,
+                    mark.code,
+                    self.code_lines.len()
+                ));
+            }
+            for record in &self.code_lines[lo_code..mark.code] {
+                if record.runs.start < lo_runs || record.runs.end > mark.runs {
+                    return Err(format!(
+                        "position {i} spans runs {lo_runs}..{} and its record (block {}, line {}) holds {:?}",
+                        mark.runs, record.block, record.line, record.runs
+                    ));
+                }
+            }
+            (lo_runs, lo_code) = (mark.runs, mark.code);
+        }
+        Ok(())
+    }
+
     /// Drops the last `count` materialized positions' elements.
     fn window_drop_back(&mut self, count: usize) {
         if count == 0 {
@@ -2991,8 +3132,8 @@ fn replay_position(
             }
         }
     }
-    if block.centered {
-        center_lines(out, run_mark, rect_mark, image_mark, x_base, avail);
+    if let Some(factor) = block.align_factor() {
+        align_lines(out, run_mark, rect_mark, image_mark, x_base, avail, factor);
     }
     if entry.deco_top.is_finite() {
         let decoration = quote_decoration(
@@ -3101,14 +3242,15 @@ fn finish_block(
     pass: &mut LayoutPass,
     source: &str,
 ) {
-    if block.centered {
-        center_lines(
+    if let Some(factor) = block.align_factor() {
+        align_lines(
             out,
             frame.marks.runs,
             frame.marks.rects,
             frame.marks.images,
             frame.x_base,
             frame.avail,
+            factor,
         );
     }
 
@@ -3241,6 +3383,13 @@ pub fn code_framed(doc: &Document) -> bool {
 
 /// The face code lines draw in: a plain text file's lines are prose
 /// and keep the body face and color; every other code line is code.
+/// The face and the zoomed size a file of lines draws its text in, what
+/// the line numbers size themselves from before a layout exists.
+pub fn line_face<'a>(doc: &Document, cfg: &'a ViewConfig) -> (&'a str, f32) {
+    let (family, size) = code_face(doc.plain_file, cfg);
+    (family, size * cfg.zoom)
+}
+
 fn code_face(plain: bool, cfg: &ViewConfig) -> (&str, f32) {
     if plain {
         (&cfg.body_family, cfg.body_size)
@@ -3407,10 +3556,7 @@ fn place_code_line(
     if let Some((scroll, viewport_h)) = pass.retain {
         let range = retain_range(scroll, viewport_h);
         let inside = top <= range.end && top + advance >= range.start;
-        let contiguous = open
-            .kept
-            .as_ref()
-            .map_or(true, |kept| kept.end == open.line);
+        let contiguous = open.kept.as_ref().is_none_or(|kept| kept.end == open.line);
         if inside && contiguous {
             match &mut open.kept {
                 Some(kept) => kept.end = open.line + 1,
@@ -3800,9 +3946,14 @@ fn shape_segment_chunk(
 ) -> f32 {
     let mut buffer = Buffer::new(&mut fonts.font_system, Metrics::new(base.size, line_height));
     buffer.set_size(&mut fonts.font_system, Some(content_width), None);
+    let texts: Vec<std::borrow::Cow<str>> = segment
+        .iter()
+        .map(|&si| crate::style::fonts::shapable(spans[si].text(source)))
+        .collect();
     let rich: Vec<(&str, Attrs)> = segment
         .iter()
-        .map(|&si| {
+        .zip(&texts)
+        .map(|(&si, text)| {
             let st = &styles[si];
             let mut attrs = Attrs::new()
                 .family(Family::Name(&st.family))
@@ -3814,7 +3965,7 @@ fn shape_segment_chunk(
             if (st.size - base.size).abs() > f32::EPSILON {
                 attrs = attrs.metrics(Metrics::new(st.size, line_height));
             }
-            (spans[si].text(source), attrs)
+            (&**text, attrs)
         })
         .collect();
     let default_attrs = Attrs::new().family(Family::Name(&cfg.body_family));
@@ -4095,7 +4246,9 @@ fn layout_list_item(
         }
         Marker::None => {}
         Marker::Task { checked, .. } => {
-            let side = 0.8 * size;
+            // Above the web's native 0.81, which reads small at 1x; the
+            // mark at 0.8 fills the box instead of floating in it.
+            let side = 0.9 * size;
             let bx = if rtl {
                 text_x + text_w + gutter
             } else {
@@ -4119,11 +4272,14 @@ fn layout_list_item(
                     fonts,
                     cfg,
                     "\u{2713}",
-                    0.7 * size,
+                    0.8 * size,
                     theme.surface.background,
                     out,
                 );
-                place_marker(runs, bx + (side - width) / 2.0, y0, block_index, out);
+                // A logical pixel down from the text's own line: the glyph
+                // sits high in its em box and reads off-center otherwise.
+                let lift = cfg.zoom;
+                place_marker(runs, bx + (side - width) / 2.0, y0 + lift, block_index, out);
             } else {
                 let t = (1.0 * cfg.zoom).max(1.0);
                 let radius = 3.0 * cfg.zoom;
@@ -4855,7 +5011,7 @@ fn math_scripts(tex: &str) -> Vec<(String, Script)> {
     out
 }
 
-fn alert_title(kind: AlertKind) -> &'static str {
+pub(crate) fn alert_title(kind: AlertKind) -> &'static str {
     match kind {
         AlertKind::Note => "Note",
         AlertKind::Tip => "Tip",
@@ -4865,7 +5021,7 @@ fn alert_title(kind: AlertKind) -> &'static str {
     }
 }
 
-fn alert_color(theme: &Theme, kind: AlertKind) -> Rgba {
+pub(crate) fn alert_color(theme: &Theme, kind: AlertKind) -> Rgba {
     match kind {
         AlertKind::Note => theme.alerts.note,
         AlertKind::Tip => theme.alerts.tip,
@@ -5890,15 +6046,20 @@ fn fit_side_text(
     best
 }
 
-/// Shifts every element of a centered block so each visual line sits in the
-/// middle of the content width. Lines are clustered by vertical overlap.
-fn center_lines(
+/// Shifts every element of an aligned block so each visual line sits at
+/// `factor` of the room left in the content width: 0.0 puts it against
+/// the left edge, 0.5 centers it, 1.0 puts it against the right edge.
+/// A line may move either way, since right-to-left text starts on the
+/// right; a line wider than the content stays where it is. Lines are
+/// clustered by vertical overlap.
+fn align_lines(
     out: &mut LayoutDoc,
     runs_mark: usize,
     rects_mark: usize,
     images_mark: usize,
     x0: f32,
     avail: f32,
+    factor: f32,
 ) {
     // (top, bottom, kind, index) per element; kinds: 0 runs, 1 rects, 2 images.
     let mut items: Vec<(f32, f32, u8, usize)> = Vec::new();
@@ -5936,8 +6097,8 @@ fn center_lines(
                 x + w
             })
             .fold(0.0, f32::max);
-        let dx = x0 + (avail - (max_x - min_x)) / 2.0 - min_x;
-        if dx > 0.5 {
+        let dx = x0 + (avail - (max_x - min_x)) * factor - min_x;
+        if dx.abs() > 0.5 && min_x + dx >= x0 - 0.5 {
             for item in group {
                 match item.2 {
                     0 => out.runs[item.3].x += dx,
@@ -6055,7 +6216,9 @@ fn place_marker(runs: Vec<TextRun>, x: f32, y: f32, block_index: usize, out: &mu
 /// trusted only as far as the document reaches. Answers the splice it
 /// made, (first run, old end run, length delta), so callers can remap
 /// positions they hold instead of dropping them; None means no run
-/// moved.
+/// moved. `pass` is the pass still placing this layout, when there is
+/// one: the run counts it holds for an open code block follow the
+/// splice, or the block's drop would cut into the lines above it.
 pub fn recolor_batch(
     lay: &mut LayoutDoc,
     doc: &Document,
@@ -6063,6 +6226,7 @@ pub fn recolor_batch(
     fonts: &mut FontStore,
     cfg: &ViewConfig,
     patches: &[(usize, Range<usize>)],
+    pass: Option<&mut LayoutPass>,
 ) -> Option<(usize, usize, isize)> {
     // Records sort by (block, line) and their run ranges rise with it,
     // so the affected list visits the run vector strictly left to right.
@@ -6174,6 +6338,9 @@ pub fn recolor_batch(
                 mark.runs = lay.code_lines[mark.code - 1].runs.end;
             }
         }
+    }
+    if let Some(pass) = pass {
+        pass.follow_recolor(lay, run_lo, run_hi, delta);
     }
     Some((run_lo, run_hi, delta))
 }
@@ -6319,7 +6486,7 @@ pub fn recolor_code_lines(
     block: usize,
     lines: Range<usize>,
 ) -> Option<(usize, usize, isize)> {
-    recolor_batch(lay, doc, theme, fonts, cfg, &[(block, lines)])
+    recolor_batch(lay, doc, theme, fonts, cfg, &[(block, lines)], None)
 }
 
 /// Shapes one code line into the scratch from zero, record included:
@@ -6512,6 +6679,8 @@ fn shape_code_chunk(
     let bold_weight = fonts.weight_for(face, Weight::BOLD);
     let mut buffer = Buffer::new(&mut fonts.font_system, Metrics::new(size, line_height));
     buffer.set_size(&mut fonts.font_system, Some(wrap_width), None);
+    let shaped_text = crate::style::fonts::shapable(text);
+    let text = &*shaped_text;
     let rich: Vec<(&str, Attrs)> = segments
         .iter()
         .enumerate()
@@ -6583,7 +6752,7 @@ fn shape_code_chunk(
     height
 }
 
-fn role_color(theme: &Theme, role: SyntaxRole) -> Rgba {
+pub(crate) fn role_color(theme: &Theme, role: SyntaxRole) -> Rgba {
     let s = &theme.syntax;
     match role {
         SyntaxRole::Keyword => s.keyword,
@@ -6596,6 +6765,13 @@ fn role_color(theme: &Theme, role: SyntaxRole) -> Rgba {
         SyntaxRole::Variable => s.variable,
         SyntaxRole::Punctuation => s.punctuation,
         SyntaxRole::Plain => theme.surface.foreground,
+        // A diff is read by its green and red. The themes name no such
+        // colors among the code ones, but every theme has a green, a
+        // red and a blue chosen to read as text on the page: the tip,
+        // the caution and the note alerts' own.
+        SyntaxRole::Added => theme.alerts.tip,
+        SyntaxRole::Removed => theme.alerts.caution,
+        SyntaxRole::Range => theme.alerts.note,
         // A markdown source is drawn in the colors its own rendering
         // uses, so the file on screen and the page it becomes agree.
         // The rule's dashes and the quote's `>` are the exception: their

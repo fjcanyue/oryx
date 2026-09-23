@@ -72,9 +72,24 @@ pub fn start(display: *mut c_void, surface: *mut c_void, wake: Waker) -> Option<
                 wake,
             };
             while queue.blocking_dispatch(&mut state).is_ok() {}
+            // The connection failed, and the main thread learns it at
+            // the same moment and closes the display. Dropping the
+            // queue and the state would call into libwayland on a
+            // display being freed, which crashed the process on its
+            // way out (18/09/2026).
+            retire((queue, state));
         })
         .ok()?;
     Some(drops)
+}
+
+/// Ends a thread's work without running a destructor: `held` is
+/// forgotten, and the thread sleeps for what is left of the process.
+fn retire<T>(held: T) -> ! {
+    std::mem::forget(held);
+    loop {
+        std::thread::park();
+    }
 }
 
 struct State {
@@ -311,5 +326,29 @@ mod tests {
         );
         assert!(parse_uri_list("").is_empty());
         assert!(parse_uri_list("file://").is_empty());
+    }
+
+    /// What the drop thread holds when its loop ends is never dropped:
+    /// its destructors call into libwayland, and the main thread is
+    /// closing the display at that moment.
+    #[test]
+    fn a_retired_thread_drops_nothing() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        struct Held(Arc<AtomicBool>);
+        impl Drop for Held {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::SeqCst);
+            }
+        }
+        let dropped = Arc::new(AtomicBool::new(false));
+        let held = Held(Arc::clone(&dropped));
+        let (started, wait) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            started.send(()).expect("the test waits");
+            retire(held)
+        });
+        wait.recv().expect("the thread started");
+        std::thread::sleep(Duration::from_millis(50));
+        assert!(!dropped.load(Ordering::SeqCst), "nothing is dropped");
     }
 }

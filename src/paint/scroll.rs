@@ -4,12 +4,65 @@
 use std::time::Duration;
 
 use crate::doc::images::MediaCache;
+use crate::doc::model::{BlockKind, Document};
 use crate::layout::{DecoRect, LayoutDoc};
 use crate::style::fonts::FontStore;
 use crate::style::theme::Theme;
 
 pub fn clamp(y: f32, doc_height: f32, viewport_h: f32) -> f32 {
     y.clamp(0.0, (doc_height - viewport_h).max(0.0))
+}
+
+/// The source offset of what stands at the top of the view: the start
+/// of the block there, and inside a code block whose lines are the
+/// source's own, the start of the line there. A code or text file is
+/// one such block, so its place is a line, not the top of the file.
+pub fn top_offset(lay: &LayoutDoc, doc: &Document, scroll_y: f32) -> usize {
+    let mut at = None;
+    for index in 0..doc.blocks.len() {
+        match lay.approx_top(index, 0) {
+            Some(top) if top <= scroll_y + 1.0 => at = Some(index),
+            _ => break,
+        }
+    }
+    let Some(index) = at else {
+        return 0;
+    };
+    let block = &doc.blocks[index];
+    if let BlockKind::CodeBlock { lines, .. } = &block.kind {
+        let line = lay
+            .code_line_at(index, lines.len(), scroll_y + 1.0)
+            .and_then(|line| lines.line_range(line));
+        if let Some(range) = line {
+            return range.start;
+        }
+    }
+    block.range.start
+}
+
+/// Where a source offset stands on the page, the inverse of
+/// `top_offset`: the top of its block, or of its line inside a code
+/// block whose lines are the source's own. None before the pass places
+/// the block.
+pub fn offset_top(lay: &LayoutDoc, doc: &Document, offset: usize) -> Option<f32> {
+    let block = doc.block_at_offset(offset)?;
+    let line = match &doc.blocks[block].kind {
+        BlockKind::CodeBlock { lines, .. } if !lines.is_empty() => lines
+            .row_at(&doc.source, offset)
+            .map_or(0, |row| row.min(lines.len() - 1)),
+        _ => 0,
+    };
+    lay.approx_top(block, line)
+}
+
+/// The offset a frame paints the page at: the scroll position floored
+/// to a whole device pixel. The position itself keeps its fraction,
+/// since a touchpad delivers fractions of a pixel per event and a slow
+/// scroll accumulates them; the frame reads this once and hands it to
+/// every path, the direct paint, the band, its slice and the overlays,
+/// so no two frames of one position land a pixel apart.
+pub fn frame_offset(scroll_y: f32) -> f32 {
+    scroll_y.floor()
 }
 
 /// How long a window size holds still before a deferred relayout runs.
@@ -89,7 +142,8 @@ pub struct BandCache {
 
 impl BandCache {
     /// Paints a band recentered on `scroll_y`: five viewport heights,
-    /// clamped so it never starts above the document top.
+    /// clamped so it never starts above the document top. `numbers` is
+    /// the line numbers' color, None when they are off.
     #[allow(clippy::too_many_arguments)]
     pub fn repaint(
         layout: &LayoutDoc,
@@ -98,6 +152,7 @@ impl BandCache {
         fonts: &mut FontStore,
         media: &mut MediaCache,
         extra: &[DecoRect],
+        numbers: Option<crate::style::theme::Rgba>,
         scroll_y: f32,
         width: u32,
         viewport_h: u32,
@@ -108,8 +163,8 @@ impl BandCache {
         let y_top = (scroll_y - (2 * viewport_h) as f32)
             .clamp(0.0, max_top)
             .floor();
-        let pixels = super::band(
-            layout, doc, theme, fonts, media, extra, y_top, width, height,
+        let pixels = super::band_numbered(
+            layout, doc, theme, fonts, media, extra, numbers, y_top, width, height,
         );
         BandCache {
             pixels,
@@ -145,12 +200,127 @@ impl BandCache {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::doc::load;
+    use crate::layout::{layout, ViewConfig};
+    use std::path::PathBuf;
+
+    fn lay_of(doc: &Document) -> LayoutDoc {
+        let mut fonts = FontStore::new();
+        let mut media = MediaCache::new(PathBuf::from("."));
+        layout(
+            doc,
+            &Theme::default_dark(),
+            &mut fonts,
+            &mut media,
+            &ViewConfig::default(),
+            2000.0,
+        )
+    }
+
+    fn code_lines(count: usize) -> String {
+        (1..=count)
+            .map(|i| format!("let line_{i} = {i};\n"))
+            .collect()
+    }
+
+    #[test]
+    fn a_code_file_keeps_its_place_by_the_line() {
+        let source = code_lines(400);
+        let doc = load::code_document(Some("rust"), &source);
+        let lay = lay_of(&doc);
+        for line in [0usize, 1, 64, 399] {
+            let start = source
+                .match_indices('\n')
+                .nth(line.wrapping_sub(1))
+                .map_or(0, |(at, _)| at + 1);
+            let start = if line == 0 { 0 } else { start };
+            let y = offset_top(&lay, &doc, start).expect("the block is placed");
+            assert_eq!(
+                top_offset(&lay, &doc, y),
+                start,
+                "line {line} at the top of the view answers with its own start"
+            );
+            assert_eq!(
+                top_offset(&lay, &doc, y + 3.0),
+                start,
+                "and still does a few pixels into the line"
+            );
+        }
+        let first = offset_top(&lay, &doc, 0).unwrap();
+        let later = offset_top(&lay, &doc, source.find("line_65").unwrap()).unwrap();
+        assert!(
+            later > first + 600.0,
+            "line 65 stands far under line 1: {first} {later}"
+        );
+    }
+
+    #[test]
+    fn a_text_file_keeps_its_place_by_the_line() {
+        let source: String = (1..=300).map(|i| format!("text line {i}\n")).collect();
+        let doc = load::text_document(&source);
+        let lay = lay_of(&doc);
+        let start = source.find("text line 200").unwrap();
+        let y = offset_top(&lay, &doc, start).unwrap();
+        assert!(y > 1000.0);
+        assert_eq!(top_offset(&lay, &doc, y), start);
+    }
+
+    #[test]
+    fn a_page_keeps_its_place_by_the_block() {
+        let mut source = String::new();
+        for i in 0..40 {
+            source.push_str(&format!(
+                "## Section {i}\n\nA paragraph for section {i}.\n\n"
+            ));
+        }
+        let doc = crate::doc::markdown::parse(source.as_str());
+        let lay = lay_of(&doc);
+        let block = 21;
+        let start = doc.blocks[block].range.start;
+        let y = offset_top(&lay, &doc, start).unwrap();
+        assert_eq!(y, lay.approx_top(block, 0).unwrap());
+        assert_eq!(top_offset(&lay, &doc, y), start);
+    }
+
+    #[test]
+    fn a_code_block_inside_a_page_keeps_its_line() {
+        let mut source = String::from("# Title\n\n```rust\n");
+        source.push_str(&code_lines(200));
+        source.push_str("```\n\nThe end.\n");
+        let doc = crate::doc::markdown::parse(source.as_str());
+        let lay = lay_of(&doc);
+        let start = source.find("let line_120 ").unwrap();
+        let y = offset_top(&lay, &doc, start).unwrap();
+        assert_eq!(top_offset(&lay, &doc, y), start);
+        let end = source.find("The end").unwrap();
+        assert_eq!(
+            top_offset(&lay, &doc, offset_top(&lay, &doc, end).unwrap()),
+            end
+        );
+    }
 
     #[test]
     fn clamp_bounds() {
         assert_eq!(clamp(-10.0, 1000.0, 300.0), 0.0);
         assert_eq!(clamp(2000.0, 1000.0, 300.0), 700.0);
         assert_eq!(clamp(100.0, 200.0, 300.0), 0.0);
+    }
+
+    #[test]
+    fn the_frame_offset_floors_and_the_state_keeps_its_fraction() {
+        assert_eq!(frame_offset(50.6), 50.0);
+        assert_eq!(frame_offset(50.0), 50.0);
+        assert_eq!(
+            frame_offset(clamp(1000.0, 700.5, 300.0)),
+            400.0,
+            "a clamp to a fractional maximum floors under it"
+        );
+        let mut y = 0.0;
+        for _ in 0..4 {
+            y = clamp(y + 0.3, 1000.0, 300.0);
+        }
+        assert!((y - 1.2).abs() < 1e-6, "four touchpad steps add up: {y}");
+        assert_eq!(frame_offset(y), 1.0);
     }
 
     #[test]

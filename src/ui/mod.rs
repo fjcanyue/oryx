@@ -1,7 +1,10 @@
 pub mod confirm;
 pub mod export;
+pub mod goto;
 pub mod help;
+pub mod history;
 pub mod notice;
+pub mod occurrences;
 pub mod outline;
 pub mod overlay;
 pub mod scrollbar;
@@ -14,3 +17,4 @@ pub mod textfield;
 pub mod theme_browser;
 pub mod theme_editor;
 pub mod tooltip;
+pub mod wordcount;

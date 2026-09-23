@@ -5,7 +5,7 @@ description: Every construct Oryx recognizes, as written and as rendered
 
 # Oryx syntax reference
 
-Every construct Oryx recognizes, markdown and embedded HTML. Each one is shown twice: first its source in a code block, so the reader sees how it is written, then the same lines rendered right under it. Open this file in Oryx to see both. On GitHub, the forms outside its own flavor (definition lists, highlight, subscript, superscript, abbreviations, heading IDs) appear as typed in the rendered copy.
+Every construct Oryx recognizes, markdown and embedded HTML. Each one is shown twice: first its source in a code block, so the reader sees how it is written, then the same lines rendered right under it. On GitHub, the forms outside its own flavor (definition lists, highlight, subscript, superscript, abbreviations, heading IDs) appear as typed in the rendered copy, and Oryx renders them all.
 
 Oryx reads CommonMark, the GitHub Flavored Markdown extensions (tables, task lists, strikethrough, footnotes, alerts and math), and the extended syntax listed by the Markdown Guide (heading IDs, definition lists, subscript, superscript, highlight, abbreviations). Emoji shortcodes, smart punctuation and a YAML frontmatter block are recognized too, and the HTML subset GitHub allows in READMEs renders as GitHub renders it.
 
@@ -231,7 +231,7 @@ def tilde_fences():
 
     an indented block renders as code too
 
-Fence languages cover the bundled grammar collection, from `rust` and `python` through `toml`, `kotlin`, `swift`, `typescript`, `dockerfile`, `zig`, `terraform`, `graphql` and `protobuf`. Oryx also opens source files directly and renders the whole file highlighted.
+Fence languages cover the bundled grammar collection, from `rust` and `python` through `toml`, `kotlin`, `swift`, `typescript`, `dockerfile`, `zig`, `terraform`, `graphql` and `protobuf`. A `diff` fence shows its added lines in green and its removed lines in red. Oryx also opens source files directly and renders the whole file highlighted.
 
 ## Diagrams
 
@@ -242,7 +242,7 @@ flowchart LR
     B -->|Yes| C[Continue]
     B -->|No| D[Stop]
 ```
-````
+`````
 
 ```mermaid
 flowchart LR
@@ -297,7 +297,7 @@ Angle brackets too: <https://example.com> and <someone@example.com>
 ![local image](examples/oryx-test.png)
 ![remote image](https://img.shields.io/badge/oryx-syntax-blue.svg)
 
-A link to another file opens it in Oryx. Remote images fetch in the background and cache on disk. SVG renders, badges included. A broken path becomes a placeholder with the alt text.
+A link to another file opens it in Oryx. Remote images fetch in the background and cache on disk. SVG renders, badges included. A broken path becomes a placeholder with the alt text. A path with a space or a parenthesis in it goes between angle brackets, `![a photo](<images/my photo.png>)`, which is what Oryx writes when you paste or drop a picture into a file.
 
 ## Footnotes
 
@@ -455,6 +455,8 @@ Oryx renders the HTML subset GitHub allows in READMEs. Anything outside it is st
 
 <p align="center">A centered paragraph.</p>
 <div align="center">A centered block.</div>
+<p align="right">A paragraph on the right.</p>
+<div align="center"><p align="left">A left paragraph inside a centered block.</p></div>
 
 <blockquote>A quote, nestable, stacking with markdown quotes.</blockquote>
 
@@ -475,6 +477,8 @@ Oryx renders the HTML subset GitHub allows in READMEs. Anything outside it is st
 
 <p align="center">A centered paragraph.</p>
 <div align="center">A centered block.</div>
+<p align="right">A paragraph on the right.</p>
+<div align="center"><p align="left">A left paragraph inside a centered block.</p></div>
 
 <blockquote>A quote, nestable, stacking with markdown quotes.</blockquote>
 

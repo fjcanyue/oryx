@@ -8,7 +8,18 @@ use crate::doc::images::MediaCache;
 use crate::doc::model::Document;
 use crate::layout::{metrics, DecoRect, LayoutDoc, MathGlyph, TextRun};
 use crate::style::fonts::FontStore;
-use crate::style::theme::Theme;
+use crate::style::theme::{Rgba, Theme};
+
+/// The color of the page itself. A code file's page is code: the theme's
+/// code background becomes the paper, edge to edge, where the dropped
+/// panel used to carry it.
+pub fn paper(doc: &Document, theme: &Theme) -> Rgba {
+    if doc.code_file {
+        theme.blocks.code_bg
+    } else {
+        theme.surface.background
+    }
+}
 
 /// Paints the document slice `[y_top, y_top + height)` at full width.
 /// `extra` rects (the selection highlight) paint above the document's own
@@ -25,14 +36,28 @@ pub fn band(
     width: u32,
     height: u32,
 ) -> Vec<u32> {
+    band_numbered(
+        layout, doc, theme, fonts, media, extra, None, y_top, width, height,
+    )
+}
+
+/// As `band`, with the line numbers of a file of lines in the left
+/// margin when `numbers` gives their color.
+#[allow(clippy::too_many_arguments)]
+pub fn band_numbered(
+    layout: &LayoutDoc,
+    doc: &Document,
+    theme: &Theme,
+    fonts: &mut FontStore,
+    media: &mut MediaCache,
+    extra: &[DecoRect],
+    numbers: Option<Rgba>,
+    y_top: f32,
+    width: u32,
+    height: u32,
+) -> Vec<u32> {
     let mut pixmap = Pixmap::new(width.max(1), height.max(1)).expect("pixmap allocation");
-    // A code file's page is code: the theme's code background becomes
-    // the paper, edge to edge, where the dropped panel used to carry it.
-    let bg = if doc.code_file {
-        theme.blocks.code_bg
-    } else {
-        theme.surface.background
-    };
+    let bg = paper(doc, theme);
     pixmap.fill(tiny_skia::Color::from_rgba8(bg.r, bg.g, bg.b, 255));
     let band_bottom = y_top + height as f32;
 
@@ -120,6 +145,10 @@ pub fn band(
             continue;
         }
         draw_math_glyph(&mut pixmap, fonts, g, y_top);
+    }
+
+    if let Some(color) = numbers.filter(|_| super::gutter::numbered(doc)) {
+        super::gutter::paint(&mut pixmap, fonts, layout, doc, color, y_top);
     }
 
     pixmap
@@ -212,7 +241,7 @@ fn draw_run(
     }
     buffer.set_text(
         &mut fonts.font_system,
-        text,
+        &crate::style::fonts::shapable(text),
         &attrs,
         Shaping::Advanced,
         None,
@@ -236,6 +265,19 @@ fn draw_run(
         .map(|lr| run.width - lr.line_w)
         .unwrap_or(0.0);
     let (origin_x, origin_y) = (run.x + anchor, run.baseline - paint_baseline - y_top);
+    blend_buffer(pixmap, fonts, &mut buffer, color, origin_x, origin_y);
+}
+
+/// Blends a shaped buffer's glyphs onto the pixmap, the buffer's origin
+/// at (`origin_x`, `origin_y`), whole pixels taken by truncation.
+pub(super) fn blend_buffer(
+    pixmap: &mut Pixmap,
+    fonts: &mut FontStore,
+    buffer: &mut Buffer,
+    color: Color,
+    origin_x: f32,
+    origin_y: f32,
+) {
     let width = pixmap.width() as i32;
     let height = pixmap.height() as i32;
     let data = pixmap.data_mut();
@@ -365,6 +407,77 @@ mod tests {
             400.0,
         );
         band(&lay, doc, &theme, &mut fonts, &mut media, &[], 0.0, 40, 40)[0]
+    }
+
+    #[test]
+    fn the_direct_frame_and_the_band_slice_agree_at_a_fractional_scroll() {
+        use crate::paint::scroll::{frame_offset, BandCache};
+        let theme = Theme::default_dark();
+        let mut fonts = FontStore::new();
+        let mut media = MediaCache::new(PathBuf::from("."));
+        let text: String = (0..40).map(|i| format!("let value_{i} = {i};\n")).collect();
+        let doc = load::code_document(Some("rust"), &text);
+        let lay = layout(
+            &doc,
+            &theme,
+            &mut fonts,
+            &mut media,
+            &ViewConfig::default(),
+            300.0,
+        );
+        let (width, viewport) = (300u32, 100u32);
+        let scroll = 50.6;
+        let exact = band(
+            &lay,
+            &doc,
+            &theme,
+            &mut fonts,
+            &mut media,
+            &[],
+            scroll,
+            width,
+            viewport,
+        );
+        let whole = band(
+            &lay,
+            &doc,
+            &theme,
+            &mut fonts,
+            &mut media,
+            &[],
+            50.0,
+            width,
+            viewport,
+        );
+        assert_ne!(exact, whole, "a fraction of a pixel moves the glyphs");
+        let direct = band(
+            &lay,
+            &doc,
+            &theme,
+            &mut fonts,
+            &mut media,
+            &[],
+            frame_offset(scroll),
+            width,
+            viewport,
+        );
+        let cache = BandCache::repaint(
+            &lay,
+            &doc,
+            &theme,
+            &mut fonts,
+            &mut media,
+            &[],
+            None,
+            scroll,
+            width,
+            viewport,
+        );
+        assert_eq!(
+            direct,
+            cache.view(frame_offset(scroll), viewport),
+            "the frame after a keystroke and the band frame after it paint the same pixels"
+        );
     }
 
     #[test]
