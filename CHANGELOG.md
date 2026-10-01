@@ -15,6 +15,8 @@
 - `Alt+Left` and `Alt+Right` now bring you back to the same view you left. Before, the line went to the top of the window.
 - In the editor, the current line number is now shown in a small box, so it is easier to see.
 - On Windows, the sidebar can now reach your other drives: `..` at the top of a drive shows the list of drives. Before, the sidebar could not leave the drive it started on.
+- Changing the theme now keeps the page where you were reading. Before, the view could move.
+- In the editor, a jump to a far line of a very large file is faster.
 
 ## v1.2.0
 
