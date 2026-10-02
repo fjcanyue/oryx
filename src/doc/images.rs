@@ -130,7 +130,7 @@ fn load_svg(bytes: &[u8]) -> Option<RgbaImage> {
         &mut pixmap.as_mut(),
     );
     let mut img = RgbaImage::new(width, height);
-    for (target, px) in img.chunks_exact_mut(4).zip(pixmap.pixels()) {
+    for (target, px) in img.as_chunks_mut::<4>().0.iter_mut().zip(pixmap.pixels()) {
         let c = px.demultiply();
         target.copy_from_slice(&[c.red(), c.green(), c.blue(), c.alpha()]);
     }

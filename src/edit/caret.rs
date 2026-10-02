@@ -970,10 +970,7 @@ fn blank_line_at(
         out
     };
     let seat = |anchor: &Line, start: usize, fonts: &mut FontStore| -> usize {
-        let end = start
-            + source[start..]
-                .find('\n')
-                .map_or(source.len() - start, |n| n);
+        let end = start + source[start..].find('\n').unwrap_or(source.len() - start);
         let x0 = anchor.runs.first().map_or(0.0, |r| r.x);
         if end > start && x > x0 + line_prefix_advance(fonts, lay, doc, anchor, end) {
             end

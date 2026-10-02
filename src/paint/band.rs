@@ -153,7 +153,9 @@ pub fn band_numbered(
 
     pixmap
         .data()
-        .chunks_exact(4)
+        .as_chunks::<4>()
+        .0
+        .iter()
         .map(|px| ((px[0] as u32) << 16) | ((px[1] as u32) << 8) | px[2] as u32)
         .collect()
 }
