@@ -109,7 +109,11 @@ pub fn fitted_below(
 /// the other blocks, and before the pass places the block.
 pub fn line_estimate(lay: &LayoutDoc, doc: &Document, offset: usize) -> Option<f32> {
     let source = &doc.source;
-    let offset = offset.min(source.len());
+    // A remembered offset may fall inside a character after an edit.
+    let mut offset = offset.min(source.len());
+    while !source.is_char_boundary(offset) {
+        offset -= 1;
+    }
     let start = source[..offset].rfind('\n').map_or(0, |at| at + 1);
     let end = source[offset..]
         .find('\n')
@@ -471,6 +475,26 @@ mod tests {
         assert_eq!(
             line_estimate(&lay, &doc, source.find("let line_5 ").unwrap()),
             None
+        );
+    }
+
+    #[test]
+    fn an_offset_inside_a_character_answers_the_estimate_of_its_line() {
+        let source = "Before.\n\néé and words\n\nAfter.\n";
+        let doc = crate::doc::markdown::parse(source);
+        let lay = lay_of(&doc);
+        let line = source.find("éé").unwrap();
+        let whole = line_estimate(&lay, &doc, line);
+        assert!(whole.is_some(), "the line has a row");
+        assert_eq!(
+            line_estimate(&lay, &doc, line + 1),
+            whole,
+            "inside the first é"
+        );
+        assert_eq!(
+            line_estimate(&lay, &doc, line + 3),
+            whole,
+            "inside the second é"
         );
     }
 

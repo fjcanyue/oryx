@@ -344,7 +344,11 @@ pub fn row_top(lay: &LayoutDoc, doc: &Document, offset: usize) -> Option<f32> {
 /// outside what the layout holds right now.
 pub fn line_top(lay: &LayoutDoc, doc: &Document, offset: usize) -> Option<f32> {
     let source = &doc.source;
-    let offset = offset.min(source.len());
+    // A remembered offset may fall inside a character after an edit.
+    let mut offset = offset.min(source.len());
+    while !source.is_char_boundary(offset) {
+        offset -= 1;
+    }
     let start = source[..offset].rfind('\n').map_or(0, |at| at + 1);
     let end = source[offset..]
         .find('\n')
@@ -2171,6 +2175,17 @@ mod tests {
             line_top(&l, &doc, marker),
             Some(run_top(&l, &doc, "second"))
         );
+    }
+
+    #[test]
+    fn an_offset_inside_a_character_answers_the_row_of_its_line() {
+        let doc = md_doc("Before.\n\néé and words\n\nAfter.\n");
+        let (l, _) = lay_of(&doc);
+        let line = at(&doc, "éé");
+        let top = line_top(&l, &doc, line);
+        assert_eq!(top, Some(run_top(&l, &doc, "éé")));
+        assert_eq!(line_top(&l, &doc, line + 1), top, "inside the first é");
+        assert_eq!(line_top(&l, &doc, line + 3), top, "inside the second é");
     }
 
     #[test]
