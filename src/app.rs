@@ -702,6 +702,31 @@ fn waiting_place(row: Option<Place>, page: Option<Place>, caret: Option<usize>) 
     }
 }
 
+/// Whether a new layout pass keeps the scroll of the view, to bring it
+/// back once the layout reaches that height again. Not while a landing
+/// waits: the landing says where the view goes, and on a large file the
+/// kept scroll would be applied after it. After a crossing between the
+/// page and the editor the kept scroll would even be the other
+/// document's.
+fn keeps_scroll(scroll_y: f32, landing_waits: bool) -> bool {
+    scroll_y > 0.0 && !landing_waits
+}
+
+/// The caret the editor takes when it opens while a landing waits: the
+/// remembered offset when it lies on the line the landing shows, which
+/// is a jump with its column, else the offset of the landing.
+fn waiting_caret(source: &str, place: Place, remembered: Option<usize>) -> usize {
+    let Some(mark) = remembered else {
+        return place.offset;
+    };
+    let (low, high) = (mark.min(place.offset), mark.max(place.offset));
+    // The same line when no line break stands between the two.
+    match source.get(low..high) {
+        Some(between) if !between.contains('\n') => mark,
+        _ => place.offset,
+    }
+}
+
 /// The height the history files for the caret's row, and whether the
 /// row stood outside the view or cut by one of its edges. A row in view
 /// files the height a step keeps inside the view. A row the reader
@@ -1775,24 +1800,35 @@ impl App {
             .and_then(|p| self.edit_marks.get(p))
             .copied();
         let sel = self.selection.filter(|s| !s.is_empty());
-        let offset = match self.layout.as_ref() {
-            Some(lay) => caret::landing(
-                lay,
-                &self.document,
-                sel.as_ref(),
-                remembered,
-                self.scroll_y,
-                view_h,
-            ),
+        // A landing that still waits for the layout is where the reader
+        // stands: the editor opens there, not on the view the landing
+        // has not reached yet, and the landing is dropped, or it would
+        // move the view away from the caret later.
+        let waiting =
+            waiting_place(self.pending_row, self.pending_offset, None).filter(|_| sel.is_none());
+        self.drop_waiting_landings();
+        let (offset, below) = match (waiting, self.layout.as_ref()) {
+            (Some(place), _) => {
+                let caret = waiting_caret(&self.document.source, place, remembered);
+                (caret::clamp(&self.document, caret), place.below)
+            }
+            (None, Some(lay)) => {
+                let offset = caret::landing(
+                    lay,
+                    &self.document,
+                    sel.as_ref(),
+                    remembered,
+                    self.scroll_y,
+                    view_h,
+                );
+                let below = caret::place_box(lay, &self.document, offset, view_h)
+                    .map_or(0.0, |(y, h)| caret::held(y, h, self.scroll_y, view_h));
+                (offset, below)
+            }
             // The path a reload and a file switch take: the layout is
             // fresh and the file may have shrunk since the mark was set.
-            None => caret::clamp(&self.document, remembered.unwrap_or(0)),
+            (None, None) => (caret::clamp(&self.document, remembered.unwrap_or(0)), 0.0),
         };
-        let below = self
-            .layout
-            .as_ref()
-            .and_then(|lay| caret::place_box(lay, &self.document, offset, view_h))
-            .map_or(0.0, |(y, h)| caret::held(y, h, self.scroll_y, view_h));
         self.mode = edit::Mode::Edit;
         self.caret = Some(Caret::at(offset));
         self.ensure_ledger();
@@ -1816,6 +1852,14 @@ impl App {
             // two documents share no coordinate but the bytes. The row
             // the caret landed on takes the height its line had on the
             // page, so the line does not move under the reader's eyes.
+            self.seat_editor_on(Place {
+                offset,
+                below,
+                line: false,
+            });
+        } else if waiting.is_some() {
+            // A code or text file keeps its document, and the landing
+            // that waited is now the caret's.
             self.seat_editor_on(Place {
                 offset,
                 below,
@@ -1938,6 +1982,11 @@ impl App {
             .map_or(0.0, |(y, h)| {
                 caret::held(y, h, self.scroll_y, self.viewport_h())
             });
+        // A landing on the caret that still waits for the layout: the
+        // view has not followed the caret yet, so the height the
+        // landing asked for answers, not the screen.
+        let waiting = left_at.and_then(|caret| waiting_place(self.pending_row, None, Some(caret)));
+        let below = waiting.map_or(below, |place| place.below);
         if let (Some(path), Some(c)) = (self.path.clone(), self.caret) {
             self.edit_marks.insert(path, c.offset);
         }
@@ -7311,7 +7360,10 @@ impl App {
         if self.layout.is_some() && (self.layout_width == avail || self.settle_at.is_some()) {
             return false;
         }
-        if self.scroll_y > 0.0 {
+        let landing_waits = self.pending_row.is_some()
+            || self.pending_offset.is_some()
+            || self.pending_anchor.is_some();
+        if keeps_scroll(self.scroll_y, landing_waits) {
             self.pending_scroll = Some(self.scroll_y);
         }
         let (out, mut pass) = layout_begin(&self.document, &self.cfg, avail);
@@ -7490,6 +7542,9 @@ impl App {
             match target {
                 Some(y) if scroll::reached(y, height, vh) || !self.layout_pending() => {
                     self.pending_row = None;
+                    // A kept scroll that still waits is older than the
+                    // landing, and would move the view after it.
+                    self.pending_scroll = None;
                     self.scroll_to(y);
                 }
                 None if self.layout.is_some() && !self.layout_pending() => self.pending_row = None,
@@ -7513,6 +7568,7 @@ impl App {
                 match placed {
                     Some(y) if scroll::reached(y, height, vh) || !self.layout_pending() => {
                         self.pending_offset = None;
+                        self.pending_scroll = None;
                         self.landing_settle = Some(place).filter(|place| place.line);
                         self.scroll_to(y);
                     }
@@ -7529,6 +7585,7 @@ impl App {
         match self.layout.as_ref().and_then(|l| l.anchor_y(&name)) {
             Some(y) if scroll::reached(y, height, vh) || !self.layout_pending() => {
                 self.pending_anchor = None;
+                self.pending_scroll = None;
                 self.scroll_to(y);
             }
             // The pass ended without ever placing that heading.
@@ -8822,6 +8879,51 @@ mod tests {
             "the landing of a page is applied last"
         );
         assert_eq!(waiting_place(None, None, None), None);
+    }
+
+    #[test]
+    fn a_new_layout_keeps_the_scroll_only_when_no_landing_waits() {
+        use super::keeps_scroll;
+        assert!(keeps_scroll(2400.0, false), "a zoom change keeps the view");
+        assert!(!keeps_scroll(0.0, false), "the top needs no keeping");
+        assert!(
+            !keeps_scroll(2400.0, true),
+            "a landing that waits replaces the scroll"
+        );
+    }
+
+    #[test]
+    fn the_editor_opens_on_the_line_of_a_landing_that_waits() {
+        use super::{waiting_caret, Place};
+        let source = "one\ntwo words\nthree\n";
+        // A jump on a page names the end of its line.
+        let place = Place {
+            offset: source.find("\nthree").unwrap(),
+            below: 290.0,
+            line: true,
+        };
+        let column = source.find("words").unwrap();
+        assert_eq!(
+            waiting_caret(source, place, Some(column)),
+            column,
+            "the remembered column of the jump, on the same line"
+        );
+        assert_eq!(
+            waiting_caret(source, place, Some(1)),
+            place.offset,
+            "a remembered place on another line is not the jump"
+        );
+        assert_eq!(waiting_caret(source, place, None), place.offset);
+        let last = Place {
+            offset: source.len() + 40,
+            below: 0.0,
+            line: false,
+        };
+        assert_eq!(
+            waiting_caret(source, last, Some(2)),
+            last.offset,
+            "a place past the text is left to the clamp of the caller"
+        );
     }
 
     #[test]

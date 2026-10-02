@@ -16,6 +16,7 @@
 - `Ctrl+E` in the middle of a table or of an indented code block now opens the editor on the lines you were reading. Before, the editor opened at the start of the table or of the block.
 - After `Ctrl+G` while reading, `Ctrl+E` now puts the caret on the line you jumped to. Before, the caret was on the first line in view.
 - A jump to an empty line after a long table or a long paragraph now shows the end of that table or paragraph, and so does leaving the editor from such a line. Before, Oryx showed its beginning.
+- In a very large markdown file, `Ctrl+E` far down the page now opens the editor on the lines you were reading. Before, the view could end thousands of lines below the caret.
 - In the editor, the current line number is now shown in a small box, so it is easier to see.
 - On Windows, the sidebar can now reach your other drives: `..` at the top of a drive shows the list of drives. Before, the sidebar could not leave the drive it started on.
 - Changing the theme now keeps the page where you were reading. Before, the view could move.
