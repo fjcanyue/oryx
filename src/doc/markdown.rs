@@ -854,7 +854,9 @@ impl Builder {
 
     /// The accumulated code body as line ranges: into the source when the
     /// body sits there verbatim (fenced blocks), into an owned copy when
-    /// parsing normalized it (indented blocks strip their indent).
+    /// parsing normalized it (indented blocks strip their indent). The
+    /// owned copy keeps where the source line of each line starts, so a
+    /// jump to a line of the block finds its row.
     fn code_body(&mut self, text: &str) -> CodeBody {
         let start = self.code_start.take().unwrap_or(0);
         let verbatim = self
@@ -862,7 +864,9 @@ impl Builder {
             .get(start..start + text.len())
             .is_some_and(|s| s == text);
         if !verbatim {
-            return CodeBody::from_text(text);
+            let body = CodeBody::from_text(text);
+            let source_lines = self.source_lines_of(&body, start);
+            return body.placed(source_lines);
         }
         let base = text.as_ptr() as usize;
         let mut lines: Vec<Range<u32>> = text
@@ -876,6 +880,32 @@ impl Builder {
             lines.pop();
         }
         CodeBody::verbatim(lines)
+    }
+
+    /// Where the source line of each line of an owned code body starts,
+    /// the first being the line that holds `start`. The parser strips an
+    /// indent or a quote mark from each line and keeps the lines one for
+    /// one. Empty when a source line does not end with its body line,
+    /// since the rows would then name other lines.
+    fn source_lines_of(&self, body: &CodeBody, start: usize) -> Vec<u32> {
+        let end = self.current.1.min(self.source.len());
+        let Some(head) = self.source.get(..start.min(end)) else {
+            return Vec::new();
+        };
+        let mut at = head.rfind('\n').map_or(0, |nl| nl + 1);
+        let mut starts = Vec::with_capacity(body.len());
+        for index in 0..body.len() {
+            if at >= end {
+                return Vec::new();
+            }
+            let line_end = self.source[at..end].find('\n').map_or(end, |nl| at + nl);
+            if !self.source[at..line_end].ends_with(body.line(&self.source, index)) {
+                return Vec::new();
+            }
+            starts.push(at as u32);
+            at = line_end + 1;
+        }
+        starts
     }
 
     fn text(&mut self, text: &str) {
@@ -4167,6 +4197,46 @@ mod tests {
         assert_eq!(lines.len(), 2);
         assert_eq!(lines.line(&d.source, 0), "let x = 1;");
         assert_eq!(lines.line(&d.source, 1), "let y = 2;");
+    }
+
+    #[test]
+    fn an_owned_code_body_answers_the_row_of_a_source_line() {
+        let shapes = [
+            ("1. Run:\n\n   ```sh\n", "   ", "   ```\n\n"),
+            ("Run:\n\n", "    ", "\n"),
+            ("> Run:\n>\n> ```sh\n", "> ", "> ```\n\n"),
+        ];
+        for (open, indent, close) in shapes {
+            let mut source = format!("Before.\n\n{open}");
+            for i in 0..30 {
+                if i == 10 {
+                    // A blank line inside the body is a line of the body.
+                    source.push_str(&format!("{}\n", indent.trim_end()));
+                }
+                source.push_str(&format!("{indent}echo step {i:02}\n"));
+            }
+            source.push_str(close);
+            source.push_str("After.\n");
+            let d = parse(source.as_str());
+            let lines = d
+                .blocks
+                .iter()
+                .find_map(|block| match &block.kind {
+                    BlockKind::CodeBlock { lines, .. } => Some(lines),
+                    _ => None,
+                })
+                .expect("a code block");
+            assert!(!lines.is_verbatim(), "{open:?}: the body is owned");
+            assert_eq!(lines.len(), 31, "{open:?}");
+            for row in 0..lines.len() {
+                let text = lines.line(&d.source, row);
+                if text.is_empty() {
+                    continue;
+                }
+                let at = d.source.find(text).unwrap();
+                assert_eq!(lines.row_at(&d.source, at), Some(row), "{open:?}, {text:?}");
+            }
+        }
     }
 
     #[test]

@@ -42,8 +42,8 @@ pub fn top_offset(lay: &LayoutDoc, doc: &Document, scroll_y: f32) -> usize {
 
 /// Where a source offset stands on the page, the inverse of
 /// `top_offset`: the top of its block, or of its line inside a code
-/// block whose lines are the source's own. None before the pass places
-/// the block.
+/// block whose lines answer for a source offset. None before the pass
+/// places the block.
 pub fn offset_top(lay: &LayoutDoc, doc: &Document, offset: usize) -> Option<f32> {
     let block = doc.block_at_offset(offset)?;
     let line = match &doc.blocks[block].kind {
@@ -60,7 +60,7 @@ pub fn offset_top(lay: &LayoutDoc, doc: &Document, offset: usize) -> Option<f32>
 /// break stands the row the caret opens there. A code block's line
 /// table answers by a binary search, where a count of the breaks from
 /// the block's start grew with the file on every call; a body with text
-/// of its own, which has no source coordinates, still counts them.
+/// of its own whose source lines are not recorded still counts them.
 pub fn source_row(doc: &Document, block: usize, offset: usize) -> usize {
     let Some(block) = doc.blocks.get(block) else {
         return 0;
@@ -80,8 +80,8 @@ pub fn source_row(doc: &Document, block: usize, offset: usize) -> usize {
 /// an image's or a rule's. A block that would run past the bottom edge
 /// is lifted until it shows whole, and one taller than the view stands
 /// at the top edge, so the reader sees where it starts. A line of a
-/// code block whose lines are the source's own is placed itself, not
-/// its block, and keeps `below`.
+/// code block whose lines answer for a source offset is placed itself,
+/// not its block, and keeps `below`.
 pub fn fitted_below(
     lay: &LayoutDoc,
     doc: &Document,
@@ -92,7 +92,8 @@ pub fn fitted_below(
     let Some(block) = doc.block_at_offset(offset) else {
         return below;
     };
-    if matches!(&doc.blocks[block].kind, BlockKind::CodeBlock { lines, .. } if !lines.is_empty()) {
+    if matches!(&doc.blocks[block].kind, BlockKind::CodeBlock { lines, .. } if !lines.is_empty() && lines.has_rows())
+    {
         return below;
     }
     match lay.block_span(block) {
@@ -475,6 +476,65 @@ mod tests {
         assert_eq!(
             line_estimate(&lay, &doc, source.find("let line_5 ").unwrap()),
             None
+        );
+    }
+
+    #[test]
+    fn a_line_of_a_code_body_of_its_own_is_placed_by_itself() {
+        let shapes = [
+            ("1. Run:\n\n   ```sh\n", "   ", "   ```\n\n"),
+            ("Run:\n\n", "    ", "\n"),
+            ("> Run:\n>\n> ```sh\n", "> ", "> ```\n\n"),
+        ];
+        for (open, indent, close) in shapes {
+            let mut source = format!("Before the code.\n\n{open}");
+            for i in 0..150 {
+                source.push_str(&format!("{indent}echo step {i:03}\n"));
+            }
+            source.push_str(close);
+            source.push_str("After.\n");
+            let doc = crate::doc::markdown::parse(source.as_str());
+            let lay = lay_of(&doc);
+            let at = source.find("echo step 100").unwrap();
+            let block = doc.block_at_offset(at).unwrap();
+            assert!(lay.approx_top(block, 100) > lay.approx_top(block, 0));
+            assert_eq!(
+                offset_top(&lay, &doc, at),
+                lay.approx_top(block, 100),
+                "{open:?}: the line answers its own row"
+            );
+            assert_eq!(
+                fitted_below(&lay, &doc, at, 290.0, 600.0),
+                290.0,
+                "{open:?}: and stands itself in the middle"
+            );
+        }
+    }
+
+    #[test]
+    fn a_code_body_with_no_place_in_the_source_stands_from_its_top() {
+        let mut source = String::from("Before the code.\n\n<pre>\n");
+        for i in 0..150 {
+            source.push_str(&format!("echo step {i:03}\n"));
+        }
+        source.push_str("</pre>\n\nAfter.\n");
+        let doc = crate::doc::markdown::parse(source.as_str());
+        let lay = lay_of(&doc);
+        // The lines of a pre block are a copy with no place in the source.
+        let block = doc
+            .blocks
+            .iter()
+            .position(|block| {
+                matches!(&block.kind, BlockKind::CodeBlock { lines, .. } if !lines.has_rows())
+            })
+            .expect("a code block whose lines do not answer");
+        let at = doc.blocks[block].range.start;
+        assert_eq!(doc.block_at_offset(at), Some(block));
+        assert_eq!(offset_top(&lay, &doc, at), lay.approx_top(block, 0));
+        assert_eq!(
+            fitted_below(&lay, &doc, at, 290.0, 600.0),
+            0.0,
+            "the block is taller than the view and no line of it answers"
         );
     }
 

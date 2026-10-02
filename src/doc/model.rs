@@ -321,13 +321,25 @@ pub enum BlockKind {
 }
 
 /// A code block's lines as byte ranges. The ranges index the document
-/// source when the body survived parsing verbatim, which fenced blocks
-/// and code files always do; an indented block strips its indent, so the
-/// normalized body is owned and the ranges index it instead.
+/// source when the body survived parsing verbatim, which code files and
+/// fenced blocks at the margin always do. An indented block strips its
+/// indent, and a fenced block inside a list item or a quote strips the
+/// indent or the mark of each line, so the normalized body is owned and
+/// the ranges index it instead.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct CodeBody {
-    owned: Option<Box<str>>,
+    // Boxed whole, so that a block is no bigger for the source lines an
+    // owned body keeps.
+    owned: Option<Box<OwnedBody>>,
     lines: Vec<Range<u32>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Default)]
+struct OwnedBody {
+    text: Box<str>,
+    /// Where the source line of each line starts, when the parser could
+    /// tell: a start per line, or empty.
+    source_lines: Vec<u32>,
 }
 
 impl CodeBody {
@@ -350,9 +362,37 @@ impl CodeBody {
             lines.pop();
         }
         CodeBody {
-            owned: Some(text.into()),
+            owned: Some(Box::new(OwnedBody {
+                text: text.into(),
+                source_lines: Vec::new(),
+            })),
             lines,
         }
+    }
+
+    /// Records where the source line of each line of an owned body
+    /// starts, so that `row_at` answers for it. Kept only with a start
+    /// per line.
+    pub(crate) fn placed(mut self, source_lines: Vec<u32>) -> CodeBody {
+        if let Some(owned) = self.owned.as_mut() {
+            if source_lines.len() == self.lines.len() {
+                owned.source_lines = source_lines;
+            }
+        }
+        self
+    }
+
+    /// Whether `row_at` can answer for an offset inside the body: always
+    /// for a verbatim body, and for an owned one whose source lines the
+    /// parser recorded.
+    pub fn has_rows(&self) -> bool {
+        self.owned
+            .as_ref()
+            .is_none_or(|owned| !owned.source_lines.is_empty())
+    }
+
+    fn owned_text(&self) -> Option<&str> {
+        self.owned.as_ref().map(|owned| &*owned.text)
     }
 
     pub fn len(&self) -> usize {
@@ -368,12 +408,12 @@ impl CodeBody {
     }
 
     pub fn line<'a>(&'a self, source: &'a str, index: usize) -> &'a str {
-        let base = self.owned.as_deref().unwrap_or(source);
+        let base = self.owned_text().unwrap_or(source);
         slice(base, &self.lines[index])
     }
 
     /// The source byte range of a line, only when the body slices the
-    /// source directly; an owned body has no source coordinates.
+    /// source directly; the ranges of an owned body index its own text.
     pub fn line_range(&self, index: usize) -> Option<Range<usize>> {
         if self.owned.is_some() {
             return None;
@@ -385,11 +425,15 @@ impl CodeBody {
     /// The row holding source offset `offset`: the last line starting
     /// at or before it, so an offset on a line's break belongs to that
     /// line; past the final newline, the row the caret opens there,
-    /// one after the last line, which an empty file is too. None for
-    /// an owned body, which has no source coordinates.
+    /// one after the last line, which an empty file is too. An owned
+    /// body answers by the source lines the parser recorded, and None
+    /// without them.
     pub fn row_at(&self, source: &str, offset: usize) -> Option<usize> {
-        if self.owned.is_some() {
-            return None;
+        if let Some(owned) = &self.owned {
+            return owned
+                .source_lines
+                .partition_point(|start| *start as usize <= offset)
+                .checked_sub(1);
         }
         let after_last = match self.lines.last() {
             None => true,
@@ -404,7 +448,7 @@ impl CodeBody {
     }
 
     pub fn iter<'a>(&'a self, source: &'a str) -> impl Iterator<Item = &'a str> {
-        let base = self.owned.as_deref().unwrap_or(source);
+        let base = self.owned_text().unwrap_or(source);
         self.lines.iter().map(move |range| slice(base, range))
     }
 
@@ -840,6 +884,21 @@ mod tests {
         let edited = "aaa\n\nx\n";
         assert!(b.splice(edited, 2..3, 2..3, 1));
         assert_eq!(ranges(&b, edited), fresh(edited));
+    }
+
+    #[test]
+    fn an_owned_body_answers_rows_by_its_source_lines() {
+        let body = CodeBody::from_text("a\nb\nc\n").placed(vec![10, 20, 30]);
+        assert!(body.has_rows());
+        assert_eq!(body.row_at("", 9), None, "before the first line");
+        assert_eq!(body.row_at("", 10), Some(0));
+        assert_eq!(body.row_at("", 19), Some(0), "anywhere on the line");
+        assert_eq!(body.row_at("", 20), Some(1));
+        assert_eq!(body.row_at("", 99), Some(2), "past the body, its last line");
+        let short = CodeBody::from_text("a\nb\n").placed(vec![10]);
+        assert!(!short.has_rows(), "a start per line, or none");
+        assert_eq!(short.row_at("", 10), None);
+        assert!(CodeBody::verbatim(vec![0..1, 2..3]).has_rows());
     }
 
     #[test]
