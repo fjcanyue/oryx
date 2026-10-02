@@ -688,6 +688,20 @@ impl Place {
     }
 }
 
+/// The place a landing still waiting for the layout will show, which is
+/// where the reader stands for the history. While a landing waits the
+/// view has not moved, so a measure of the screen would file the place
+/// left a second time, or the distance of a caret the view has not
+/// followed yet. In the editor only a landing on the caret counts, since
+/// the caret may have moved since. While reading, the landing of a page
+/// is applied after the landing of a row, so it is the one that stays.
+fn waiting_place(row: Option<Place>, page: Option<Place>, caret: Option<usize>) -> Option<Place> {
+    match caret {
+        Some(caret) => row.filter(|place| place.offset == caret),
+        None => page.or(row),
+    }
+}
+
 /// The height the history files for the caret's row, and whether the
 /// row stood outside the view or cut by one of its edges. A row in view
 /// files the height a step keeps inside the view. A row the reader
@@ -4287,6 +4301,7 @@ impl App {
         }
         let offset = goto::offset(&self.document.source, target);
         self.push_jump();
+        self.drop_waiting_landings();
         if self.mode == edit::Mode::Edit {
             self.selection = None;
             self.sel_anchor = None;
@@ -5717,21 +5732,27 @@ impl App {
     }
 
     /// Where the reader stands, as the history files it: the caret
-    /// while editing, else what shows at the top of the view. An
-    /// untitled note is no place to come back to, since it goes when
-    /// another file opens.
+    /// while editing, else what shows at the top of the view. A landing
+    /// that still waits for the layout answers before the screen, which
+    /// has not moved yet (`waiting_place`). An untitled note is no place
+    /// to come back to, since it goes when another file opens.
     fn here(&self) -> Option<history::Entry> {
         if self.on_note() {
             return None;
         }
-        let (offset, below, editing, away) = match (self.mode, self.caret) {
-            (edit::Mode::Edit, Some(caret)) => {
-                let (below, away) = self.editor_row_y(caret.offset).map_or((0.0, false), |y| {
+        let editing = matches!((self.mode, self.caret), (edit::Mode::Edit, Some(_)));
+        let caret = self.caret.filter(|_| editing).map(|caret| caret.offset);
+        let waiting = waiting_place(self.pending_row, self.pending_offset, caret);
+        let (offset, below, editing, away) = match (caret, waiting) {
+            (Some(caret), Some(place)) => (caret, place.below, true, false),
+            (None, Some(place)) => (place.offset, place.below, place.line, false),
+            (Some(caret), None) => {
+                let (below, away) = self.editor_row_y(caret).map_or((0.0, false), |y| {
                     filed_height(y, self.row_h(), self.scroll_y, self.viewport_h())
                 });
-                (caret.offset, below, true, away)
+                (caret, below, true, away)
             }
-            _ => {
+            (None, None) => {
                 let offset = self.top_offset()?;
                 let below = self
                     .layout
@@ -5748,6 +5769,15 @@ impl App {
             editing,
             away,
         })
+    }
+
+    /// Drops the landings that still wait for the layout. A new landing
+    /// replaces them, or an older one would move the view after it.
+    fn drop_waiting_landings(&mut self) {
+        self.pending_scroll = None;
+        self.pending_anchor = None;
+        self.pending_offset = None;
+        self.pending_row = None;
     }
 
     /// Remembers where the reader is standing, so Alt+Left can bring
@@ -5800,6 +5830,7 @@ impl App {
     /// folded section opened first. A caret's place shown on the page
     /// stands its block there instead, fitted to the view.
     fn land_on(&mut self, place: &history::Entry) {
+        self.drop_waiting_landings();
         let (offset, below) = (place.offset, place.below);
         let editing = self.mode == edit::Mode::Edit;
         let (view_h, row_h) = (self.viewport_h(), self.row_h());
@@ -8744,6 +8775,53 @@ mod tests {
             Place::returned(5, 700.0, false, view_h, row_h, false).below,
             580.0
         );
+    }
+
+    #[test]
+    fn a_landing_that_waits_is_where_the_reader_stands() {
+        use super::{waiting_place, Place};
+        let row = Place {
+            offset: 900,
+            below: 290.0,
+            line: false,
+        };
+        let page = Place {
+            offset: 400,
+            below: 120.0,
+            line: true,
+        };
+        assert_eq!(
+            waiting_place(Some(row), None, Some(900)),
+            Some(row),
+            "the editor, a landing on the caret"
+        );
+        assert_eq!(
+            waiting_place(Some(row), None, Some(50)),
+            None,
+            "the caret moved since"
+        );
+        assert_eq!(
+            waiting_place(None, Some(page), Some(900)),
+            None,
+            "the editor has no landing of a page"
+        );
+        assert_eq!(waiting_place(None, None, Some(900)), None);
+        assert_eq!(
+            waiting_place(Some(row), None, None),
+            Some(row),
+            "a code file read"
+        );
+        assert_eq!(
+            waiting_place(None, Some(page), None),
+            Some(page),
+            "a rendered page"
+        );
+        assert_eq!(
+            waiting_place(Some(row), Some(page), None),
+            Some(page),
+            "the landing of a page is applied last"
+        );
+        assert_eq!(waiting_place(None, None, None), None);
     }
 
     #[test]
