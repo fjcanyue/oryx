@@ -24,6 +24,11 @@ pub struct Entry {
     /// Taken in the editor, where `below` is the caret's row. The page
     /// has no row for most lines, and stands the line's block there.
     pub editing: bool,
+    /// The caret's row stood outside the view, or cut by one of its
+    /// edges, after the reader scrolled away from it. `below` is then
+    /// its true distance from the top of the view, and a step brings
+    /// back the view with the caret where it was.
+    pub away: bool,
 }
 
 /// Two visits to one line are one place, whatever height it stood at
@@ -116,6 +121,7 @@ mod tests {
             offset,
             below,
             editing: false,
+            away: false,
         }
     }
 
@@ -125,6 +131,7 @@ mod tests {
             offset,
             below: 0.0,
             editing: false,
+            away: false,
         }
     }
 

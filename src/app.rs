@@ -662,7 +662,23 @@ impl Place {
     /// stood at, kept inside the view when the window shrank since.
     /// While editing the caret's row comes back whole; while reading, a
     /// line the top edge cut keeps its cut, so the view is the one left.
-    fn returned(offset: usize, below: f32, view_h: f32, row_h: f32, editing: bool) -> Place {
+    /// A caret the reader had scrolled away from (`away`) comes back at
+    /// its true distance from the view, outside it again.
+    fn returned(
+        offset: usize,
+        below: f32,
+        away: bool,
+        view_h: f32,
+        row_h: f32,
+        editing: bool,
+    ) -> Place {
+        if away {
+            return Place {
+                offset,
+                below,
+                line: false,
+            };
+        }
         let floor = if editing { 0.0 } else { f32::MIN };
         Place {
             offset,
@@ -670,6 +686,17 @@ impl Place {
             line: false,
         }
     }
+}
+
+/// The height the history files for the caret's row, and whether the
+/// row stood outside the view or cut by one of its edges. A row in view
+/// files the height a step keeps inside the view. A row the reader
+/// scrolled away from files its true distance from the top of the view,
+/// so the step brings back the view that was left, not the caret.
+fn filed_height(row_y: f32, row_h: f32, scroll_y: f32, view_h: f32) -> (f32, bool) {
+    let below = row_y - scroll_y;
+    let held = caret::held(row_y, row_h, scroll_y, view_h);
+    (below, below != held)
 }
 
 /// The height of the row a jump or a step of the history lands: a file
@@ -5697,12 +5724,12 @@ impl App {
         if self.on_note() {
             return None;
         }
-        let (offset, below, editing) = match (self.mode, self.caret) {
+        let (offset, below, editing, away) = match (self.mode, self.caret) {
             (edit::Mode::Edit, Some(caret)) => {
-                let below = self.editor_row_y(caret.offset).map_or(0.0, |y| {
-                    caret::held(y, self.row_h(), self.scroll_y, self.viewport_h())
+                let (below, away) = self.editor_row_y(caret.offset).map_or((0.0, false), |y| {
+                    filed_height(y, self.row_h(), self.scroll_y, self.viewport_h())
                 });
-                (caret.offset, below, true)
+                (caret.offset, below, true, away)
             }
             _ => {
                 let offset = self.top_offset()?;
@@ -5711,7 +5738,7 @@ impl App {
                     .as_ref()
                     .and_then(|lay| scroll::offset_top(lay, &self.document, offset))
                     .map_or(0.0, |y| y - self.scroll_y);
-                (offset, below, false)
+                (offset, below, false, false)
             }
         };
         Some(history::Entry {
@@ -5719,6 +5746,7 @@ impl App {
             offset,
             below,
             editing,
+            away,
         })
     }
 
@@ -5781,7 +5809,9 @@ impl App {
             self.sel_anchor = None;
             self.band = None;
             self.caret = Some(Caret::at(offset));
-            self.seat_editor_on(Place::returned(offset, below, view_h, row_h, true));
+            self.seat_editor_on(Place::returned(
+                offset, below, place.away, view_h, row_h, true,
+            ));
             self.wake_caret();
         } else {
             let folded = self
@@ -5791,8 +5821,10 @@ impl App {
             if folded {
                 self.restart_layout();
             }
-            self.pending_offset =
-                Some(Place::returned(offset, below, view_h, row_h, false).by_line(place.editing));
+            self.pending_offset = Some(
+                Place::returned(offset, below, place.away, view_h, row_h, false)
+                    .by_line(place.editing),
+            );
         }
         self.request_redraw();
     }
@@ -8690,19 +8722,76 @@ mod tests {
     fn a_step_back_lands_at_its_height_inside_the_view() {
         use super::Place;
         let (view_h, row_h) = (600.0, 20.0);
-        assert_eq!(Place::returned(5, 400.0, view_h, row_h, true).below, 400.0);
         assert_eq!(
-            Place::returned(5, 700.0, view_h, row_h, true).below,
+            Place::returned(5, 400.0, false, view_h, row_h, true).below,
+            400.0
+        );
+        assert_eq!(
+            Place::returned(5, 700.0, false, view_h, row_h, true).below,
             580.0,
             "a window that shrank keeps the caret's row inside"
         );
-        assert_eq!(Place::returned(5, -8.0, view_h, row_h, true).below, 0.0);
         assert_eq!(
-            Place::returned(5, -8.0, view_h, row_h, false).below,
+            Place::returned(5, -8.0, false, view_h, row_h, true).below,
+            0.0
+        );
+        assert_eq!(
+            Place::returned(5, -8.0, false, view_h, row_h, false).below,
             -8.0,
             "while reading, a line cut by the top edge keeps its cut"
         );
-        assert_eq!(Place::returned(5, 700.0, view_h, row_h, false).below, 580.0);
+        assert_eq!(
+            Place::returned(5, 700.0, false, view_h, row_h, false).below,
+            580.0
+        );
+    }
+
+    #[test]
+    fn a_caret_out_of_view_is_filed_at_its_true_height() {
+        let (view_h, row_h) = (600.0, 20.0);
+        assert_eq!(
+            super::filed_height(1300.0, row_h, 1000.0, view_h),
+            (300.0, false),
+            "a row in view"
+        );
+        assert_eq!(
+            super::filed_height(200.0, row_h, 1320.0, view_h),
+            (-1120.0, true),
+            "a row above the view"
+        );
+        assert_eq!(
+            super::filed_height(40000.0, row_h, 38400.0, view_h),
+            (1600.0, true),
+            "a row below the view"
+        );
+        assert_eq!(
+            super::filed_height(992.0, row_h, 1000.0, view_h),
+            (-8.0, true),
+            "a row cut by the top edge"
+        );
+        assert_eq!(
+            super::filed_height(1580.0, row_h, 1000.0, view_h),
+            (580.0, false),
+            "the last whole row"
+        );
+    }
+
+    #[test]
+    fn a_step_back_to_a_caret_out_of_view_brings_the_view_back() {
+        use super::Place;
+        let (view_h, row_h) = (600.0, 20.0);
+        for editing in [true, false] {
+            assert_eq!(
+                Place::returned(5, -1120.0, true, view_h, row_h, editing).below,
+                -1120.0,
+                "the caret stays above the view"
+            );
+            assert_eq!(
+                Place::returned(5, 1600.0, true, view_h, row_h, editing).below,
+                1600.0,
+                "the caret stays below the view"
+            );
+        }
     }
 
     #[test]
