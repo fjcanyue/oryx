@@ -175,7 +175,7 @@ pub const TIPS: &[Tip] = &[
     Tip {
         kind: TipKind::Tip,
         area: Area::Files,
-        text: r#"Did your machine go down in the middle of a note? Oryx keeps a copy of the note while you type, and the next time you start it, it asks whether you want the note back. `R` recovers it, `D` discards it, and `Escape` leaves it for the next time."#,
+        text: r#"Oryx keeps a copy of a note while you type. After a crash, the next start asks whether you want the note back. `R` recovers it, `D` discards it, and `Escape` leaves it for the next time."#,
     },
     Tip {
         kind: TipKind::Tip,
@@ -575,7 +575,7 @@ pub const TIPS: &[Tip] = &[
     Tip {
         kind: TipKind::Tip,
         area: Area::Looks,
-        text: r#"Would you like a theme of your own? Give one of the TOML theme files to an AI assistant, along with a picture whose colors you like, and ask for a matching theme."#,
+        text: r#"To get a theme of your own, give one of the TOML theme files to an AI assistant, along with a picture whose colors you like, and ask for a matching theme."#,
     },
     Tip {
         kind: TipKind::Tip,
@@ -585,7 +585,7 @@ pub const TIPS: &[Tip] = &[
     Tip {
         kind: TipKind::Tip,
         area: Area::Looks,
-        text: r#"Does the page look too small or too large on your screen? The interface scale in the settings adjusts it from -50% to +100%, and Oryx remembers your choice."#,
+        text: r#"If the page looks too small or too large, change the interface scale in the settings, from -50% to +100%. Oryx remembers your choice."#,
     },
     Tip {
         kind: TipKind::Tip,
