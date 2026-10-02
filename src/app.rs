@@ -1750,7 +1750,7 @@ impl App {
         let below = self
             .layout
             .as_ref()
-            .and_then(|lay| caret::place_box(lay, &self.document, offset))
+            .and_then(|lay| caret::place_box(lay, &self.document, offset, view_h))
             .map_or(0.0, |(y, h)| caret::held(y, h, self.scroll_y, view_h));
         self.mode = edit::Mode::Edit;
         self.caret = Some(Caret::at(offset));
@@ -1891,7 +1891,9 @@ impl App {
         // the caret's row on the screen, which its line keeps.
         let below = left_at
             .zip(self.layout.as_ref())
-            .and_then(|(offset, lay)| caret::place_box(lay, &self.document, offset))
+            .and_then(|(offset, lay)| {
+                caret::place_box(lay, &self.document, offset, self.viewport_h())
+            })
             .map_or(0.0, |(y, h)| {
                 caret::held(y, h, self.scroll_y, self.viewport_h())
             });
@@ -7358,13 +7360,17 @@ impl App {
     /// and `settle_landing` puts the exact row there once the frame's
     /// slide draws it. A line of code is placed by the block table, and
     /// a line that draws no row, an image's, stands its block whole in
-    /// the view, or from its top when taller.
+    /// the view, or from its top when taller. A blank line after a
+    /// block taller than the view stands at the end of that block.
     fn line_landing(&self, lay: &LayoutDoc, offset: usize, below: f32) -> Option<f32> {
         let doc = &self.document;
         let row =
             caret::line_top(lay, doc, offset).or_else(|| scroll::line_estimate(lay, doc, offset));
         if let Some(y) = row {
             return Some(caret::seated(y, below));
+        }
+        if let Some(end) = caret::tall_block_end(lay, doc, offset, self.viewport_h()) {
+            return Some(caret::seated(end, below));
         }
         let below = scroll::fitted_below(lay, doc, offset, below, self.viewport_h());
         scroll::offset_top(lay, doc, offset).map(|y| caret::seated(y, below))

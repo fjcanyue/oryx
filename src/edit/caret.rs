@@ -481,11 +481,37 @@ fn run_spans(kind: &BlockKind) -> Vec<&Span> {
     }
 }
 
+/// Where a line that follows its block stands, a blank line, when the
+/// block is taller than the view: the bottom of the block. Such a block
+/// cannot show whole, and its end is where the line is. None for a block
+/// that fits in the view, which shows whole, for a line of the block's
+/// own, and for a code block whose lines answer, which places its last
+/// line. Asked only for a line that draws no row.
+pub fn tall_block_end(lay: &LayoutDoc, doc: &Document, offset: usize, view_h: f32) -> Option<f32> {
+    let index = doc.block_at_offset(offset)?;
+    let block = &doc.blocks[index];
+    if offset < block.range.end {
+        return None;
+    }
+    if matches!(&block.kind, BlockKind::CodeBlock { lines, .. } if !lines.is_empty() && lines.has_rows())
+    {
+        return None;
+    }
+    let span = lay.block_span(index)?;
+    (span.end - span.start > view_h).then_some(span.end)
+}
+
 /// Where an offset stands on the page, as a top and a height: its row
 /// when the page shows one, else the top of its block with no height.
 /// An image line, a rule and a fence have a block and no row; a blank
-/// line belongs to the block above it.
-pub fn place_box(lay: &LayoutDoc, doc: &Document, offset: usize) -> Option<(f32, f32)> {
+/// line belongs to the block above it, and stands at the bottom of a
+/// block taller than the view.
+pub fn place_box(
+    lay: &LayoutDoc,
+    doc: &Document,
+    offset: usize,
+    view_h: f32,
+) -> Option<(f32, f32)> {
     let lines = lines_of(lay, doc);
     if let Some(i) = locate(&lines, offset) {
         return Some((lines[i].y, lines[i].h));
@@ -493,9 +519,10 @@ pub fn place_box(lay: &LayoutDoc, doc: &Document, offset: usize) -> Option<(f32,
     if let Some(row) = copied_row(lay, doc, offset) {
         return Some(row);
     }
-    match rowless(lay, doc, offset)? {
+    match rowless(lay, doc, offset, view_h)? {
         Rowless::Line(span) => Some((span.start, span.end - span.start)),
         Rowless::Block(span) => Some((span.start, 0.0)),
+        Rowless::End(y) => Some((y, 0.0)),
     }
 }
 
@@ -505,6 +532,8 @@ enum Rowless {
     Line(Range<f32>),
     /// The whole block the offset belongs to.
     Block(Range<f32>),
+    /// The bottom of a block taller than the view, for a line after it.
+    End(f32),
 }
 
 impl Rowless {
@@ -514,11 +543,12 @@ impl Rowless {
         match self {
             Rowless::Line(span) => span.start >= view_top && span.end <= bottom,
             Rowless::Block(span) => span.end >= view_top && span.start < bottom,
+            Rowless::End(y) => *y >= view_top && *y <= bottom,
         }
     }
 }
 
-fn rowless(lay: &LayoutDoc, doc: &Document, offset: usize) -> Option<Rowless> {
+fn rowless(lay: &LayoutDoc, doc: &Document, offset: usize, view_h: f32) -> Option<Rowless> {
     let block = doc.block_at_offset(offset)?;
     if doc.code_file || doc.plain_file {
         // The line table answers by a binary search; a count of the
@@ -530,6 +560,9 @@ fn rowless(lay: &LayoutDoc, doc: &Document, offset: usize) -> Option<Rowless> {
         if let Some(seat) = line.and_then(|line| lay.code_line_seat(block, line)) {
             return Some(Rowless::Line(seat.y..seat.y + seat.height));
         }
+    }
+    if let Some(end) = tall_block_end(lay, doc, offset, view_h) {
+        return Some(Rowless::End(end));
     }
     lay.block_span(block).map(Rowless::Block)
 }
@@ -1120,9 +1153,8 @@ pub fn landing(
                 Some((y, h)) => whole(y, h),
                 // An image line, a rule, a blank line: no row to test,
                 // so the place it belongs to answers.
-                None => {
-                    rowless(lay, doc, offset).is_some_and(|place| place.shows(view_top, bottom))
-                }
+                None => rowless(lay, doc, offset, view_h)
+                    .is_some_and(|place| place.shows(view_top, bottom)),
             },
         };
         if shows {
@@ -2312,7 +2344,7 @@ mod tests {
             line_of(&doc, at(&doc, "| 40 |")),
             "the row at the top of the view, not the start of the table"
         );
-        let (y, h) = place_box(&l, &doc, got).expect("the row has a place");
+        let (y, h) = place_box(&l, &doc, got, 300.0).expect("the row has a place");
         assert_eq!(y, row, "the row answers its own top on the page");
         assert!(h > 0.0);
     }
@@ -2331,7 +2363,7 @@ mod tests {
         let top = l.approx_top(block, 100).unwrap();
         let got = landing(&l, &doc, None, None, top, 300.0);
         assert_eq!(line_of(&doc, got), line_of(&doc, line));
-        let (y, h) = place_box(&l, &doc, got).expect("the line has a place");
+        let (y, h) = place_box(&l, &doc, got, 300.0).expect("the line has a place");
         assert_eq!(y, top, "the line answers its own top on the page");
         assert!(h > 0.0);
     }
@@ -2353,6 +2385,53 @@ mod tests {
             line_of(&doc, got),
             line_of(&doc, at(&doc, "| 40 |")),
             "a row scrolled away falls to the view"
+        );
+    }
+
+    #[test]
+    fn a_blank_line_after_a_tall_table_stands_at_its_end() {
+        let doc = table_page();
+        let (l, _) = lay_of(&doc);
+        let blank = at(&doc, "\n\nAfter.") + 1;
+        let table = doc.block_at_offset(blank).unwrap();
+        assert!(matches!(doc.blocks[table].kind, BlockKind::Table { .. }));
+        let span = l.block_span(table).unwrap();
+        assert!(
+            span.end - span.start > 600.0,
+            "the table is taller than the view"
+        );
+        assert_eq!(tall_block_end(&l, &doc, blank, 600.0), Some(span.end));
+        assert_eq!(place_box(&l, &doc, blank, 600.0), Some((span.end, 0.0)));
+        assert_eq!(
+            tall_block_end(&l, &doc, blank, span.end - span.start + 1.0),
+            None,
+            "a table that fits in the view shows whole"
+        );
+        assert_eq!(
+            tall_block_end(&l, &doc, at(&doc, "| 40 |"), 600.0),
+            None,
+            "a line of the table is not after it"
+        );
+    }
+
+    #[test]
+    fn a_remembered_blank_line_after_a_tall_table_is_kept_only_at_its_end() {
+        let doc = table_page();
+        let (l, _) = lay_of(&doc);
+        let blank = at(&doc, "\n\nAfter.") + 1;
+        let table = doc.block_at_offset(blank).unwrap();
+        let span = l.block_span(table).unwrap();
+        assert_eq!(
+            landing(&l, &doc, None, Some(blank), span.end - 300.0, 600.0),
+            blank,
+            "the end of the table is in view"
+        );
+        let top = run_top(&l, &doc, "item 5");
+        let got = landing(&l, &doc, None, Some(blank), top, 600.0);
+        assert_eq!(
+            line_of(&doc, got),
+            line_of(&doc, at(&doc, "| 5 |")),
+            "the top of the table is in view and its end is not"
         );
     }
 
@@ -2411,9 +2490,9 @@ mod tests {
         let (doc, l) = image_page();
         let place = l.images.first().expect("the image is placed");
         let image = at(&doc, "![oryx]");
-        assert_eq!(place_box(&l, &doc, image), Some((place.y, 0.0)));
+        assert_eq!(place_box(&l, &doc, image, 600.0), Some((place.y, 0.0)));
         let text = run(&l, &doc, "After 2.");
-        let (y, h) = place_box(&l, &doc, at(&doc, "After 2.") + 3).unwrap();
+        let (y, h) = place_box(&l, &doc, at(&doc, "After 2.") + 3, 600.0).unwrap();
         assert_eq!(y, text.y);
         assert!(h > 0.0, "a row answers with its own height");
     }
