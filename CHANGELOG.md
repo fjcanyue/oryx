@@ -13,6 +13,8 @@
 - In a book, the outline now highlights the chapter you are reading. Before, in some books, the wrong entry was highlighted.
 - `Ctrl+G` now shows the line in the middle of the window. Before, the line was at the very top.
 - `Alt+Left` and `Alt+Right` now bring you back to the same view you left. Before, the line went to the top of the window.
+- `Ctrl+E` in the middle of a table or of an indented code block now opens the editor on the lines you were reading. Before, the editor opened at the start of the table or of the block.
+- After `Ctrl+G` while reading, `Ctrl+E` now puts the caret on the line you jumped to. Before, the caret was on the first line in view.
 - In the editor, the current line number is now shown in a small box, so it is easier to see.
 - On Windows, the sidebar can now reach your other drives: `..` at the top of a drive shows the list of drives. Before, the sidebar could not leave the drive it started on.
 - Changing the theme now keeps the page where you were reading. Before, the view could move.

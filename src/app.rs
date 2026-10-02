@@ -4265,6 +4265,11 @@ impl App {
             self.caret = Some(Caret::at(offset));
             self.wake_caret();
         } else {
+            // The editor opened after the jump puts its caret on the
+            // line of the jump, while that line is still in view.
+            if let Some(path) = self.path.clone() {
+                self.edit_marks.insert(path, offset);
+            }
             // A rendered page is indexed by blocks, and a line mostly
             // opens on markup no drawn row holds (`#`, `-`, `|`), so the
             // block's own top is the landing, through the outline's

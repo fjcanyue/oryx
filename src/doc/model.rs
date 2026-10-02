@@ -422,6 +422,16 @@ impl CodeBody {
         Some(range.start as usize..range.end as usize)
     }
 
+    /// Where the source line of a line starts: the line itself for a
+    /// verbatim body, and for an owned one the source line the parser
+    /// recorded, with the indent or the mark it stripped.
+    pub fn line_start(&self, index: usize) -> Option<usize> {
+        match &self.owned {
+            None => self.lines.get(index).map(|range| range.start as usize),
+            Some(owned) => owned.source_lines.get(index).map(|start| *start as usize),
+        }
+    }
+
     /// The row holding source offset `offset`: the last line starting
     /// at or before it, so an offset on a line's break belongs to that
     /// line; past the final newline, the row the caret opens there,

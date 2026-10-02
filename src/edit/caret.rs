@@ -343,6 +343,11 @@ pub fn row_top(lay: &LayoutDoc, doc: &Document, offset: usize) -> Option<f32> {
 /// draws no text, an image, a rule or a blank line, and for a row
 /// outside what the layout holds right now.
 pub fn line_top(lay: &LayoutDoc, doc: &Document, offset: usize) -> Option<f32> {
+    line_run(lay, doc, offset).map(|run| run.y)
+}
+
+/// The highest run the page draws for the source line holding `offset`.
+fn line_run<'l>(lay: &'l LayoutDoc, doc: &Document, offset: usize) -> Option<&'l TextRun> {
     let source = &doc.source;
     // A remembered offset may fall inside a character after an edit.
     let mut offset = offset.min(source.len());
@@ -357,7 +362,7 @@ pub fn line_top(lay: &LayoutDoc, doc: &Document, offset: usize) -> Option<f32> {
     // (`#`, `-`, `|`); the line's end lies inside the block it belongs to.
     let block = doc.block_at_offset(end)?;
     let spans = run_spans(&doc.blocks[block].kind);
-    let mut top: Option<f32> = None;
+    let mut top: Option<&TextRun> = None;
     for run in lay.runs.iter().filter(|run| run.block == block) {
         let TextRef::Model { start: at, len } = run.text else {
             continue;
@@ -366,11 +371,87 @@ pub fn line_top(lay: &LayoutDoc, doc: &Document, offset: usize) -> Option<f32> {
             continue;
         };
         let shown = shown_source(span, source, at as usize, len as usize);
-        if shown.start < end && start < shown.end && top.is_none_or(|y| run.y < y) {
-            top = Some(run.y);
+        if shown.start < end && start < shown.end && top.is_none_or(|top| run.y < top.y) {
+            top = Some(run);
         }
     }
     top
+}
+
+/// The row the page draws for the source line holding `offset`, as a
+/// top and a height, for a row whose bytes are not the source's own, so
+/// that `lines_of` does not hold it: a line of a code block that keeps a
+/// copy of its text, placed by the block table, or a row of a table.
+fn copied_row(lay: &LayoutDoc, doc: &Document, offset: usize) -> Option<(f32, f32)> {
+    let source = &doc.source;
+    let offset = clamp(doc, offset);
+    // The line's end lies inside the block the line belongs to, where
+    // its start may stand in the indent before the block.
+    let end = source[offset..]
+        .find('\n')
+        .map_or(source.len(), |at| offset + at);
+    let block = doc.block_at_offset(end)?;
+    if let BlockKind::CodeBlock { lines, .. } = &doc.blocks[block].kind {
+        if lines.is_verbatim() || lines.is_empty() {
+            return None;
+        }
+        let row = lines.row_at(source, offset)?.min(lines.len() - 1);
+        let seat = lay.code_line_seat(block, row)?;
+        return Some((seat.y, seat.height));
+    }
+    let run = line_run(lay, doc, offset)?;
+    Some((run.y, metrics::LINE_HEIGHT * run.size))
+}
+
+/// The first row whole in the view whose bytes are not the source's
+/// own, as its top and a source offset on its line: a row of a table,
+/// or a line of a code block that keeps a copy of its text. `lines_of`
+/// holds no such row, so a view inside one would land on the start of
+/// its block.
+fn first_copied_row(
+    lay: &LayoutDoc,
+    doc: &Document,
+    view_top: f32,
+    bottom: f32,
+) -> Option<(f32, usize)> {
+    let mut first: Option<(f32, f32, usize)> = None;
+    // The spans of the block of the last run looked at: a table's cells
+    // are collected once, not once per run.
+    let mut spans: Option<(usize, Vec<&Span>)> = None;
+    for run in &lay.runs {
+        let TextRef::Model { start: at, .. } = run.text else {
+            continue;
+        };
+        if run.y < view_top || run.y + metrics::LINE_HEIGHT * run.size > bottom {
+            continue;
+        }
+        if first.is_some_and(|(y, x, _)| (y, x) <= (run.y, run.x)) {
+            continue;
+        }
+        if run_source(doc, run).is_some() {
+            continue;
+        }
+        let Some(block) = doc.blocks.get(run.block) else {
+            continue;
+        };
+        let offset = match &block.kind {
+            BlockKind::CodeBlock { lines, .. } => lines.line_start(run.span),
+            kind => {
+                if spans.as_ref().is_none_or(|(index, _)| *index != run.block) {
+                    spans = Some((run.block, run_spans(kind)));
+                }
+                spans
+                    .as_ref()
+                    .and_then(|(_, spans)| spans.get(run.span))
+                    .filter(|span| !span.range.is_empty())
+                    .map(|span| shown_source(span, &doc.source, at as usize, 0).start)
+            }
+        };
+        if let Some(offset) = offset {
+            first = Some((run.y, run.x, offset));
+        }
+    }
+    first.map(|(y, _, offset)| (y, clamp(doc, offset)))
 }
 
 /// The source bytes a run of a span shows. A verbatim span slices the
@@ -408,6 +489,9 @@ pub fn place_box(lay: &LayoutDoc, doc: &Document, offset: usize) -> Option<(f32,
     let lines = lines_of(lay, doc);
     if let Some(i) = locate(&lines, offset) {
         return Some((lines[i].y, lines[i].h));
+    }
+    if let Some(row) = copied_row(lay, doc, offset) {
+        return Some(row);
     }
     match rowless(lay, doc, offset)? {
         Rowless::Line(span) => Some((span.start, span.end - span.start)),
@@ -1007,11 +1091,11 @@ fn blank_line_at(
 
 /// The landing offset on entering edit mode, in precedence order: the
 /// selection's start when one exists, else the remembered offset while
-/// its line is visible, else the first text position in the viewport.
-/// A remembered line the page shows no row for (an image, a rule, a
-/// blank line) counts as visible while its block is. The remembered
-/// offset is clamped first, since the file may have shrunk since it
-/// was taken.
+/// its line is visible, else the first text position in the viewport,
+/// a row of a table or of a copied code body included. A remembered
+/// line the page shows no row for (an image, a rule, a blank line)
+/// counts as visible while its block is. The remembered offset is
+/// clamped first, since the file may have shrunk since it was taken.
 pub fn landing(
     lay: &LayoutDoc,
     doc: &Document,
@@ -1029,21 +1113,36 @@ pub fn landing(
     let lines = lines_of(lay, doc);
     let bottom = view_top + view_h;
     if let Some(offset) = remembered.map(|offset| clamp(doc, offset)) {
+        let whole = |y: f32, h: f32| y >= view_top && y + h <= bottom;
         let shows = match locate(&lines, offset) {
-            Some(li) => lines[li].y >= view_top && lines[li].y + lines[li].h <= bottom,
-            // An image line, a rule, a blank line: no row to test, so
-            // the place it belongs to answers.
-            None => rowless(lay, doc, offset).is_some_and(|place| place.shows(view_top, bottom)),
+            Some(li) => whole(lines[li].y, lines[li].h),
+            None => match copied_row(lay, doc, offset) {
+                Some((y, h)) => whole(y, h),
+                // An image line, a rule, a blank line: no row to test,
+                // so the place it belongs to answers.
+                None => {
+                    rowless(lay, doc, offset).is_some_and(|place| place.shows(view_top, bottom))
+                }
+            },
         };
         if shows {
             return offset;
         }
     }
-    let in_view = lines
+    // The highest row whole in the view, among the rows that show the
+    // source's own bytes and the others.
+    let whole = lines
         .iter()
-        .find(|l| l.y >= view_top && l.y + l.h <= bottom)
-        .or_else(|| lines.iter().find(|l| l.y + l.h > view_top && l.y < bottom));
-    if let Some(line) = in_view {
+        .find(|l| l.y >= view_top && l.y + l.h <= bottom);
+    let copied = first_copied_row(lay, doc, view_top, bottom);
+    match (whole, copied) {
+        (Some(line), Some((y, offset))) => return if y < line.y { offset } else { line.start },
+        (Some(line), None) => return line.start,
+        (None, Some((_, offset))) => return offset,
+        (None, None) => {}
+    }
+    let cut = lines.iter().find(|l| l.y + l.h > view_top && l.y < bottom);
+    if let Some(line) = cut {
         return line.start;
     }
     // A view with no text in it, a tall image for one: the block that
@@ -2186,6 +2285,75 @@ mod tests {
         assert_eq!(top, Some(run_top(&l, &doc, "éé")));
         assert_eq!(line_top(&l, &doc, line + 1), top, "inside the first é");
         assert_eq!(line_top(&l, &doc, line + 3), top, "inside the second é");
+    }
+
+    /// The index of the source line holding `offset`.
+    fn line_of(doc: &Document, offset: usize) -> usize {
+        doc.source[..offset].matches('\n').count()
+    }
+
+    fn table_page() -> Document {
+        let mut src = String::from("Before.\n\n| n | name |\n|---|---|\n");
+        for i in 1..=80 {
+            src.push_str(&format!("| {i} | item {i} |\n"));
+        }
+        src.push_str("\nAfter.\n");
+        md_doc(&src)
+    }
+
+    #[test]
+    fn a_view_inside_a_table_lands_on_its_first_row_in_view() {
+        let doc = table_page();
+        let (l, _) = lay_of(&doc);
+        let row = run_top(&l, &doc, "item 40");
+        let got = landing(&l, &doc, None, None, row, 300.0);
+        assert_eq!(
+            line_of(&doc, got),
+            line_of(&doc, at(&doc, "| 40 |")),
+            "the row at the top of the view, not the start of the table"
+        );
+        let (y, h) = place_box(&l, &doc, got).expect("the row has a place");
+        assert_eq!(y, row, "the row answers its own top on the page");
+        assert!(h > 0.0);
+    }
+
+    #[test]
+    fn a_view_inside_a_copied_code_body_lands_on_its_first_line_in_view() {
+        let mut src = String::from("Before.\n\n1. Run:\n\n   ```sh\n");
+        for i in 0..150 {
+            src.push_str(&format!("   echo step {i:03}\n"));
+        }
+        src.push_str("   ```\n\nAfter.\n");
+        let doc = md_doc(&src);
+        let (l, _) = lay_of(&doc);
+        let line = at(&doc, "echo step 100");
+        let block = doc.block_at_offset(line).unwrap();
+        let top = l.approx_top(block, 100).unwrap();
+        let got = landing(&l, &doc, None, None, top, 300.0);
+        assert_eq!(line_of(&doc, got), line_of(&doc, line));
+        let (y, h) = place_box(&l, &doc, got).expect("the line has a place");
+        assert_eq!(y, top, "the line answers its own top on the page");
+        assert!(h > 0.0);
+    }
+
+    #[test]
+    fn a_remembered_table_row_is_kept_only_while_its_row_shows() {
+        let doc = table_page();
+        let (l, _) = lay_of(&doc);
+        let row = run_top(&l, &doc, "item 40");
+        let seen = at(&doc, "| 44 |");
+        assert_eq!(
+            landing(&l, &doc, None, Some(seen), row, 300.0),
+            seen,
+            "a row in view keeps the caret"
+        );
+        let away = at(&doc, "| 5 |");
+        let got = landing(&l, &doc, None, Some(away), row, 300.0);
+        assert_eq!(
+            line_of(&doc, got),
+            line_of(&doc, at(&doc, "| 40 |")),
+            "a row scrolled away falls to the view"
+        );
     }
 
     #[test]
