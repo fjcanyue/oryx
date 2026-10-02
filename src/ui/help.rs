@@ -360,7 +360,7 @@ pub const TIPS: &[Tip] = &[
     Tip {
         kind: TipKind::Tip,
         area: Area::Finding,
-        text: r#"Looking for the task markers you left behind? Switch the search to regular expressions with `Alt+R` and search for `TODO|FIXME`."#,
+        text: r#"Regular expression search supports `|` for or. Press `Alt+R` in the search bar and search for `TODO|FIXME` to find every TODO and every FIXME."#,
     },
     Tip {
         kind: TipKind::Tip,
@@ -530,17 +530,17 @@ pub const TIPS: &[Tip] = &[
     Tip {
         kind: TipKind::Tip,
         area: Area::Editing,
-        text: r#"Do you like to see line numbers? Turn them on in the settings (`Ctrl+,`), and Oryx numbers the lines of your code and text files in the left margin, and of a markdown file while you edit it. In the editor, the number of the line you are on reads brighter."#,
+        text: r#"To turn on line numbers, open the settings with `Ctrl+,`. The numbers show in the left margin of code and text files, and of a markdown file while you edit it. In the editor, the number of the current line is in a small box."#,
     },
     Tip {
         kind: TipKind::Tip,
         area: Area::Editing,
-        text: r#"Do you write to a length? Turn on the word count in the settings (`Ctrl+,`), and Oryx shows the words, characters, lines and reading time of your file in the bottom right corner. Select some text and it counts only that part."#,
+        text: r#"To turn on the word count, open the settings with `Ctrl+,`. The words, characters, lines and reading time of your file show in the bottom right corner. Select some text to count only that part."#,
     },
     Tip {
         kind: TipKind::Tip,
         area: Area::Editing,
-        text: r#"Do you forget to save? Turn on autosave in the settings (`Ctrl+,`), and Oryx saves your file when you switch to another window, or once you have stopped typing for a while, from 5 seconds to 15 minutes, whichever you choose."#,
+        text: r#"To turn on autosave, open the settings with `Ctrl+,`. Oryx can save your file when you switch to another window, or after you stop typing, from 5 seconds to 15 minutes."#,
     },
     Tip {
         kind: TipKind::Note,
