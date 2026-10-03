@@ -271,6 +271,11 @@ pub struct Sidebar {
     /// A list standing in for the system's drives, set by the tests;
     /// None reads the system's.
     fixed_drives: Option<Vec<PathBuf>>,
+    /// The drive last opened from the drives list, and the real folder
+    /// it led to. A network drive's real top has no letter, and a
+    /// `subst` drive's is a folder of another drive, so the real path
+    /// alone does not say which drive the reader is in.
+    entered_drive: Option<(PathBuf, PathBuf)>,
 }
 
 /// A folder's modified time, None when it cannot be read.
@@ -426,9 +431,9 @@ fn up_of(root: &Path, drives: &[PathBuf]) -> Option<Up> {
 
 /// The visible rows for a root: a `..` row up front when the root has
 /// somewhere to climb, then the root's own entries.
-fn tree(root: &Path, filter: Filter<'_>, drives: &[PathBuf]) -> Vec<Entry> {
+fn tree(root: &Path, filter: Filter<'_>, up: Option<Up>) -> Vec<Entry> {
     let mut entries = Vec::new();
-    if let Some(up) = up_of(root, drives) {
+    if let Some(up) = up {
         // The row's path names where it leads; the drives list has no
         // folder, so that row names the root it climbs from.
         let path = match up {
@@ -479,7 +484,7 @@ impl Sidebar {
             width: DEFAULT_WIDTH,
             tab: Tab::Files,
             root: root.to_path_buf(),
-            entries: tree(root, filter, &system_drives()),
+            entries: tree(root, filter, up_of(root, &system_drives())),
             selected: 0,
             current: None,
             acted_dir: None,
@@ -491,6 +496,7 @@ impl Sidebar {
             show_hidden: false,
             at_drives: false,
             fixed_drives: None,
+            entered_drive: None,
         };
         side.restamp();
         side
@@ -510,6 +516,24 @@ impl Sidebar {
             Some(list) => list.clone(),
             None => system_drives(),
         }
+    }
+
+    /// The drive whose top `dir` is, when the reader came into it from
+    /// the drives list.
+    fn drive_entered(&self, dir: &Path) -> Option<&Path> {
+        self.entered_drive
+            .as_ref()
+            .filter(|(_, top)| top == dir)
+            .map(|(drive, _)| drive.as_path())
+    }
+
+    /// Where the `..` row of `dir` leads: the drives list from the top
+    /// of the drive the reader opened there, else as `up_of` says.
+    fn up_from(&self, dir: &Path) -> Option<Up> {
+        if self.drive_entered(dir).is_some() {
+            return Some(Up::Drives);
+        }
+        up_of(dir, &self.drives())
     }
 
     pub fn show_hidden(&self) -> bool {
@@ -548,7 +572,7 @@ impl Sidebar {
         self.entries = if self.at_drives {
             drive_rows(&self.drives())
         } else {
-            tree(&self.root, self.filter(), &self.drives())
+            tree(&self.root, self.filter(), self.up_from(&self.root))
         };
         // Parents come before their children in the list, so each
         // folder is found once its parent has been expanded again.
@@ -636,7 +660,7 @@ impl Sidebar {
     fn go_up(&mut self, parent: &Path) {
         let left = self.root.clone();
         self.root = parent.to_path_buf();
-        self.entries = tree(parent, self.filter(), &self.drives());
+        self.entries = tree(parent, self.filter(), self.up_from(parent));
         self.scroll = 0.0;
         self.selected = self
             .entries
@@ -648,15 +672,18 @@ impl Sidebar {
     }
 
     /// Shows the drives list with the drive just left selected, or the
-    /// first drive when the root was a network share's.
+    /// first drive when the root is a top that no drive led to, a
+    /// network share opened by its own path.
     fn show_drives(&mut self) {
         let drives = self.drives();
         self.at_drives = true;
         self.entries = drive_rows(&drives);
         self.scroll = 0.0;
+        let entered = self.drive_entered(&self.root);
         self.selected = drives
             .iter()
-            .position(|drive| is_drive(&self.root, drive))
+            .position(|drive| Some(drive.as_path()) == entered)
+            .or_else(|| drives.iter().position(|drive| is_drive(&self.root, drive)))
             .unwrap_or(0);
         self.scroll_to_selection();
         self.restamp();
@@ -665,12 +692,16 @@ impl Sidebar {
     /// Rebuilds the tree at the real folder a path names, a link's
     /// target or a drive's top, in the canonical form every other path
     /// in the app takes, the first entry inside it selected; `..` climbs
-    /// the real path from there.
-    fn enter_real(&mut self, dir: &Path) {
+    /// the real path from there. A drive is noted with its real top, so
+    /// `..` at that top returns to the drives list.
+    fn enter_real(&mut self, dir: &Path, drive: bool) {
         let target = std::fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
+        if drive {
+            self.entered_drive = Some((dir.to_path_buf(), target.clone()));
+        }
         self.at_drives = false;
         self.root = target.clone();
-        self.entries = tree(&target, self.filter(), &self.drives());
+        self.entries = tree(&target, self.filter(), self.up_from(&target));
         self.scroll = 0.0;
         let first = usize::from(self.entries.first().is_some_and(|e| e.name == ".."));
         self.selected = first.min(self.entries.len().saturating_sub(1));
@@ -731,7 +762,7 @@ impl Sidebar {
         let entry = self.entries.get(index)?;
         self.selected = index;
         if index == 0 && entry.name == ".." {
-            match up_of(&self.root, &self.drives()) {
+            match self.up_from(&self.root) {
                 Some(Up::Folder(parent)) => self.go_up(&parent),
                 Some(Up::Drives) => self.show_drives(),
                 None => {}
@@ -740,8 +771,8 @@ impl Sidebar {
         } else if entry.notice {
             None
         } else if entry.linked || entry.drive {
-            let dir = entry.path.clone();
-            self.enter_real(&dir);
+            let (dir, drive) = (entry.path.clone(), entry.drive);
+            self.enter_real(&dir, drive);
             None
         } else if entry.is_dir {
             self.acted_dir = Some(entry.path.clone());
@@ -1738,6 +1769,54 @@ mod tests {
         assert_eq!(side.root(), c.as_path());
         assert!(side.shows(&c));
         assert!(names(&side).contains(&"zeta.md".to_string()));
+        std::fs::remove_dir_all(&c).unwrap();
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    /// A link to a folder stands in for a Windows `subst` drive, whose
+    /// real path is a folder of another drive: its top still climbs to
+    /// the drives list, with that drive selected.
+    #[cfg(unix)]
+    #[test]
+    fn a_drive_that_names_a_folder_of_another_drive_climbs_to_the_drives() {
+        let (c, d) = two_drives("drives-subst");
+        let s = c.with_file_name(format!("{}-s", c.file_name().unwrap().to_string_lossy()));
+        std::os::unix::fs::symlink(c.join("sub"), &s).unwrap();
+        let drives = [c.clone(), d.clone(), s.clone()];
+        let mut side = with_drives(&c, &drives);
+        assert!(side.activate(0).is_none());
+        assert!(side.activate(2).is_none(), "the drive opens");
+        let real = c.join("sub").canonicalize().unwrap();
+        assert_eq!(side.root(), real.as_path(), "on its real folder");
+        assert!(side.activate(0).is_none());
+        assert_eq!(paths(&side), drives, "its top climbs to the drives");
+        assert_eq!(side.selected, 2, "with the drive just left selected");
+        // The same folder reached from its own drive climbs the real path.
+        let mut side = with_drives(&real, &drives);
+        assert!(side.activate(0).is_none());
+        assert!(side.shows(real.parent().unwrap()), "as any folder does");
+        std::fs::remove_file(&s).unwrap();
+        std::fs::remove_dir_all(&c).unwrap();
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    /// A link to `/` stands in for a mapped network drive, whose real
+    /// path is a top with no letter.
+    #[cfg(unix)]
+    #[test]
+    fn a_drive_whose_real_top_has_no_letter_is_selected_in_the_drives() {
+        let (c, d) = two_drives("drives-mapped");
+        let z = c.with_file_name(format!("{}-z", c.file_name().unwrap().to_string_lossy()));
+        std::os::unix::fs::symlink("/", &z).unwrap();
+        let drives = [c.clone(), d.clone(), z.clone()];
+        let mut side = with_drives(&c, &drives);
+        assert!(side.activate(0).is_none());
+        assert!(side.activate(2).is_none());
+        assert_eq!(side.root(), Path::new("/"));
+        assert!(side.activate(0).is_none());
+        assert_eq!(paths(&side), drives);
+        assert_eq!(side.selected, 2, "the drive just left, not the first");
+        std::fs::remove_file(&z).unwrap();
         std::fs::remove_dir_all(&c).unwrap();
         std::fs::remove_dir_all(&d).unwrap();
     }
