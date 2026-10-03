@@ -211,7 +211,18 @@ impl ThemeBrowser {
         self.start_rename(index, name);
     }
 
+    /// A shipped theme keeps its file and its name: the editor saves
+    /// its changes in a copy, and the browser offers the copy only.
+    fn shipped(&self, index: usize) -> bool {
+        self.rows
+            .get(index)
+            .is_some_and(|row| theme::is_bundled(&row.name))
+    }
+
     fn delete(&mut self, index: usize) {
+        if self.shipped(index) {
+            return;
+        }
         let Some(row) = self.rows.get(index) else {
             return;
         };
@@ -524,6 +535,9 @@ impl Overlay for ThemeBrowser {
             painter.fill(dup_x, icon_y + 4.0, 9.0, 9.0, 2.0, row_bg);
             painter.stroke(dup_x, icon_y + 4.0, 9.0, 9.0, 2.0, 1.2, theme.ui.overlay_fg);
 
+            if self.shipped(index) {
+                continue;
+            }
             let pending = self.pending_delete == Some(index);
             let cross_w = painter.measure("\u{00D7}", BODY_FAMILY, 19.0, 400);
             painter.text(
@@ -665,6 +679,9 @@ impl Overlay for ThemeBrowser {
             return OverlayResult::Open;
         }
         if x >= self.geometry.delete_x {
+            if self.shipped(index) {
+                return OverlayResult::Open;
+            }
             if self.pending_delete == Some(index) {
                 self.delete(index);
             } else {
@@ -682,7 +699,8 @@ impl Overlay for ThemeBrowser {
         // Double click on the name starts an inline rename.
         let now = Instant::now();
         if let Some((last_index, at)) = self.last_name_click {
-            if last_index == index && now.duration_since(at) < DOUBLE_CLICK {
+            if last_index == index && now.duration_since(at) < DOUBLE_CLICK && !self.shipped(index)
+            {
                 self.last_name_click = None;
                 let name = self.rows[index].name.clone();
                 self.start_rename(index, name);
@@ -826,6 +844,58 @@ mod tests {
         let mut painter = Painter::new(&mut pixmap, fonts, None, 1.0);
         browser.draw(&mut painter, &Theme::default_dark());
         pixmap
+    }
+
+    /// The editor saves a copy of a shipped theme and leaves its file
+    /// alone. The browser follows the same rule: the cross and the
+    /// rename work on the themes of the user only.
+    #[test]
+    fn a_shipped_theme_is_not_deleted_or_renamed_from_the_browser() {
+        let dir = temp_dir("shipped");
+        for name in ["dracula", "mine"] {
+            std::fs::write(
+                dir.join(format!("{name}.toml")),
+                "[surface]\nbackground = \"#282a36\"\n",
+            )
+            .unwrap();
+        }
+        let mut fonts = FontStore::new();
+        let mut browser = ThemeBrowser::new(vec![dir.clone()], "dracula");
+        drawn(&mut browser, &mut fonts, 460, 320);
+        let row_y = |browser: &ThemeBrowser, name: &str| {
+            let index = browser.rows.iter().position(|r| r.name == name).unwrap();
+            browser.geometry.list_top - browser.scroll + index as f32 * ROW_H + ROW_H / 2.0
+        };
+        let cross = browser.geometry.delete_x + 2.0;
+        let name_x = browser.geometry.name_x + 4.0;
+
+        let y = row_y(&browser, "dracula");
+        browser.click(cross, y);
+        assert_eq!(
+            browser.pending_delete, None,
+            "the cross of a shipped theme arms nothing"
+        );
+        browser.click(cross, y);
+        assert!(dir.join("dracula.toml").exists(), "the shipped file stays");
+        browser.click(name_x, y);
+        browser.click(name_x, y);
+        assert!(
+            browser.renaming.is_none(),
+            "a double click on a shipped name opens no rename"
+        );
+
+        let y = row_y(&browser, "mine");
+        browser.click(name_x, y);
+        browser.click(name_x, y);
+        assert!(browser.renaming.is_some(), "a theme of the user is renamed");
+        browser.renaming = None;
+        browser.click(cross, y);
+        browser.click(cross, y);
+        assert!(
+            !dir.join("mine.toml").exists(),
+            "a theme of the user is deleted"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
