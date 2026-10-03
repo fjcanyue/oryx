@@ -548,6 +548,7 @@ const BUNDLED: &[&str] = &[
     "ayu-light",
     "ayu-mirage",
     "be-vendible",
+    "black-and-white",
     "catppuccin-latte",
     "catppuccin-mocha",
     "dracula",

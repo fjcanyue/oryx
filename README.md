@@ -179,7 +179,7 @@ The theme editor changes any color role through a color picker while the documen
   <img src="screenshots/themes-editor.png" alt="The theme editor">
 </p>
 
-Ten themes are original designs: `oryx-light` and its dark twin `oryx-dark`, `oryx-hero`, `oryx-sand` and `oryx-night`, `inkstone`, `ember`, `meadow`, `slate`, and `be-vendible`. The rest adapt permissively licensed editor palettes, [credited below](#credits).
+Eleven themes are original designs: `oryx-light` and its dark twin `oryx-dark`, `oryx-hero`, `oryx-sand` and `oryx-night`, `inkstone`, `ember`, `meadow`, `slate`, `be-vendible`, and `black-and-white`. The rest adapt permissively licensed editor palettes, [credited below](#credits).
 
 > [!TIP]
 > You can drop an existing theme file into Claude Design or Gemini, describe or share a link to something you love and ask it to generate an Oryx-compatible theme.

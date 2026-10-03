@@ -4,6 +4,10 @@
 
 ### New features
 
+#### Themes
+
+- A new theme, `black-and-white`, made for printing: a white page, black text and grays.
+
 #### macOS
 
 - Oryx can be installed on a Mac with Homebrew: `brew install --cask wmahfoudh/tap/oryx`.

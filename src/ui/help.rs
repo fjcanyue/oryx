@@ -615,6 +615,11 @@ pub const TIPS: &[Tip] = &[
     Tip {
         kind: TipKind::Tip,
         area: Area::Export,
+        text: r#"`black-and-white` is a theme made for printing. Choose it in the export settings (`Ctrl+Shift+P`)."#,
+    },
+    Tip {
+        kind: TipKind::Tip,
+        area: Area::Export,
         text: r#"To force a page break in the PDF, write `\newpage` on a line of its own. On screen it shows as a dashed line. `<div style="page-break-after: always"></div>` does the same."#,
     },
     Tip {
