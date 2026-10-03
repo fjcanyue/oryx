@@ -788,9 +788,15 @@ fn app_run_keeps_the_default_data_dirs_when_the_variable_is_unset() {
 
 #[test]
 fn appimage_sh_packs_the_staged_tree_with_the_entry_and_the_icon_on_top() {
+    // appimagetool is itself an AppImage and needs FUSE to start, so
+    // it can be installed and still not run.
     for tool in ["appimagetool", "rsvg-convert"] {
-        if Command::new(tool).arg("--version").output().is_err() {
-            eprintln!("{tool} is not installed, skipped");
+        let runs = Command::new(tool)
+            .arg("--version")
+            .output()
+            .is_ok_and(|out| out.status.success());
+        if !runs {
+            eprintln!("{tool} is not installed or cannot run here, skipped");
             return;
         }
     }
