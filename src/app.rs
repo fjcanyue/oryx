@@ -7834,8 +7834,9 @@ impl App {
                 buffer[dst..dst + bw].copy_from_slice(&view[src..src + bw]);
             }
         }
-        // The caret's line reads its number brighter, as editors do: that
-        // line's stretch of the margin is painted again over the band.
+        // The caret's line shows its number in a box, so it is found at
+        // a glance: that line's stretch of the margin is painted again
+        // over the band.
         if self.mode == edit::Mode::Edit && numbers.is_some() {
             let line =
                 self.caret.and_then(
@@ -7846,16 +7847,10 @@ impl App {
                         _ => None,
                     },
                 );
+            let paper = paint::paper(&self.document, &self.theme);
+            let ink = paint::gutter::box_ink(&self.theme, paper);
             let strip = line.and_then(|line| {
-                paint::gutter::strip(
-                    &mut self.fonts,
-                    lay,
-                    &self.document,
-                    0,
-                    line,
-                    paint::paper(&self.document, &self.theme),
-                    self.theme.syntax.punctuation,
-                )
+                paint::gutter::strip(&mut self.fonts, lay, &self.document, 0, line, paper, ink)
             });
             if let Some(strip) = strip {
                 draw_strip(&mut buffer, size.width, size.height, inset, frame_y, &strip);

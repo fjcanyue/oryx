@@ -17,7 +17,7 @@ use crate::layout::{code_lines_in, metrics, LayoutDoc, LineSeat};
 use crate::paint::band::blend_buffer;
 use crate::paint::painter::round_rect;
 use crate::style::fonts::FontStore;
-use crate::style::theme::Rgba;
+use crate::style::theme::{contrast, Rgba, Theme};
 
 /// The numbers' size over the text's: a little smaller, so they read as
 /// a margin note and five digits fit the usual margin.
@@ -33,6 +33,25 @@ const INSET: f32 = 0.5;
 const BOX_PAD: f32 = 0.35;
 const BOX_HEIGHT: f32 = 1.25;
 const BOX_RADIUS: f32 = 0.25;
+/// The least contrast of the box against the page, WCAG's ratio. The
+/// digits are in the page's color, so under it they are lost. The
+/// shipped themes all read above it, the lowest at 2.89.
+const BOX_CONTRAST: f32 = 2.0;
+
+/// The color of the box behind the caret's line number on a page of
+/// color `page`: the theme's punctuation color, a mid-tone, quieter than
+/// the text. A theme that does not set it gets the default's, made for a
+/// dark page, which is lost on a light one: the box then takes the
+/// theme's text color, when that one reads better.
+pub fn box_ink(theme: &Theme, page: Rgba) -> Rgba {
+    let (quiet, text) = (theme.syntax.punctuation, theme.surface.foreground);
+    let reads = contrast(quiet, page);
+    if reads < BOX_CONTRAST && contrast(text, page) > reads {
+        text
+    } else {
+        quiet
+    }
+}
 
 /// True for a document whose rows are the lines of its file.
 pub fn numbered(doc: &Document) -> bool {
@@ -97,9 +116,7 @@ pub(crate) fn paint(
 /// One line's stretch of the margin, painted apart from the band: the
 /// page's color, and the line's number in the page's color on a box of
 /// `ink`. The editor lays it over the band on the caret's line, so the
-/// caret's number is found at a glance. The editor's ink is the theme's
-/// punctuation color: a mid-tone, quieter than the text, whose digits
-/// read at least as well as the other numbers in the comment color.
+/// caret's number is found at a glance. The editor's ink is `box_ink`.
 pub struct Strip {
     /// Packed as the band's pixels are.
     pub pixels: Vec<u32>,
@@ -279,7 +296,6 @@ mod tests {
     use crate::doc::load;
     use crate::layout::{layout, ViewConfig};
     use crate::paint::band::{band_numbered, paper};
-    use crate::style::theme::Theme;
 
     const WIDTH: u32 = 1000;
     const HEIGHT: u32 = 400;
@@ -617,5 +633,42 @@ mod tests {
             packed(page),
             "at both ends"
         );
+    }
+
+    fn rgb(r: u8, g: u8, b: u8) -> Rgba {
+        Rgba { r, g, b, a: 255 }
+    }
+
+    #[test]
+    fn the_box_takes_the_text_color_when_the_punctuation_color_is_lost_on_the_page() {
+        // A theme with a white page and no syntax colors: its punctuation
+        // color is the default's, made for a dark page.
+        let mut theme = Theme::default_dark();
+        let (white, dark) = (rgb(0xFF, 0xFF, 0xFF), rgb(0x22, 0x22, 0x22));
+        theme.surface.background = white;
+        theme.surface.foreground = dark;
+        assert_eq!(box_ink(&theme, white), dark);
+        // A text color that reads no better leaves the box as it is.
+        theme.surface.foreground = white;
+        assert_eq!(box_ink(&theme, white), theme.syntax.punctuation);
+    }
+
+    #[test]
+    fn the_box_keeps_the_punctuation_color_on_the_shipped_themes() {
+        use crate::style::theme::{load_file, scan};
+        let themes = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("themes");
+        let entries = scan(&themes);
+        assert!(entries.len() >= 30, "the collection was found");
+        for entry in entries {
+            let theme = load_file(&entry.path).unwrap();
+            for page in [theme.surface.background, theme.blocks.code_bg] {
+                assert_eq!(
+                    box_ink(&theme, page),
+                    theme.syntax.punctuation,
+                    "{}",
+                    entry.name
+                );
+            }
+        }
     }
 }
