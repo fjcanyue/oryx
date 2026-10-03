@@ -881,6 +881,71 @@ fn appimage_sh_packs_the_staged_tree_with_the_entry_and_the_icon_on_top() {
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
+/// The mode of the AppDir becomes the mode of the top folder of the
+/// image. firejail mounts the image as a plain user, who must be able to
+/// enter that folder. A stand-in `appimagetool` writes the mode of the
+/// AppDir it is given into the output file, so the test runs without
+/// the real tool.
+#[cfg(unix)]
+#[test]
+fn appimage_sh_lets_every_user_enter_the_top_folder_of_the_image() {
+    use std::os::unix::fs::PermissionsExt;
+    if Command::new("rsvg-convert")
+        .arg("--version")
+        .output()
+        .is_err()
+    {
+        eprintln!("rsvg-convert is not installed, skipped");
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("oryx-appimage-mode-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let src = dir.join("src");
+    let usr = dir.join("usr");
+    source_folder(&src);
+    let out = stage(&src, &usr);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let bin = dir.join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let tool = bin.join("appimagetool");
+    std::fs::write(
+        &tool,
+        "#!/bin/sh\nfor arg; do appdir=$out; out=$arg; done\nstat -c %a \"$appdir\" > \"$out\"\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&tool, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let path = format!(
+        "{}:{}",
+        bin.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let image = dir.join("Oryx-1.2.3-x86_64.AppImage");
+    let out = Command::new("sh")
+        .arg(repo().join("packaging/appimage.sh"))
+        .arg(&usr)
+        .arg(&image)
+        .env("PATH", path)
+        .env("APPIMAGE_RUNTIME", dir.join("no-runtime"))
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        std::fs::read_to_string(&image).unwrap(),
+        "755\n",
+        "the mode of the AppDir handed to appimagetool"
+    );
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
 /// `packaging/bump.sh` opens a phase at a new version: the crate line
 /// and the lock, a metainfo release line marked development with the
 /// day's date above the newest, the screenshot links on the new tag,

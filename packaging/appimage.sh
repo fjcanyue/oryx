@@ -40,6 +40,10 @@ done
 
 appdir=$(mktemp -d)
 trap 'rm -rf "$appdir"' EXIT
+# mktemp gives the folder to its owner alone, and its mode becomes the
+# mode of the top folder of the image. firejail mounts the image as a
+# plain user, who must be able to enter it.
+chmod 755 "$appdir"
 cp -r "$STAGE" "$appdir/usr"
 install -m755 "$apprun" "$appdir/AppRun"
 cp "$entry" "$appdir/$app.desktop"
