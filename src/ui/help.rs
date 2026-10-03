@@ -535,7 +535,7 @@ pub const TIPS: &[Tip] = &[
     Tip {
         kind: TipKind::Tip,
         area: Area::Editing,
-        text: r#"To turn on the word count, open the settings with `Ctrl+,`. The words, characters, lines and reading time of your file show in the bottom right corner. Select some text to count only that part."#,
+        text: r#"To turn on the word count, open the settings with `Ctrl+,`. A markdown or text file shows its words, characters, lines and reading time in the bottom right corner. A code file shows its lines and characters. Select some text to count only that part."#,
     },
     Tip {
         kind: TipKind::Tip,
