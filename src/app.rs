@@ -1061,6 +1061,19 @@ fn recover_args(folder: &Path, at: Option<(i32, i32)>) -> Vec<std::ffi::OsString
     args
 }
 
+/// The folder a system dialog starts on, in a form the dialog reads.
+/// The real path of a folder on a network share is `\\?\UNC\server\share`
+/// on Windows, and the dialog library drops the `\\?\` and hands the
+/// system `UNC\server\share`, which names nothing: the dialog then
+/// opens on the system's default folder. The plain form
+/// `\\server\share` is read. Any other path is unchanged.
+fn dialog_start(dir: PathBuf) -> PathBuf {
+    match dir.to_str().and_then(|text| text.strip_prefix(r"\\?\UNC\")) {
+        Some(share) => PathBuf::from(format!(r"\\{share}")),
+        None => dir,
+    }
+}
+
 /// Where the Save As dialog opens: the open file's folder; on the
 /// untitled note, the folder of the file that was open before it,
 /// else the home folder, never the note's own.
@@ -2850,7 +2863,7 @@ impl App {
             self.path.as_deref(),
             home.as_deref(),
         ) {
-            dialog = dialog.set_directory(dir);
+            dialog = dialog.set_directory(dialog_start(dir));
         }
         if let Some(name) = self
             .path
@@ -2915,7 +2928,7 @@ impl App {
         // the one they came from, never Oryx's own folder that goes at
         // quit with anything saved into it.
         if let Some(dir) = self.document_dir() {
-            dialog = dialog.set_directory(dir);
+            dialog = dialog.set_directory(dialog_start(dir));
         }
         let Some(target) = dialog.save_file() else {
             return;
@@ -6520,7 +6533,7 @@ impl App {
         ]);
         let target = rfd::FileDialog::new()
             .set_file_name(format!("{stem}.pdf"))
-            .set_directory(start)
+            .set_directory(dialog_start(start))
             .add_filter("PDF", &["pdf"])
             .save_file();
         let Some(target) = target else {
@@ -6599,7 +6612,7 @@ impl App {
             self.remembered_dir(),
             config::home_dir(),
         ]);
-        dialog = dialog.set_directory(start);
+        dialog = dialog.set_directory(dialog_start(start));
         if let Some(path) = dialog.pick_file() {
             if self.guard_unsaved(confirm::Pending::Open(path.clone(), true)) {
                 self.open_file(&path, true);
@@ -9005,6 +9018,28 @@ mod tests {
             None,
             "a place taken while reading is a view, with no caret"
         );
+    }
+
+    #[test]
+    fn a_dialog_starts_on_a_network_folder_in_the_form_the_system_reads() {
+        use std::path::PathBuf;
+        assert_eq!(
+            super::dialog_start(PathBuf::from(r"\\?\UNC\server\share\notes")),
+            PathBuf::from(r"\\server\share\notes"),
+            "the long form of a network folder"
+        );
+        for kept in [
+            r"\\?\C:\Work",
+            r"C:\Work",
+            r"\\server\share",
+            "/home/a/notes",
+        ] {
+            assert_eq!(
+                super::dialog_start(PathBuf::from(kept)),
+                PathBuf::from(kept),
+                "{kept}"
+            );
+        }
     }
 
     #[test]
