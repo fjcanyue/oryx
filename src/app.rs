@@ -760,32 +760,35 @@ fn row_height(doc: &Document, cfg: &ViewConfig) -> f32 {
     metrics::LINE_HEIGHT * size
 }
 
-/// Whether two view settings measure a page the same: the fonts, their
-/// sizes and the zoom. The settings dialog can change the fonts while a
-/// page is set aside. The other fields are the file's own (the
-/// direction, the comic's fit) or the editor's (the room for line
-/// numbers), and do not move while the page is away.
-fn same_type(a: &ViewConfig, b: &ViewConfig) -> bool {
+/// Whether two view settings lay a page out the same: the fonts, their
+/// sizes, the zoom, the reading direction and the justification. Each
+/// can change while a page is set aside: the fonts in the settings
+/// dialog, the direction with `Ctrl+D` in the editor, the justification
+/// with `Ctrl+J` on the help page. The comic's fit does not move while
+/// the page is away, and the room for line numbers is the editor's.
+fn same_layout(a: &ViewConfig, b: &ViewConfig) -> bool {
     a.body_family == b.body_family
         && a.code_family == b.code_family
         && a.body_size == b.body_size
         && a.code_size == b.code_size
         && a.zoom == b.zoom
+        && a.direction == b.direction
+        && a.justify == b.justify
 }
 
 /// A page set aside, behind the editor or the help page, keeps its
-/// layout on return while its type is the same (`same_type`). Under
-/// another theme the rows around the view are refilled in the new
-/// colors, a theme being colors only, provided the page was measured to
-/// its end; a page still being measured, or in another type, is laid
-/// out again.
+/// layout on return while its view settings lay it out the same
+/// (`same_layout`). Under another theme the rows around the view are
+/// refilled in the new colors, a theme being colors only, provided the
+/// page was measured to its end; a page still being measured, or under
+/// other settings, is laid out again.
 fn kept_layout(
     layout: Option<LayoutDoc>,
     pass: Option<LayoutPass>,
-    same_type: bool,
+    same_layout: bool,
     same_theme: bool,
 ) -> (Option<LayoutDoc>, Option<LayoutPass>) {
-    if !same_type {
+    if !same_layout {
         return (None, None);
     }
     if same_theme {
@@ -813,8 +816,9 @@ struct Parked {
     /// means equal bytes, so the parked page is still the truth.
     head: usize,
     /// The look the parked layout was built under: a change of font,
-    /// of size or of zoom while editing drops the layout and keeps the
-    /// model, a theme change refills its colors (`kept_layout`).
+    /// of size, of zoom or of direction while editing drops the layout
+    /// and keeps the model, a theme change refills its colors
+    /// (`kept_layout`).
     cfg: ViewConfig,
     theme: Theme,
 }
@@ -843,7 +847,8 @@ struct Stash {
     /// it survives the trip whole.
     selection: Option<Selection>,
     /// The look the stashed layout was built under, weighed on return
-    /// as the parked page's is (`kept_layout`).
+    /// as the parked page's is (`kept_layout`). Its direction is the
+    /// document's own, and the return gives it back.
     cfg: ViewConfig,
     theme: Theme,
     /// A parse was still streaming at the swap, so the model is
@@ -1883,6 +1888,8 @@ impl App {
                 theme: self.theme.clone(),
             };
             self.edit_park = Some(Box::new(parked));
+            // The justification is the page's: the source view has none.
+            self.cfg.justify = justify_pref(&self.config, &self.document);
             self.swapped_document(None, None);
             // The reading scroll means nothing in the source view: the
             // two documents share no coordinate but the bytes. The row
@@ -2039,10 +2046,13 @@ impl App {
                 // it here would cost a parse of the whole page for nothing.
                 self.document = parked.document;
                 self.layout_width = parked.layout_width;
+                // The page takes its justification back before its kept
+                // layout is weighed against the settings of the moment.
+                self.cfg.justify = justify_pref(&self.config, &self.document);
                 let (layout, pass) = kept_layout(
                     parked.layout,
                     parked.pass,
-                    same_type(&self.cfg, &parked.cfg),
+                    same_layout(&self.cfg, &parked.cfg),
                     self.theme == parked.theme,
                 );
                 self.swapped_document(layout, pass);
@@ -2055,6 +2065,7 @@ impl App {
                 if let Some(kind) = kind {
                     self.document = edit::rendered_document(kind, &text);
                 }
+                self.cfg.justify = justify_pref(&self.config, &self.document);
                 self.swapped_document(None, None);
                 self.outline = OutlineTree::build(&self.document);
             }
@@ -6697,6 +6708,10 @@ impl App {
         self.document = markdown_help();
         self.outline = OutlineTree::build(&self.document);
         self.cfg.justify = justify_pref(&self.config, &self.document);
+        // The help page opens in automatic direction. The direction of
+        // the document set aside is its own: the stash keeps it, and
+        // `help_return` gives it back.
+        self.cfg.direction = DirectionMode::Auto;
         self.scroll_y = 0.0;
         self.band = None;
         self.pending_band_for = None;
@@ -6711,10 +6726,12 @@ impl App {
         self.request_redraw();
     }
 
-    /// Back from the help page: the stashed document returns exactly
-    /// as it was. A zoom changed while help showed drops the stashed
-    /// layout, and the streaming pass re-measures; a theme changed
-    /// refills its colors.
+    /// Back from the help page: the stashed document returns as it
+    /// was, in its own direction, whatever `Ctrl+D` did on the help
+    /// page. A font, a size, the zoom or the justification changed
+    /// while help showed drops the stashed layout, and the streaming
+    /// pass lays the document out again; a theme changed refills its
+    /// colors.
     fn help_return(&mut self) {
         let Some(stash) = self.help_stash.take() else {
             return;
@@ -6744,10 +6761,15 @@ impl App {
         self.media = stash.media;
         self.book_toc = stash.book_toc;
         self.disk_seen = stash.disk_seen;
+        // The document takes its direction and its justification back
+        // before its kept layout is weighed against the settings of the
+        // moment.
+        self.cfg.direction = stash.cfg.direction;
+        self.cfg.justify = justify_pref(&self.config, &self.document);
         (self.layout, self.pass) = kept_layout(
             stash.layout,
             stash.pass,
-            same_type(&self.cfg, &stash.cfg),
+            same_layout(&self.cfg, &stash.cfg),
             self.theme == stash.theme,
         );
         // The outline belongs to the rendered page. A return into a
@@ -6761,7 +6783,6 @@ impl App {
         } else {
             OutlineTree::from_toc(&self.book_toc, &self.document)
         };
-        self.cfg.justify = justify_pref(&self.config, &self.document);
         self.selection = stash.selection;
         self.sel_anchor = None;
         self.band = None;
@@ -9052,10 +9073,10 @@ mod tests {
 
     #[test]
     fn a_page_set_aside_is_measured_again_when_its_type_changes() {
-        use super::same_type;
+        use super::same_layout;
         use oryx::layout::ViewConfig;
         let kept = ViewConfig::default();
-        assert!(same_type(&kept, &kept.clone()));
+        assert!(same_layout(&kept, &kept.clone()));
         type Change = fn(&mut ViewConfig);
         let changes: [(&str, Change); 5] = [
             ("the body font", |cfg| cfg.body_family = "Other".into()),
@@ -9067,13 +9088,28 @@ mod tests {
         for (what, change) in changes {
             let mut now = kept.clone();
             change(&mut now);
-            assert!(!same_type(&kept, &now), "{what}");
+            assert!(!same_layout(&kept, &now), "{what}");
         }
         // The editor's room for line numbers is not the page's: a page
         // parked behind the editor comes back as it was.
         let mut now = kept.clone();
         now.gutter = 40.0;
-        assert!(same_type(&kept, &now));
+        assert!(same_layout(&kept, &now));
+    }
+
+    #[test]
+    fn a_page_set_aside_is_laid_out_again_when_its_direction_or_justification_changes() {
+        use super::same_layout;
+        use oryx::layout::{DirectionMode, ViewConfig};
+        let kept = ViewConfig::default();
+        // `Ctrl+D` in the editor turns the file while its page is parked.
+        let mut now = kept.clone();
+        now.direction = DirectionMode::Rtl;
+        assert!(!same_layout(&kept, &now), "the direction");
+        // `Ctrl+J` on the help page justifies the markdown page behind it.
+        let mut now = kept.clone();
+        now.justify = true;
+        assert!(!same_layout(&kept, &now), "the justification");
     }
 
     #[test]

@@ -31,6 +31,8 @@
 - The theme browser no longer deletes or renames a theme that ships with Oryx. Duplicate it to get a custom theme that you can change. Before, two clicks on the cross deleted the theme until the next install.
 - The sidebar now keeps its width when you open a file from another folder. Before, it went back to its default width.
 - A font or a size changed in the settings while the editor or the help page is open now shows on the page when you return to it. Before, the page kept the old one until a reload.
+- `Ctrl+D` in the editor now turns the page when you return to it. Before, the page kept its direction until a reload.
+- The help page now has its own reading direction. Before, it took the direction of your file, and `Ctrl+D` on the help page changed the direction of your file.
 - Changing the theme now keeps the page where you were reading. Before, the view could move.
 - In the editor, a jump to a far line of a very large file is faster.
 
