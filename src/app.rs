@@ -3396,6 +3396,11 @@ impl App {
                 if self.save() {
                     self.resolve_confirm(event_loop);
                 } else {
+                    // The open the question held does not happen, so a
+                    // step that waited on it is given up, as on Cancel:
+                    // left standing, it would turn the next open of that
+                    // file into the step.
+                    self.pending_step = None;
                     self.ask_next_leftover();
                 }
             }
