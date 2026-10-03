@@ -565,7 +565,7 @@ pub const TIPS: &[Tip] = &[
     Tip {
         kind: TipKind::Tip,
         area: Area::Looks,
-        text: r#"In the theme browser, each row has three small icons at its right: one opens the theme in the color editor, one duplicates it and one deletes it. A double click on the name renames it."#,
+        text: r#"In the theme browser, each row has small icons at its right: one opens the theme in the color editor and one duplicates it. A custom theme also has a cross that deletes it, and a double click on its name renames it."#,
     },
     Tip {
         kind: TipKind::Tip,
@@ -575,7 +575,7 @@ pub const TIPS: &[Tip] = &[
     Tip {
         kind: TipKind::Tip,
         area: Area::Looks,
-        text: r#"To get a theme of your own, give one of the TOML theme files to an AI assistant, along with a picture whose colors you like, and ask for a matching theme."#,
+        text: r#"To make a custom theme, give one of the TOML theme files to an AI assistant, along with a picture whose colors you like, and ask for a matching theme."#,
     },
     Tip {
         kind: TipKind::Tip,
