@@ -23,6 +23,7 @@
 - On Windows, the sidebar can now reach your other drives: `..` at the top of a drive shows the list of drives. Before, the sidebar could not leave the drive it started on.
 - On Windows, the open and save dialogs now start in the folder of your file when it is on a network drive. Before, they started in Documents.
 - On Linux, the AppImage now starts under firejail. Before, it stopped with "Permission denied".
+- The theme editor now saves your changes to `oryx-hero` in a copy, as for the other themes that ship with Oryx. Before, it changed the shipped theme itself.
 - The sidebar now keeps its width when you open a file from another folder. Before, it went back to its default width.
 - A font or a size changed in the settings while the editor or the help page is open now shows on the page when you return to it. Before, the page kept the old one until a reload.
 - Changing the theme now keeps the page where you were reading. Before, the view could move.

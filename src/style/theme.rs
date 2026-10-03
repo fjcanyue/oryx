@@ -567,6 +567,7 @@ const BUNDLED: &[&str] = &[
     "nord",
     "one-dark",
     "oryx-dark",
+    "oryx-hero",
     "oryx-light",
     "oryx-night",
     "oryx-sand",
@@ -888,6 +889,20 @@ selection_bg = "#33445566"
         assert!(is_bundled("oryx-light"));
         assert!(!is_bundled("my-own-theme"));
         assert!(!is_bundled("dracula-copy"));
+    }
+
+    #[test]
+    fn each_shipped_theme_is_bundled() {
+        // The theme editor saves a copy of a bundled theme. A shipped
+        // theme that is missing from the list is overwritten in place.
+        let themes = Path::new(env!("CARGO_MANIFEST_DIR")).join("themes");
+        for entry in scan(&themes) {
+            assert!(
+                is_bundled(&entry.name),
+                "{} ships and is not bundled",
+                entry.name
+            );
+        }
     }
 
     #[test]
