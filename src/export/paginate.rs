@@ -898,7 +898,7 @@ mod tests {
 
     pub(super) fn laid_out_with_body_size(doc: &Document, body_size: f32) -> LayoutDoc {
         let mut fonts = FontStore::new();
-        let mut media = MediaCache::new(PathBuf::from("tests/fixtures"));
+        let mut media = MediaCache::offline(PathBuf::from("tests/fixtures"));
         let cfg = ViewConfig {
             body_size,
             code_size: 9.0,
@@ -1177,7 +1177,7 @@ mod rules {
     fn an_image_never_runs_past_the_bottom_of_its_page() {
         let g = geometry();
         let mut fonts = FontStore::new();
-        let mut media = MediaCache::new(PathBuf::from("tests/fixtures"));
+        let mut media = MediaCache::offline(PathBuf::from("tests/fixtures"));
         let cfg = ViewConfig {
             body_size: 11.0,
             code_size: 9.0,
@@ -1223,7 +1223,7 @@ mod rules {
     fn nothing_drawn_reaches_into_the_bottom_margin() {
         let g = geometry();
         let mut fonts = FontStore::new();
-        let mut media = MediaCache::new(PathBuf::from("tests/fixtures"));
+        let mut media = MediaCache::offline(PathBuf::from("tests/fixtures"));
         let cfg = ViewConfig {
             body_size: 11.0,
             code_size: 9.0,

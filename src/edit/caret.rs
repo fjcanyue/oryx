@@ -1213,7 +1213,7 @@ mod tests {
 
     fn lay_of(doc: &Document) -> (LayoutDoc, FontStore) {
         let mut fonts = FontStore::new();
-        let mut media = MediaCache::new(PathBuf::from("."));
+        let mut media = MediaCache::offline(PathBuf::from("."));
         let l = layout(
             doc,
             &Theme::default_dark(),
@@ -1926,7 +1926,7 @@ mod tests {
         let text: String = (0..300_000).map(|i| format!("let v{i} = {i};\n")).collect();
         let doc = code_doc(&text);
         let mut fonts = FontStore::new();
-        let mut media = MediaCache::new(PathBuf::from("."));
+        let mut media = MediaCache::offline(PathBuf::from("."));
         let (mut l, mut pass) = crate::layout::layout_begin(&doc, &ViewConfig::default(), 2000.0);
         pass.retain_around(0.0, 600.0);
         crate::layout::layout_more(
@@ -2236,7 +2236,7 @@ mod tests {
         }
         let doc = md_doc(&src);
         let mut fonts = FontStore::new();
-        let mut media = MediaCache::new(PathBuf::from("examples"));
+        let mut media = MediaCache::offline(PathBuf::from("examples"));
         let l = layout(
             &doc,
             &Theme::default_dark(),

@@ -357,6 +357,8 @@ pub struct MediaCache {
     pool: Option<DecodePool>,
     arrivals: Arrivals,
     waker: Option<Waker>,
+    /// Set by `offline`: no fetch is started.
+    offline: bool,
 }
 
 impl MediaCache {
@@ -382,6 +384,17 @@ impl MediaCache {
             pool: None,
             arrivals: Arc::new(Mutex::new(Vec::new())),
             waker: None,
+            offline: false,
+        }
+    }
+
+    /// A cache for tests: no cache folder and no fetch, so an online
+    /// picture stays a placeholder and a test gives the same result
+    /// with or without the network, whatever the user's cache holds.
+    pub fn offline(doc_dir: PathBuf) -> MediaCache {
+        MediaCache {
+            offline: true,
+            ..Self::with_cache_dir(doc_dir, None)
         }
     }
 
@@ -592,6 +605,9 @@ impl MediaCache {
 
     fn spawn_fetch(&mut self, src: &str) {
         self.remote.insert(src.to_string(), RemoteState::Pending);
+        if self.offline {
+            return;
+        }
         let url = src.to_string();
         let cache_dir = self.cache_dir.clone();
         let arrivals = Arc::clone(&self.arrivals);
@@ -769,7 +785,7 @@ mod tests {
     fn a_new_pass_drops_the_scaled_buffers() {
         let dir = temp_dir();
         write_png(&dir, "evict.png", 40, 20);
-        let mut media = MediaCache::new(dir);
+        let mut media = MediaCache::offline(dir);
         assert!(media.scaled("evict.png", 20, 10).is_some());
         assert!(!media.scaled.is_empty());
         media.clear_scaled();
@@ -840,6 +856,23 @@ mod tests {
         assert_eq!(decode(svg.as_bytes()).unwrap().dimensions(), (40, 20));
         assert_eq!(decode(&png_bytes(8, 4)).unwrap().dimensions(), (8, 4));
         assert!(decode(b"not an image at all").is_none());
+    }
+
+    /// The cache the tests build: an online picture stays a
+    /// placeholder, with no cache folder read and no fetch started, so
+    /// a test gives the same result on any machine.
+    #[test]
+    fn an_offline_cache_reads_no_cache_folder_and_starts_no_fetch() {
+        let url = "https://192.0.2.1/offline.png";
+        let mut media = MediaCache::offline(temp_dir());
+        assert!(media.cache_dir.is_none());
+        assert_eq!(media.dimensions(url), None);
+        assert!(matches!(media.remote.get(url), Some(RemoteState::Pending)));
+        assert_eq!(
+            Arc::strong_count(&media.arrivals),
+            1,
+            "a fetch thread would hold the queue of arrivals"
+        );
     }
 
     #[test]
@@ -948,7 +981,7 @@ mod tests {
 
     #[test]
     fn a_stored_book_source_answers_dimensions_without_pixels() {
-        let mut media = MediaCache::new(temp_dir());
+        let mut media = MediaCache::offline(temp_dir());
         let source = BookSource::Raster(png_bytes(8, 4));
         let dims = probe_source(&source);
         assert_eq!(dims, Some((8, 4)), "the header answers the size");
@@ -978,7 +1011,7 @@ mod tests {
     /// a failed load always has.
     #[test]
     fn an_unreadable_source_pins_the_placeholder() {
-        let mut media = MediaCache::new(temp_dir());
+        let mut media = MediaCache::offline(temp_dir());
         let source = BookSource::Raster(b"not an image".to_vec());
         media.adopt(vec![("book/bad.bin".to_string(), source, None)]);
         assert_eq!(media.dimensions("book/bad.bin"), None);
@@ -992,7 +1025,7 @@ mod tests {
     /// exactly one decode, and finds the pixels after the arrival folds.
     #[test]
     fn a_cold_book_image_decodes_on_demand_once() {
-        let mut media = MediaCache::new(temp_dir());
+        let mut media = MediaCache::offline(temp_dir());
         let source = BookSource::Raster(png_bytes(8, 4));
         media.adopt(vec![("book/pic.png".to_string(), source, Some((8, 4)))]);
         assert!(
@@ -1020,7 +1053,7 @@ mod tests {
     /// recently touched leave, and a return decodes again.
     #[test]
     fn book_originals_evict_past_the_budget_oldest_first() {
-        let mut media = MediaCache::new(temp_dir());
+        let mut media = MediaCache::offline(temp_dir());
         // Two 8x4 rgba originals fit, a third does not.
         media.budget = 300;
         for name in ["a", "b", "c"] {
@@ -1134,7 +1167,7 @@ mod tests {
     /// still relayouts.
     #[test]
     fn a_book_arrival_repaints_a_remote_one_relayouts() {
-        let mut media = MediaCache::new(temp_dir());
+        let mut media = MediaCache::offline(temp_dir());
         let source = BookSource::Raster(png_bytes(8, 4));
         media.adopt(vec![("book/pic.png".to_string(), source, Some((8, 4)))]);
         let sink = media.feeder();
@@ -1149,7 +1182,7 @@ mod tests {
     fn cache_dimensions_and_scaling() {
         let dir = temp_dir();
         write_png(&dir, "b.png", 100, 50);
-        let mut cache = MediaCache::new(dir);
+        let mut cache = MediaCache::offline(dir);
         assert_eq!(cache.dimensions("b.png"), Some((100, 50)));
         let scaled = cache.scaled("b.png", 40, 20).unwrap();
         assert_eq!(scaled.len(), 40 * 20 * 4);

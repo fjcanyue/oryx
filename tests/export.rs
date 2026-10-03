@@ -25,7 +25,7 @@ fn export_to_bytes(doc: &Document, page: PageSize) -> Vec<u8> {
 /// A book export: the same pass with the authored table of contents
 /// driving the PDF outline.
 fn export_book(book: &oryx::doc::epub::Book) -> Vec<u8> {
-    let mut media = MediaCache::new(PathBuf::from("tests/fixtures"));
+    let mut media = MediaCache::offline(PathBuf::from("tests/fixtures"));
     export_book_with(book, &mut media)
 }
 
@@ -73,7 +73,7 @@ fn a_cold_book_image_exports_as_pixels() {
         )
         .build();
     let (_, _, job) = oryx::doc::epub::open_prefix(bytes.clone()).unwrap();
-    let mut media = MediaCache::new(PathBuf::from("tests/fixtures"));
+    let mut media = MediaCache::offline(PathBuf::from("tests/fixtures"));
     media.adopt(job.expect("images leave a job").take_sources());
     let book = oryx::doc::epub::open_book(bytes).unwrap();
     let pdf = Pdf::load_mem(&export_book_with(&book, &mut media)).unwrap();
@@ -260,7 +260,7 @@ fn export_cfg(
     body_family: Option<&str>,
 ) -> Vec<u8> {
     let mut fonts = FontStore::new();
-    let mut media = MediaCache::new(PathBuf::from("tests/fixtures"));
+    let mut media = MediaCache::offline(PathBuf::from("tests/fixtures"));
     let mut cfg = ViewConfig {
         body_size: 11.0,
         code_size: 9.0,
@@ -699,7 +699,7 @@ fn geometry_and_cfg() -> (PageGeometry, ViewConfig) {
 fn paginate_in_slices(doc: &Document, stride: usize) -> Vec<oryx::export::paginate::Page> {
     let (geometry, cfg) = geometry_and_cfg();
     let mut fonts = FontStore::new();
-    let mut media = MediaCache::new(PathBuf::from("tests/fixtures"));
+    let mut media = MediaCache::offline(PathBuf::from("tests/fixtures"));
     let theme = Theme::default_dark();
     let (mut lay, mut pass) = layout_begin(doc, &cfg, geometry.width);
     let mut paginator = Paginator::new();
@@ -724,7 +724,7 @@ fn incremental_pagination_matches_the_one_shot_pages() {
     let doc = markdown::parse(paged_source().as_str());
     let (geometry, cfg) = geometry_and_cfg();
     let mut fonts = FontStore::new();
-    let mut media = MediaCache::new(PathBuf::from("tests/fixtures"));
+    let mut media = MediaCache::offline(PathBuf::from("tests/fixtures"));
     let lay = layout(
         &doc,
         &Theme::default_dark(),
@@ -765,7 +765,7 @@ fn stream_to(
         ..ExportSettings::default()
     };
     let mut fonts = FontStore::new();
-    let mut media = MediaCache::new(PathBuf::from("tests/fixtures"));
+    let mut media = MediaCache::offline(PathBuf::from("tests/fixtures"));
     let mut pass = ExportPass::new(&settings, Theme::default_dark(), target.to_path_buf());
     let mut part = target.to_path_buf().into_os_string();
     part.push(".part");
@@ -880,7 +880,7 @@ fn a_cancelled_export_leaves_the_target_and_no_part_behind() {
         ..ExportSettings::default()
     };
     let mut fonts = FontStore::new();
-    let mut media = MediaCache::new(PathBuf::from("tests/fixtures"));
+    let mut media = MediaCache::offline(PathBuf::from("tests/fixtures"));
     let mut pass = ExportPass::new(&settings, Theme::default_dark(), target.clone());
     for _ in 0..50 {
         if pass.is_done() {
@@ -945,7 +945,7 @@ fn every_display_equation_lands_whole_on_one_page() {
     let doc = markdown::parse(source.as_str());
     let (geometry, cfg) = geometry_and_cfg();
     let mut fonts = FontStore::new();
-    let mut media = MediaCache::new(PathBuf::from("tests/fixtures"));
+    let mut media = MediaCache::offline(PathBuf::from("tests/fixtures"));
     let lay = layout(
         &doc,
         &Theme::default_dark(),
@@ -1026,7 +1026,7 @@ fn a_book_export_justifies_when_asked() {
         let target =
             std::env::temp_dir().join(format!("oryx-justify-{justify}-{}.pdf", std::process::id()));
         let mut fonts = FontStore::new();
-        let mut media = MediaCache::new(PathBuf::from("tests/fixtures"));
+        let mut media = MediaCache::offline(PathBuf::from("tests/fixtures"));
         let mut pass = ExportPass::new(&settings, Theme::default_dark(), target.clone());
         while !pass.is_done() {
             pass.step(
@@ -1076,7 +1076,7 @@ fn a_markdown_export_justifies_on_request() {
         let target =
             std::env::temp_dir().join(format!("oryx-md-just-{justify}-{}.pdf", std::process::id()));
         let mut fonts = FontStore::new();
-        let mut media = MediaCache::new(PathBuf::from("tests/fixtures"));
+        let mut media = MediaCache::offline(PathBuf::from("tests/fixtures"));
         let mut pass = ExportPass::new(&settings, Theme::default_dark(), target.clone());
         while !pass.is_done() {
             pass.step(
@@ -1123,7 +1123,7 @@ fn a_code_file_export_ignores_justify() {
             std::process::id()
         ));
         let mut fonts = FontStore::new();
-        let mut media = MediaCache::new(PathBuf::from("tests/fixtures"));
+        let mut media = MediaCache::offline(PathBuf::from("tests/fixtures"));
         let mut pass = ExportPass::new(&settings, Theme::default_dark(), target.clone());
         while !pass.is_done() {
             pass.step(

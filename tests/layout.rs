@@ -24,7 +24,7 @@ fn cfg() -> ViewConfig {
 }
 
 fn lay_doc(doc: &Document, width: f32, fonts: &mut FontStore) -> LayoutDoc {
-    let mut media = MediaCache::new(PathBuf::from("."));
+    let mut media = MediaCache::offline(PathBuf::from("."));
     layout(
         doc,
         &Theme::default_dark(),
@@ -122,7 +122,7 @@ fn zoom_doubles_sizes_and_grows_height() {
     let doc = markdown::parse(source);
     let mut config = cfg();
     config.zoom = 2.0;
-    let mut media = MediaCache::new(PathBuf::from("."));
+    let mut media = MediaCache::offline(PathBuf::from("."));
     let zoomed = layout(
         &doc,
         &Theme::default_dark(),
@@ -672,7 +672,7 @@ fn dominant_column_grows_into_leftover() {
 
 fn lay_with_images(source: &str, width: f32, dir: PathBuf) -> LayoutDoc {
     let doc = markdown::parse(source);
-    let mut media = MediaCache::new(dir);
+    let mut media = MediaCache::offline(dir);
     layout(
         &doc,
         &Theme::default_dark(),
@@ -714,7 +714,7 @@ fn missing_image_becomes_placeholder() {
     let dir = std::env::temp_dir().join("oryx-laytest-none");
     std::fs::create_dir_all(&dir).unwrap();
     let doc = markdown::parse("![the alt text](gone.png)");
-    let mut media = MediaCache::new(dir);
+    let mut media = MediaCache::offline(dir);
     let l = layout(
         &doc,
         &Theme::default_dark(),
@@ -1124,7 +1124,7 @@ fn wide_display_math_scales_to_fit_and_floors_at_half() {
 fn math_glyphs_reach_the_pixels() {
     let t = Theme::default_dark();
     let doc = markdown::parse("$$E=mc^2$$");
-    let mut media = MediaCache::new(PathBuf::from("."));
+    let mut media = MediaCache::offline(PathBuf::from("."));
     let mut f = fonts();
     let l = layout(&doc, &t, &mut f, &mut media, &cfg(), 800.0);
     let g = &l.math_glyphs[0];
@@ -1175,7 +1175,7 @@ fn math_rules_paint_anti_aliased() {
 fn math_scales_with_zoom() {
     let doc = markdown::parse("$$x^2$$");
     let t = Theme::default_dark();
-    let mut media = MediaCache::new(PathBuf::from("."));
+    let mut media = MediaCache::offline(PathBuf::from("."));
     let mut config = cfg();
     let l1 = layout(&doc, &t, &mut fonts(), &mut media, &config, 800.0);
     config.zoom = 2.0;
@@ -1195,7 +1195,7 @@ fn quote_region_paints_without_seam() {
         let doc = markdown::parse("# Head\n\ntext\n\n> [!CAUTION]\n> one\n>\n> two paragraphs");
         let mut config = cfg();
         config.zoom = zoom;
-        let mut media = MediaCache::new(PathBuf::from("."));
+        let mut media = MediaCache::offline(PathBuf::from("."));
         let l = layout(&doc, &t, &mut fonts(), &mut media, &config, 800.0);
         let panels: Vec<_> = l
             .rects
@@ -1348,7 +1348,7 @@ fn theme() -> Theme {
 
 /// Runs `k` steps, then finishes the pass without a deadline.
 fn lay_in_two(doc: &Document, width: f32, fonts: &mut FontStore, k: usize) -> LayoutDoc {
-    let mut media = MediaCache::new(PathBuf::from("."));
+    let mut media = MediaCache::offline(PathBuf::from("."));
     let (mut out, mut pass) = layout_begin(doc, &cfg(), width);
     for _ in 0..k {
         if layout_step(
@@ -1378,7 +1378,7 @@ fn lay_in_two(doc: &Document, width: f32, fonts: &mut FontStore, k: usize) -> La
 
 /// Steps a complete pass takes, which is the number of boundaries to sweep.
 fn step_count(doc: &Document, width: f32, fonts: &mut FontStore) -> usize {
-    let mut media = MediaCache::new(PathBuf::from("."));
+    let mut media = MediaCache::offline(PathBuf::from("."));
     let (mut out, mut pass) = layout_begin(doc, &cfg(), width);
     let mut steps = 1;
     while !layout_step(
@@ -1427,7 +1427,7 @@ fn an_unbounded_pass_matches_layout() {
     let doc = markdown::parse(ONE_OF_EACH);
     let mut fonts = fonts();
     let whole = lay_doc(&doc, 800.0, &mut fonts);
-    let mut media = MediaCache::new(PathBuf::from("."));
+    let mut media = MediaCache::offline(PathBuf::from("."));
     let (mut out, mut pass) = layout_begin(&doc, &cfg(), 800.0);
     let done = layout_more(
         &doc,
@@ -1472,7 +1472,7 @@ fn sweep_over_code_lines() {
 fn a_past_deadline_places_nothing() {
     let doc = markdown::parse(ONE_OF_EACH);
     let mut fonts = fonts();
-    let mut media = MediaCache::new(PathBuf::from("."));
+    let mut media = MediaCache::offline(PathBuf::from("."));
     let (mut out, mut pass) = layout_begin(&doc, &cfg(), 800.0);
     let done = layout_more(
         &doc,
@@ -1496,7 +1496,7 @@ fn a_partial_pass_is_a_prefix_of_the_complete_one() {
     let doc = markdown::parse(QUOTE_REGION);
     let mut fonts = fonts();
     let whole = lay_doc(&doc, 800.0, &mut fonts);
-    let mut media = MediaCache::new(PathBuf::from("."));
+    let mut media = MediaCache::offline(PathBuf::from("."));
     let (mut out, mut pass) = layout_begin(&doc, &cfg(), 800.0);
     for k in 0..step_count(&doc, 800.0, &mut fonts) {
         layout_step(
@@ -1523,7 +1523,7 @@ fn height_grows_to_the_complete_height() {
     let doc = markdown::parse(ONE_OF_EACH);
     let mut fonts = fonts();
     let whole = lay_doc(&doc, 800.0, &mut fonts);
-    let mut media = MediaCache::new(PathBuf::from("."));
+    let mut media = MediaCache::offline(PathBuf::from("."));
     let (mut out, mut pass) = layout_begin(&doc, &cfg(), 800.0);
     let mut previous = 0.0_f32;
     loop {
@@ -1557,7 +1557,7 @@ fn a_partial_code_panel_covers_the_placed_lines() {
         .iter()
         .find(|r| r.color == theme.blocks.code_bg)
         .expect("no code panel");
-    let mut media = MediaCache::new(PathBuf::from("."));
+    let mut media = MediaCache::offline(PathBuf::from("."));
     let (mut out, mut pass) = layout_begin(&doc, &cfg(), 800.0);
     // The intro paragraph, then two of the four code lines.
     for _ in 0..3 {
@@ -1630,7 +1630,7 @@ fn table_rows_record_their_bands() {
 fn an_image_scales_with_the_reading_size() {
     let doc = markdown::parse("![logo](oryx-test.png)");
     let laid = |body: f32| {
-        let mut media = MediaCache::new(PathBuf::from("tests/fixtures"));
+        let mut media = MediaCache::offline(PathBuf::from("tests/fixtures"));
         let cfg = ViewConfig {
             body_size: body,
             ..cfg()
@@ -1714,7 +1714,7 @@ fn the_y_index_stays_honest_while_a_pass_grows() {
     let source = std::fs::read_to_string("tests/fixtures/tour.md").unwrap();
     let doc = markdown::parse(source.as_str());
     let mut fonts = fonts();
-    let mut media = MediaCache::new(PathBuf::from("."));
+    let mut media = MediaCache::offline(PathBuf::from("."));
     let (mut out, mut pass) = layout_begin(&doc, &cfg(), 640.0);
     let mut steps = 0usize;
     loop {
@@ -1765,7 +1765,7 @@ fn splice_at(
 ) -> (Document, LayoutDoc, oryx::layout::LayoutPass) {
     let mut doc = markdown::parse(&source[..cut]);
     doc.source = std::sync::Arc::from(source);
-    let mut media = MediaCache::new(PathBuf::from("."));
+    let mut media = MediaCache::offline(PathBuf::from("."));
     let (mut lazy, mut pass) = layout_begin(&doc, &cfg(), width);
     layout_more(
         &doc,
@@ -1830,7 +1830,7 @@ fn a_prefix_with_placed_footnotes_refuses_extension() {
     let mut doc = markdown::parse(&source[..cut]);
     doc.source = std::sync::Arc::from(source);
     let mut store = fonts();
-    let mut media = MediaCache::new(PathBuf::from("."));
+    let mut media = MediaCache::offline(PathBuf::from("."));
     let (mut lazy, mut pass) = layout_begin(&doc, &cfg(), 800.0);
     layout_more(
         &doc,
@@ -1860,7 +1860,7 @@ fn a_mid_pass_extension_matches_a_from_scratch_layout() {
     let mut doc = markdown::parse(&source[..cut]);
     doc.source = std::sync::Arc::from(source);
     let mut store = fonts();
-    let mut media = MediaCache::new(PathBuf::from("."));
+    let mut media = MediaCache::offline(PathBuf::from("."));
     let (mut lazy, mut pass) = layout_begin(&doc, &cfg(), 800.0);
     layout_step(
         &doc,
@@ -2119,7 +2119,7 @@ fn lay_pooled(
     store: &mut FontStore,
     pool: &std::sync::Arc<ShapePool>,
 ) -> LayoutDoc {
-    let mut media = MediaCache::new(PathBuf::from("."));
+    let mut media = MediaCache::offline(PathBuf::from("."));
     let (mut out, mut pass) = layout_begin(doc, &cfg(), width);
     pass.attach_pool(std::sync::Arc::clone(pool));
     // Seed with an expired slice, then give the workers a moment, so the
@@ -2211,7 +2211,7 @@ fn a_stale_pool_generation_reseeds_and_completes() {
     let mut store = fonts();
     let serial = lay_doc(&doc, 800.0, &mut store);
     let pool = std::sync::Arc::new(ShapePool::new(2, &store.seed()));
-    let mut media = MediaCache::new(PathBuf::from("."));
+    let mut media = MediaCache::offline(PathBuf::from("."));
     let (mut out, mut pass) = layout_begin(&doc, &cfg(), 800.0);
     pass.attach_pool(std::sync::Arc::clone(&pool));
     for _ in 0..3 {
@@ -2505,7 +2505,7 @@ fn windowed_doc(
     scroll: f32,
     vh: f32,
 ) -> LayoutDoc {
-    let mut media = MediaCache::new(PathBuf::from("."));
+    let mut media = MediaCache::offline(PathBuf::from("."));
     let (mut out, mut pass) = layout_begin(doc, &cfg(), width);
     pass.retain_around(scroll, vh);
     layout_more(
@@ -2522,7 +2522,7 @@ fn windowed_doc(
 }
 
 fn slide_to(doc: &Document, fonts: &mut FontStore, lay: &mut LayoutDoc, scroll: f32, vh: f32) {
-    let mut media = MediaCache::new(PathBuf::from("."));
+    let mut media = MediaCache::offline(PathBuf::from("."));
     window_to(
         doc,
         &theme(),
@@ -2885,7 +2885,7 @@ fn a_pooled_slide_matches_the_serial_window() {
     let full = lay_doc(&doc, 800.0, &mut fonts);
     let vh = full.height / 30.0;
     let pool = std::sync::Arc::new(ShapePool::new(3, &fonts.seed()));
-    let mut media = MediaCache::new(PathBuf::from("."));
+    let mut media = MediaCache::offline(PathBuf::from("."));
     let (mut windowed, mut pass) = layout_begin(&doc, &cfg(), 800.0);
     pass.attach_pool(std::sync::Arc::clone(&pool));
     pass.retain_around(0.0, vh);
@@ -2959,7 +2959,7 @@ fn a_recolor_while_a_far_code_block_is_open_keeps_the_records_in_step() {
     source.push_str("```rust\nfn far() {\n    let c = 3;\n    let d = 4;\n}\n```\n");
     let mut doc = markdown::parse(source.as_str());
     let mut fonts = fonts();
-    let mut media = MediaCache::new(PathBuf::from("."));
+    let mut media = MediaCache::offline(PathBuf::from("."));
     let (mut lay, mut pass) = layout_begin(&doc, &cfg(), 800.0);
     pass.retain_around(0.0, 200.0);
     // Steps until the pass is inside (or back outside) a code block.
@@ -3014,7 +3014,7 @@ fn a_recolor_while_a_far_code_block_is_open_keeps_the_records_in_step() {
     lay.records_consistent().expect("in step after the colors");
 
     // The far block closes outside the view and is dropped whole.
-    let mut media = MediaCache::new(PathBuf::from("."));
+    let mut media = MediaCache::offline(PathBuf::from("."));
     layout_more(
         &doc,
         &theme(),
@@ -3043,7 +3043,7 @@ fn a_recolor_while_a_far_code_block_is_open_keeps_the_records_in_step() {
 fn zoom_rebuilds_the_table() {
     let doc = tour_doc();
     let mut fonts = fonts();
-    let mut media = MediaCache::new(PathBuf::from("."));
+    let mut media = MediaCache::offline(PathBuf::from("."));
     let z2 = ViewConfig {
         zoom: 2.0,
         ..ViewConfig::default()
@@ -3223,7 +3223,7 @@ fn inline_code_pills_ride_their_runs_around_equations() {
     // below an equation row, must carry its code pills with it: a pill
     // with no run under it is the ghost-rectangle bug.
     let t = Theme::default_dark();
-    let mut media = MediaCache::new(PathBuf::from("."));
+    let mut media = MediaCache::offline(PathBuf::from("."));
     let mut f = fonts();
     let src = "Roots take an optional degree: $\\sqrt[23]{x+1}$. `\\left` and \
 `\\right` delimiters grow with their content:";
@@ -3294,7 +3294,7 @@ equation baseline {}",
 #[test]
 fn flow_lines_stay_ordered_after_a_row_break() {
     let t = Theme::default_dark();
-    let mut media = MediaCache::new(PathBuf::from("."));
+    let mut media = MediaCache::offline(PathBuf::from("."));
     let mut f = fonts();
     let src = "Greek reads italic in lowercase, upright in capitals:\n$\\alpha \\beta \\gamma \\delta \\pi \\sigma \\omega$ beside\n$\\Gamma \\Delta \\Sigma \\Omega$. Relations space themselves:\n$a \\leq b \\neq c \\approx d \\equiv e$. Binary operators sit tighter:\n$x \\pm y \\times z \\cdot w$. The big symbols exist ahead of their limit\nmachinery: $\\sum$, $\\prod$, $\\int$, and the singletons $\\infty$,\n$\\nabla$, $\\partial$.";
     let doc = markdown::parse(src);
@@ -3327,7 +3327,7 @@ fn justified_paragraph_fills_the_line_and_leaves_the_last_natural() {
     let doc = markdown::parse(format!("{}end.\n", "justify word ".repeat(30)));
     let mut fonts = fonts();
     let plain = lay_doc(&doc, 700.0, &mut fonts);
-    let mut media = MediaCache::new(PathBuf::from("."));
+    let mut media = MediaCache::offline(PathBuf::from("."));
     let just_cfg = ViewConfig {
         justify: true,
         ..cfg()
@@ -3365,7 +3365,7 @@ fn justified_paragraph_fills_the_line_and_leaves_the_last_natural() {
 fn justified_word_runs_stay_byte_contiguous() {
     let doc = markdown::parse(format!("{}end.\n", "justify word ".repeat(30)));
     let mut fonts = fonts();
-    let mut media = MediaCache::new(PathBuf::from("."));
+    let mut media = MediaCache::offline(PathBuf::from("."));
     let just_cfg = ViewConfig {
         justify: true,
         ..cfg()
@@ -3404,7 +3404,7 @@ fn justify_leaves_headings_and_code_natural() {
     let doc = markdown::parse(src);
     let mut fonts = fonts();
     let plain = lay_doc(&doc, 500.0, &mut fonts);
-    let mut media = MediaCache::new(PathBuf::from("."));
+    let mut media = MediaCache::offline(PathBuf::from("."));
     let just_cfg = ViewConfig {
         justify: true,
         ..cfg()
@@ -3516,7 +3516,7 @@ fn typing_keeps_every_line_through_the_pooled_pass() {
     std::fs::remove_file(&path).ok();
     let mut doc = opened.document;
     let mut store = fonts();
-    let mut media = MediaCache::new(PathBuf::from("."));
+    let mut media = MediaCache::offline(PathBuf::from("."));
     let pool = std::sync::Arc::new(ShapePool::new(2, &store.seed()));
     let first = lay_pooled(&doc, 800.0, &mut store, &pool);
     let mut led = Ledger::new(std::sync::Arc::from(base), Vec::new());
@@ -3593,7 +3593,7 @@ fn typing_keeps_every_line_through_the_pooled_pass() {
 /// the scroll, complete, slide the window there.
 fn windowed(doc: &Document, width: f32, scroll: f32, viewport: f32) -> LayoutDoc {
     let mut fonts = fonts();
-    let mut media = MediaCache::new(PathBuf::from("."));
+    let mut media = MediaCache::offline(PathBuf::from("."));
     let (mut out, mut pass) = layout_begin(doc, &cfg(), width);
     pass.retain_around(scroll, viewport);
     layout_more(
@@ -3661,7 +3661,7 @@ fn fast_keystroke(
         ),
         "a placed code entry takes the splice"
     );
-    let mut media = MediaCache::new(PathBuf::from("."));
+    let mut media = MediaCache::offline(PathBuf::from("."));
     window_to(
         doc,
         &theme(),
@@ -3938,7 +3938,7 @@ fn a_held_bottom_jump_reaches_the_document_end() {
     std::fs::remove_file(&path).ok();
     let theme = Theme::default_dark();
     let mut fonts = fonts();
-    let mut media = MediaCache::new(PathBuf::from("."));
+    let mut media = MediaCache::offline(PathBuf::from("."));
     let cfg = cfg();
     let viewport = 800.0;
     let (mut lay, mut pass) = layout_begin(&doc, &cfg, 1000.0);
@@ -4093,7 +4093,7 @@ const ARABIC_PARAGRAPH: &str = "اعلم أن فن التاريخ فن عزيز 
 
 fn lay_justified(source: &str, width: f32) -> (Document, LayoutDoc) {
     let doc = markdown::parse(source);
-    let mut media = MediaCache::new(PathBuf::from("."));
+    let mut media = MediaCache::offline(PathBuf::from("."));
     let mut c = cfg();
     c.justify = true;
     let mut f = fonts();
@@ -4277,7 +4277,7 @@ fn mixed_direction_blocks_interleave() {
 
 fn lay_dir(source: &str, width: f32, direction: DirectionMode) -> (Document, LayoutDoc) {
     let doc = markdown::parse(source);
-    let mut media = MediaCache::new(PathBuf::from("."));
+    let mut media = MediaCache::offline(PathBuf::from("."));
     let c = ViewConfig { direction, ..cfg() };
     let mut f = fonts();
     let l = layout(&doc, &Theme::default_dark(), &mut f, &mut media, &c, width);
@@ -4566,7 +4566,7 @@ fn an_empty_fence_at_the_top_answers_the_page_start() {
 /// A windowed layout of `doc` under `theme`, complete, slid to `scroll`.
 fn windowed_in(doc: &Document, theme: &Theme, scroll: f32, viewport: f32) -> LayoutDoc {
     let mut fonts = fonts();
-    let mut media = MediaCache::new(PathBuf::from("."));
+    let mut media = MediaCache::offline(PathBuf::from("."));
     let (mut out, mut pass) = layout_begin(doc, &cfg(), 900.0);
     pass.retain_around(scroll, viewport);
     layout_more(
@@ -4633,7 +4633,7 @@ fn a_theme_change_refills_the_colors_and_moves_nothing() {
         );
         assert!(lay.rematerialize(), "the app's layout is windowed");
         let mut fonts = fonts();
-        let mut media = MediaCache::new(PathBuf::from("."));
+        let mut media = MediaCache::offline(PathBuf::from("."));
         window_to(
             doc,
             &light,

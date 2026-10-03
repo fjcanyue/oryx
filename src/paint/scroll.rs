@@ -300,7 +300,7 @@ mod tests {
 
     fn lay_of(doc: &Document) -> LayoutDoc {
         let mut fonts = FontStore::new();
-        let mut media = MediaCache::new(PathBuf::from("."));
+        let mut media = MediaCache::offline(PathBuf::from("."));
         layout(
             doc,
             &Theme::default_dark(),

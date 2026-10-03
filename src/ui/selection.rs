@@ -1382,7 +1382,7 @@ mod tests {
     fn lay_doc_at(source: &str, width: f32) -> (Document, LayoutDoc, FontStore) {
         let doc = markdown::parse(source);
         let mut fonts = FontStore::new();
-        let mut media = MediaCache::new(PathBuf::from("."));
+        let mut media = MediaCache::offline(PathBuf::from("."));
         let l = layout(
             &doc,
             &Theme::default_dark(),
@@ -1428,7 +1428,7 @@ mod tests {
     fn justified_selection_bridges_word_gaps() {
         let doc = markdown::parse(format!("{}end.\n", "justify word ".repeat(30)));
         let mut fonts = FontStore::new();
-        let mut media = MediaCache::new(PathBuf::from("."));
+        let mut media = MediaCache::offline(PathBuf::from("."));
         let l = layout(
             &doc,
             &Theme::default_dark(),
@@ -1953,7 +1953,7 @@ mod tests {
     fn tabs_at_a_wrap_box_the_end_of_the_first_visual_line() {
         let doc = markdown::parse("```\nword word word\t\tmore words after the tabs\n```\n");
         let mut fonts = FontStore::new();
-        let mut media = MediaCache::new(PathBuf::from("."));
+        let mut media = MediaCache::offline(PathBuf::from("."));
         // Narrow the layout until the line wraps at the two tabs: the
         // first visual line ends before them, the second starts after.
         let mut found = None;
@@ -2136,7 +2136,7 @@ mod tests {
         // carries no stretched space, so the tail's anchor is exact.
         let doc = markdown::parse(format!("{RTL_LINE} {RTL_LINE} {RTL_LINE} {RTL_LINE}"));
         let mut fonts = FontStore::new();
-        let mut media = MediaCache::new(PathBuf::from("."));
+        let mut media = MediaCache::offline(PathBuf::from("."));
         let l = layout(
             &doc,
             &Theme::default_dark(),
@@ -2183,7 +2183,7 @@ mod tests {
     fn lay_code(text: &str) -> (Document, LayoutDoc, FontStore) {
         let doc = crate::doc::load::code_document(None, text);
         let mut fonts = FontStore::new();
-        let mut media = MediaCache::new(PathBuf::from("."));
+        let mut media = MediaCache::offline(PathBuf::from("."));
         let l = layout(
             &doc,
             &Theme::default_dark(),
@@ -2408,7 +2408,7 @@ mod tests {
         let source = format!("{}الغاية.\n", "اعلم أن فن التاريخ فن عزيز ".repeat(8));
         let doc = markdown::parse(source);
         let mut fonts = FontStore::new();
-        let mut media = MediaCache::new(PathBuf::from("."));
+        let mut media = MediaCache::offline(PathBuf::from("."));
         let l = layout(
             &doc,
             &Theme::default_dark(),

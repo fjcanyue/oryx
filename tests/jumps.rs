@@ -14,7 +14,7 @@ fn footnotes_doc() -> (Document, LayoutDoc) {
     let path = PathBuf::from("tests/showcase/footnotes.md");
     let opened = load::open(&path, None).unwrap();
     let doc = opened.document;
-    let mut media = MediaCache::new(PathBuf::from("tests/showcase"));
+    let mut media = MediaCache::offline(PathBuf::from("tests/showcase"));
     let mut fonts = FontStore::new();
     let lay = layout(
         &doc,

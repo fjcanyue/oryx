@@ -6644,7 +6644,7 @@ mod tests {
 
     fn lay_of(doc: &Document) -> LayoutDoc {
         let mut fonts = FontStore::new();
-        let mut media = MediaCache::new(PathBuf::from("."));
+        let mut media = MediaCache::offline(PathBuf::from("."));
         layout(
             doc,
             &Theme::default_dark(),
@@ -6753,7 +6753,7 @@ mod tests {
         let doc =
             markdown::parse("Some ==highlighted with equal signs== here and more words to fill.\n");
         let mut fonts = FontStore::new();
-        let mut media = MediaCache::new(PathBuf::from("."));
+        let mut media = MediaCache::offline(PathBuf::from("."));
         let theme = Theme::default_dark();
         for justify in [false, true] {
             let cfg = ViewConfig {
@@ -6943,7 +6943,7 @@ mod tests {
         use crate::style::fonts::MATH_FAMILY;
         let doc = markdown::parse("# Title\n\nSome **bold** text.\n");
         let mut fonts = FontStore::new();
-        let mut media = MediaCache::new(PathBuf::from("."));
+        let mut media = MediaCache::offline(PathBuf::from("."));
         let cfg = ViewConfig {
             body_family: MATH_FAMILY.to_string(),
             ..ViewConfig::default()
@@ -7000,7 +7000,7 @@ mod tests {
             "short dashes"
         );
         let mut fonts = FontStore::new();
-        let mut media = MediaCache::new(PathBuf::from("."));
+        let mut media = MediaCache::offline(PathBuf::from("."));
         let cfg = ViewConfig {
             print: true,
             ..ViewConfig::default()

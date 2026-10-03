@@ -115,7 +115,7 @@ fn interactive_paths_measured() {
     for (name, bytes) in &TIERS[2..] {
         let (_, _, doc) = measure_open(&large_gen::generate(*bytes), "md");
         let mut fonts = FontStore::new();
-        let mut media = MediaCache::new(PathBuf::from("."));
+        let mut media = MediaCache::offline(PathBuf::from("."));
         let theme = Theme::default_dark();
         let cfg = ViewConfig::default();
         let (mut lay, mut pass) = layout_begin(&doc, &cfg, WIDTH);
@@ -223,7 +223,7 @@ fn fold_backlog_measured() {
             }
         }
         let mut fonts = FontStore::new();
-        let mut media = MediaCache::new(PathBuf::from("."));
+        let mut media = MediaCache::offline(PathBuf::from("."));
         let theme = Theme::default_dark();
         let cfg = ViewConfig::default();
         let mut lay = layout(&doc, &theme, &mut fonts, &mut media, &cfg, WIDTH);
@@ -269,7 +269,7 @@ fn fold_trickle_measured() {
             }
         }
         let mut fonts = FontStore::new();
-        let mut media = MediaCache::new(PathBuf::from("."));
+        let mut media = MediaCache::offline(PathBuf::from("."));
         let theme = Theme::default_dark();
         let cfg = ViewConfig::default();
         let patches: Vec<(usize, std::ops::Range<usize>)> = doc
@@ -317,7 +317,7 @@ fn window_reentry_measured() {
             };
             let (_, _, mut doc) = measure_open(&source, ext);
             let mut fonts = FontStore::new();
-            let mut media = MediaCache::new(PathBuf::from("."));
+            let mut media = MediaCache::offline(PathBuf::from("."));
             let theme = Theme::default_dark();
             let cfg = ViewConfig::default();
             let (mut lay, mut pass) = layout_begin(&doc, &cfg, WIDTH);
@@ -630,7 +630,7 @@ fn keystroke_measured() {
                 measure_highlight(&mut doc);
             }
             let mut fonts = FontStore::new();
-            let mut media = MediaCache::new(PathBuf::from("."));
+            let mut media = MediaCache::offline(PathBuf::from("."));
             let (mut lay, mut pass) = layout_begin(&doc, &cfg, WIDTH);
             pass.attach_pool(std::sync::Arc::clone(&pool));
             pass.retain_around(0.0, VIEWPORT_H);
@@ -945,7 +945,7 @@ fn gutter_measured() {
     let (_, _, doc) = measure_open(&large_gen::generate_code(1024 * 1024), "rs");
     let (_, lay) = measure_layout(&doc, None);
     let mut fonts = FontStore::new();
-    let mut media = MediaCache::new(PathBuf::from("."));
+    let mut media = MediaCache::offline(PathBuf::from("."));
     let theme = Theme::default_dark();
     let height = 5 * VIEWPORT_H as u32;
     let mut paint = |numbers: Option<oryx::style::theme::Rgba>| {

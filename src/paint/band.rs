@@ -399,7 +399,7 @@ mod tests {
     fn corner_pixel(doc: &Document) -> u32 {
         let theme = Theme::default_dark();
         let mut fonts = FontStore::new();
-        let mut media = MediaCache::new(PathBuf::from("."));
+        let mut media = MediaCache::offline(PathBuf::from("."));
         let lay = layout(
             doc,
             &theme,
@@ -416,7 +416,7 @@ mod tests {
         use crate::paint::scroll::{frame_offset, BandCache};
         let theme = Theme::default_dark();
         let mut fonts = FontStore::new();
-        let mut media = MediaCache::new(PathBuf::from("."));
+        let mut media = MediaCache::offline(PathBuf::from("."));
         let text: String = (0..40).map(|i| format!("let value_{i} = {i};\n")).collect();
         let doc = load::code_document(Some("rust"), &text);
         let lay = layout(

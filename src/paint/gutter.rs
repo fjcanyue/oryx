@@ -305,7 +305,7 @@ mod tests {
     }
 
     fn lay(doc: &Document, cfg: &ViewConfig, fonts: &mut FontStore) -> LayoutDoc {
-        let mut media = MediaCache::new(PathBuf::from("."));
+        let mut media = MediaCache::offline(PathBuf::from("."));
         layout(
             doc,
             &Theme::default_dark(),
@@ -318,7 +318,7 @@ mod tests {
 
     fn painted(doc: &Document, lay: &LayoutDoc, fonts: &mut FontStore, numbers: bool) -> Vec<u32> {
         let theme = Theme::default_dark();
-        let mut media = MediaCache::new(PathBuf::from("."));
+        let mut media = MediaCache::offline(PathBuf::from("."));
         band_numbered(
             lay,
             doc,

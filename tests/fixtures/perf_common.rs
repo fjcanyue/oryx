@@ -87,7 +87,7 @@ pub fn measure_layout(
     pool: Option<&std::sync::Arc<ShapePool>>,
 ) -> (Laid, LayoutDoc) {
     let mut fonts = FontStore::new();
-    let mut media = MediaCache::new(PathBuf::from("."));
+    let mut media = MediaCache::offline(PathBuf::from("."));
     let theme = Theme::default_dark();
     let cfg = ViewConfig::default();
     let started = Instant::now();
@@ -144,7 +144,7 @@ pub fn measure_export(
     pool: Option<&std::sync::Arc<ShapePool>>,
 ) -> (u128, usize, usize) {
     let mut fonts = FontStore::new();
-    let mut media = MediaCache::new(PathBuf::from("."));
+    let mut media = MediaCache::offline(PathBuf::from("."));
     let settings = ExportSettings {
         body_size: 11.0,
         code_size: 9.0,

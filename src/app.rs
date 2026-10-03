@@ -8753,7 +8753,7 @@ mod tests {
         let doc = oryx::doc::markdown::parse(source.as_str());
         let cfg = ViewConfig::default();
         let mut fonts = oryx::style::fonts::FontStore::new();
-        let mut media = MediaCache::new(std::path::PathBuf::from("."));
+        let mut media = MediaCache::offline(std::path::PathBuf::from("."));
         let (mut lay, mut pass) = layout_begin(&doc, &cfg, 900.0);
         pass.retain_around(0.0, 600.0);
         if complete {
