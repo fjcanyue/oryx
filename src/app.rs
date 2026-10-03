@@ -760,18 +760,32 @@ fn row_height(doc: &Document, cfg: &ViewConfig) -> f32 {
     metrics::LINE_HEIGHT * size
 }
 
+/// Whether two view settings measure a page the same: the fonts, their
+/// sizes and the zoom. The settings dialog can change the fonts while a
+/// page is set aside. The other fields are the file's own (the
+/// direction, the comic's fit) or the editor's (the room for line
+/// numbers), and do not move while the page is away.
+fn same_type(a: &ViewConfig, b: &ViewConfig) -> bool {
+    a.body_family == b.body_family
+        && a.code_family == b.code_family
+        && a.body_size == b.body_size
+        && a.code_size == b.code_size
+        && a.zoom == b.zoom
+}
+
 /// A page set aside, behind the editor or the help page, keeps its
-/// layout on return while the zoom is the same. Under another theme the
-/// rows around the view are refilled in the new colors, a theme being
-/// colors only, provided the page was measured to its end; a page still
-/// being measured, or at another zoom, is laid out again.
+/// layout on return while its type is the same (`same_type`). Under
+/// another theme the rows around the view are refilled in the new
+/// colors, a theme being colors only, provided the page was measured to
+/// its end; a page still being measured, or in another type, is laid
+/// out again.
 fn kept_layout(
     layout: Option<LayoutDoc>,
     pass: Option<LayoutPass>,
-    same_zoom: bool,
+    same_type: bool,
     same_theme: bool,
 ) -> (Option<LayoutDoc>, Option<LayoutPass>) {
-    if !same_zoom {
+    if !same_type {
         return (None, None);
     }
     if same_theme {
@@ -798,10 +812,10 @@ struct Parked {
     /// The undo head at the crossing; an equal head on the way out
     /// means equal bytes, so the parked page is still the truth.
     head: usize,
-    /// The look the parked layout was built under: a zoom change while
-    /// editing drops the layout and keeps the model, a theme change
-    /// refills its colors (`kept_layout`).
-    zoom: f32,
+    /// The look the parked layout was built under: a change of font,
+    /// of size or of zoom while editing drops the layout and keeps the
+    /// model, a theme change refills its colors (`kept_layout`).
+    cfg: ViewConfig,
     theme: Theme,
 }
 
@@ -830,7 +844,7 @@ struct Stash {
     selection: Option<Selection>,
     /// The look the stashed layout was built under, weighed on return
     /// as the parked page's is (`kept_layout`).
-    zoom: f32,
+    cfg: ViewConfig,
     theme: Theme,
     /// A parse was still streaming at the swap, so the model is
     /// partial; the return reopens from disk instead of restoring it.
@@ -1865,7 +1879,7 @@ impl App {
                 scroll_y: self.scroll_y,
                 layout_width: self.layout_width,
                 head,
-                zoom: self.cfg.zoom,
+                cfg: self.cfg.clone(),
                 theme: self.theme.clone(),
             };
             self.edit_park = Some(Box::new(parked));
@@ -2028,7 +2042,7 @@ impl App {
                 let (layout, pass) = kept_layout(
                     parked.layout,
                     parked.pass,
-                    self.cfg.zoom == parked.zoom,
+                    same_type(&self.cfg, &parked.cfg),
                     self.theme == parked.theme,
                 );
                 self.swapped_document(layout, pass);
@@ -6676,7 +6690,7 @@ impl App {
             book_toc: std::mem::take(&mut self.book_toc),
             disk_seen: self.disk_seen.take(),
             selection: self.selection.take(),
-            zoom: self.cfg.zoom,
+            cfg: self.cfg.clone(),
             theme: self.theme.clone(),
             reopen,
         }));
@@ -6733,7 +6747,7 @@ impl App {
         (self.layout, self.pass) = kept_layout(
             stash.layout,
             stash.pass,
-            self.cfg.zoom == stash.zoom,
+            same_type(&self.cfg, &stash.cfg),
             self.theme == stash.theme,
         );
         // The outline belongs to the rendered page. A return into a
@@ -9034,6 +9048,32 @@ mod tests {
                 "{kept}"
             );
         }
+    }
+
+    #[test]
+    fn a_page_set_aside_is_measured_again_when_its_type_changes() {
+        use super::same_type;
+        use oryx::layout::ViewConfig;
+        let kept = ViewConfig::default();
+        assert!(same_type(&kept, &kept.clone()));
+        type Change = fn(&mut ViewConfig);
+        let changes: [(&str, Change); 5] = [
+            ("the body font", |cfg| cfg.body_family = "Other".into()),
+            ("the code font", |cfg| cfg.code_family = "Other".into()),
+            ("the body size", |cfg| cfg.body_size += 1.0),
+            ("the code size", |cfg| cfg.code_size += 1.0),
+            ("the zoom", |cfg| cfg.zoom *= 1.1),
+        ];
+        for (what, change) in changes {
+            let mut now = kept.clone();
+            change(&mut now);
+            assert!(!same_type(&kept, &now), "{what}");
+        }
+        // The editor's room for line numbers is not the page's: a page
+        // parked behind the editor comes back as it was.
+        let mut now = kept.clone();
+        now.gutter = 40.0;
+        assert!(same_type(&kept, &now));
     }
 
     #[test]
