@@ -662,8 +662,11 @@ impl Place {
     /// stood at, kept inside the view when the window shrank since.
     /// While editing the caret's row comes back whole; while reading, a
     /// line the top edge cut keeps its cut, so the view is the one left.
-    /// A caret the reader had scrolled away from (`away`) comes back at
-    /// its true distance from the view, outside it again.
+    /// In the editor, a caret the reader had scrolled away from (`away`)
+    /// comes back at its true distance from the view, outside it again.
+    /// On the page that distance measures nothing, since it counts rows
+    /// of the editor: the line of such a caret shows inside the view, at
+    /// the edge the caret was beyond.
     fn returned(
         offset: usize,
         below: f32,
@@ -672,14 +675,14 @@ impl Place {
         row_h: f32,
         editing: bool,
     ) -> Place {
-        if away {
+        if away && editing {
             return Place {
                 offset,
                 below,
                 line: false,
             };
         }
-        let floor = if editing { 0.0 } else { f32::MIN };
+        let floor = if editing || away { 0.0 } else { f32::MIN };
         Place {
             offset,
             below: below.min((view_h - row_h).max(0.0)).max(floor),
@@ -736,6 +739,16 @@ fn filed_height(row_y: f32, row_h: f32, scroll_y: f32, view_h: f32) -> (f32, boo
     let below = row_y - scroll_y;
     let held = caret::held(row_y, row_h, scroll_y, view_h);
     (below, below != held)
+}
+
+/// What the history files for a caret whose landing still waits for
+/// the layout: the height the landing will stand its row at, and whether
+/// that height is outside the view or cut by one of its edges, the case
+/// of a step back to a caret the reader had scrolled away from.
+fn waiting_height(place: Place, row_h: f32, view_h: f32) -> (f32, bool) {
+    // The height is counted from the top of the view the landing will
+    // show, so that view starts at zero.
+    filed_height(place.below, row_h, 0.0, view_h)
 }
 
 /// The offset the editor remembers after a step of the history made
@@ -5845,7 +5858,10 @@ impl App {
         let caret = self.caret.filter(|_| editing).map(|caret| caret.offset);
         let waiting = waiting_place(self.pending_row, self.pending_offset, caret);
         let (offset, below, editing, away) = match (caret, waiting) {
-            (Some(caret), Some(place)) => (caret, place.below, true, false),
+            (Some(caret), Some(place)) => {
+                let (below, away) = waiting_height(place, self.row_h(), self.viewport_h());
+                (caret, below, true, away)
+            }
             (None, Some(place)) => (place.offset, place.below, place.line, false),
             (Some(caret), None) => {
                 let (below, away) = self.editor_row_y(caret).map_or((0.0, false), |y| {
@@ -8936,6 +8952,32 @@ mod tests {
     }
 
     #[test]
+    fn a_landing_that_waits_on_a_caret_out_of_view_is_filed_as_scrolled_away() {
+        use super::{waiting_height, Place};
+        let (view_h, row_h) = (600.0, 20.0);
+        let at = |below| Place {
+            offset: 900,
+            below,
+            line: false,
+        };
+        assert_eq!(
+            waiting_height(at(290.0), row_h, view_h),
+            (290.0, false),
+            "a jump to a line, in the middle of the view"
+        );
+        assert_eq!(
+            waiting_height(at(1600.0), row_h, view_h),
+            (1600.0, true),
+            "a step back to a caret that was below the view"
+        );
+        assert_eq!(
+            waiting_height(at(-1120.0), row_h, view_h),
+            (-1120.0, true),
+            "a step back to a caret that was above the view"
+        );
+    }
+
+    #[test]
     fn a_new_layout_keeps_the_scroll_only_when_no_landing_waits() {
         use super::keeps_scroll;
         assert!(keeps_scroll(2400.0, false), "a zoom change keeps the view");
@@ -9014,18 +9056,37 @@ mod tests {
     fn a_step_back_to_a_caret_out_of_view_brings_the_view_back() {
         use super::Place;
         let (view_h, row_h) = (600.0, 20.0);
-        for editing in [true, false] {
-            assert_eq!(
-                Place::returned(5, -1120.0, true, view_h, row_h, editing).below,
-                -1120.0,
-                "the caret stays above the view"
-            );
-            assert_eq!(
-                Place::returned(5, 1600.0, true, view_h, row_h, editing).below,
-                1600.0,
-                "the caret stays below the view"
-            );
-        }
+        assert_eq!(
+            Place::returned(5, -1120.0, true, view_h, row_h, true).below,
+            -1120.0,
+            "the caret stays above the view"
+        );
+        assert_eq!(
+            Place::returned(5, 1600.0, true, view_h, row_h, true).below,
+            1600.0,
+            "the caret stays below the view"
+        );
+    }
+
+    #[test]
+    fn a_step_back_on_the_page_shows_the_line_of_a_caret_that_was_out_of_view() {
+        use super::Place;
+        let (view_h, row_h) = (600.0, 20.0);
+        assert_eq!(
+            Place::returned(5, -1120.0, true, view_h, row_h, false).below,
+            0.0,
+            "a caret that was above the view: its line at the top edge"
+        );
+        assert_eq!(
+            Place::returned(5, 1600.0, true, view_h, row_h, false).below,
+            580.0,
+            "a caret that was below the view: its line at the bottom edge"
+        );
+        assert_eq!(
+            Place::returned(5, -8.0, true, view_h, row_h, false).below,
+            0.0,
+            "a caret row that the top edge cut shows whole"
+        );
     }
 
     #[test]
