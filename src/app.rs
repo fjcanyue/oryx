@@ -738,6 +738,15 @@ fn filed_height(row_y: f32, row_h: f32, scroll_y: f32, view_h: f32) -> (f32, boo
     (below, below != held)
 }
 
+/// The offset the editor remembers after a step of the history made
+/// while reading, so that it opens with its caret there while the line
+/// is still in view, as after a jump to a line. Only a place that names
+/// a line has one: a place taken in the editor is the caret itself. A
+/// place taken while reading is the top of a view.
+fn step_mark(place: &history::Entry) -> Option<usize> {
+    place.editing.then_some(place.offset)
+}
+
 /// The height of the row a jump or a step of the history lands: a file
 /// of lines, the editor's source view among them, draws its rows in
 /// the lines' face (`layout::line_face`), the code size unless the file
@@ -5901,6 +5910,9 @@ impl App {
             if folded {
                 self.restart_layout();
             }
+            if let Some((path, mark)) = self.path.clone().zip(step_mark(place)) {
+                self.edit_marks.insert(path, mark);
+            }
             self.pending_offset = Some(
                 Place::returned(offset, below, place.away, view_h, row_h, false)
                     .by_line(place.editing),
@@ -8972,6 +8984,27 @@ mod tests {
                 "the caret stays below the view"
             );
         }
+    }
+
+    #[test]
+    fn a_step_to_a_place_of_the_editor_is_where_the_editor_opens() {
+        let place = |editing| super::history::Entry {
+            file: Some(std::path::PathBuf::from("/notes/a.md")),
+            offset: 742,
+            below: 290.0,
+            editing,
+            away: false,
+        };
+        assert_eq!(
+            super::step_mark(&place(true)),
+            Some(742),
+            "the caret of the place, at its character"
+        );
+        assert_eq!(
+            super::step_mark(&place(false)),
+            None,
+            "a place taken while reading is a view, with no caret"
+        );
     }
 
     #[test]
