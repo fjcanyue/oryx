@@ -502,6 +502,17 @@ impl Sidebar {
         side
     }
 
+    /// A sidebar on another folder with the look of this one: the width
+    /// the reader gave it, the tab and the dot files toggle. The tree,
+    /// the selection and the scroll start again on the new folder.
+    pub fn moved_to(&self, root: &Path) -> Sidebar {
+        let mut side = Sidebar::new(root);
+        side.width = self.width;
+        side.tab = self.tab;
+        side.set_show_hidden(self.show_hidden);
+        side
+    }
+
     /// The scan's filter as the panel stands: the toggle, and the file
     /// shown in the document, which keeps its row whatever the toggle.
     fn filter(&self) -> Filter<'_> {
@@ -1611,6 +1622,22 @@ mod tests {
         assert_eq!(side.width(), 400.0);
         side.set_width(20.0, 1600.0);
         assert_eq!(side.width(), MIN_WIDTH);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_sidebar_moved_to_another_folder_keeps_its_look() {
+        let dir = temp_tree("moved");
+        let mut side = Sidebar::new(&dir);
+        side.set_width(400.0, 1600.0);
+        side.set_tab(Tab::Outline);
+        side.set_show_hidden(true);
+        let moved = side.moved_to(&dir.join("sub"));
+        assert_eq!(moved.root(), dir.join("sub").as_path());
+        assert_eq!(moved.width(), 400.0, "the width the reader gave it");
+        assert_eq!(moved.tab(), Tab::Outline);
+        assert!(moved.show_hidden());
+        assert_eq!(names(&moved), ["..", "subsub", "inner.md"]);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

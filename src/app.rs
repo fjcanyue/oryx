@@ -6193,10 +6193,7 @@ impl App {
         match self.sidebar.as_mut() {
             Some(side) if side.shows(&dir) => {}
             Some(side) => {
-                let tab = side.tab();
-                *side = Sidebar::new(&dir);
-                side.set_show_hidden(self.config.show_hidden);
-                side.set_tab(tab);
+                *side = side.moved_to(&dir);
                 if let Some(path) = &self.path {
                     side.set_current(path);
                 }
@@ -6356,10 +6353,7 @@ impl App {
             .map(Place::top);
         if let Some(side) = self.sidebar.as_mut() {
             if reroot && !side.shows(&dir) {
-                let tab = side.tab();
-                *side = Sidebar::new(&dir);
-                side.set_show_hidden(self.config.show_hidden);
-                side.set_tab(tab);
+                *side = side.moved_to(&dir);
             }
             side.set_current(&path);
         }

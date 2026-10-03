@@ -22,6 +22,7 @@
 - In the editor, the current line number is now shown in a small box, so it is easier to see.
 - On Windows, the sidebar can now reach your other drives: `..` at the top of a drive shows the list of drives. Before, the sidebar could not leave the drive it started on.
 - On Windows, the open and save dialogs now start in the folder of your file when it is on a network drive. Before, they started in Documents.
+- The sidebar now keeps its width when you open a file from another folder. Before, it went back to its default width.
 - Changing the theme now keeps the page where you were reading. Before, the view could move.
 - In the editor, a jump to a far line of a very large file is faster.
 
