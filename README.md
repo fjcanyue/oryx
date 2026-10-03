@@ -376,7 +376,7 @@ The sample book in [examples](examples/) is the [Standard Ebooks](https://standa
 - Solarized dark and light by Ethan Schoonover ([ethanschoonover.com/solarized](https://ethanschoonover.com/solarized))
 - One Dark ([atom](https://github.com/atom/atom))
 - Everforest dark and light ([sainnhe/everforest](https://github.com/sainnhe/everforest))
-- Rosé Pine and Rosé Pine Dawn ([rosepinetheme.com](https://rosepinetheme.com))
+- Rosé Pine and Rosé Pine Dawn ([rosepinetheme.com](https://rosepinetheme.com)). `oryx-hero` also uses the accent colors of Rosé Pine.
 - Kanagawa ([rebelot/kanagawa.nvim](https://github.com/rebelot/kanagawa.nvim))
 - Ayu Mirage and Light ([ayu-theme](https://github.com/ayu-theme/ayu-colors))
 - Night Owl by Sarah Drasner ([sdras/night-owl-vscode-theme](https://github.com/sdras/night-owl-vscode-theme))
