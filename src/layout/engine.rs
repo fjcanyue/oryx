@@ -888,6 +888,28 @@ impl LayoutDoc {
         Some(entry.y)
     }
 
+    /// The model block standing at height `y`, from the block table:
+    /// the block of the last placed position whose top is at or above
+    /// `y`, the inverse of `approx_top(block, 0)`. The positions are in
+    /// the order of the page, not of the source: a footnote definition
+    /// stands at the end of the page wherever the source declares it,
+    /// and a block folded inside a closed details group has no
+    /// position. None above the first block, and before the pass
+    /// places one.
+    pub fn block_at(&self, y: f32) -> Option<usize> {
+        let top = |position: usize| {
+            let entry = &self.table.entries[position];
+            if entry.flags & ENTRY_CODE != 0 {
+                self.table.code_line_top(position, 0)
+            } else {
+                entry.y
+            }
+        };
+        let after = partition(self.table.entries.len(), |position| top(position) <= y);
+        let position = after.checked_sub(1)?;
+        Some(self.table.entries[position].block as usize)
+    }
+
     /// The line of code block `block` standing at height `y`, from the
     /// block table: the last of its `lines` whose top is at or above
     /// `y`, the inverse of `approx_top`. None before the pass places

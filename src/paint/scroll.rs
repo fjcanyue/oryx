@@ -18,14 +18,13 @@ pub fn clamp(y: f32, doc_height: f32, viewport_h: f32) -> f32 {
 /// of the block there, and inside a code block whose lines are the
 /// source's own, the start of the line there. A code or text file is
 /// one such block, so its place is a line, not the top of the file.
+/// The block is looked up on the page, not in the order of the source:
+/// a footnote definition stands at the end of the page, and the blocks
+/// of a closed details group are not on it.
 pub fn top_offset(lay: &LayoutDoc, doc: &Document, scroll_y: f32) -> usize {
-    let mut at = None;
-    for index in 0..doc.blocks.len() {
-        match lay.approx_top(index, 0) {
-            Some(top) if top <= scroll_y + 1.0 => at = Some(index),
-            _ => break,
-        }
-    }
+    let at = lay
+        .block_at(scroll_y + 1.0)
+        .filter(|&index| index < doc.blocks.len());
     let Some(index) = at else {
         return 0;
     };
@@ -529,6 +528,71 @@ mod tests {
             None,
             "the view stays at the top"
         );
+    }
+
+    /// The top of the view at paragraph 60 of a page whose first
+    /// paragraph is followed by `between`: the place found there, and
+    /// brought back at another text size.
+    fn top_of_view_under(between: &str) {
+        let source = format!(
+            "Paragraph 0 cites a note[^1].\n\n{between}{}",
+            paragraphs(80)
+        );
+        let doc = crate::doc::markdown::parse(source.as_str());
+        let start = source.find("Paragraph 60:").unwrap();
+        let lay = lay_at(&doc, 1.0, 700.0);
+        let top = offset_top(&lay, &doc, start).expect("the paragraph is placed");
+        assert_eq!(
+            top_offset(&lay, &doc, top + 3.0),
+            start,
+            "the paragraph at the top of the view"
+        );
+        let place = TopPlace::of(&lay, &doc, top + 3.0).expect("a block stands at the top");
+        assert_eq!(place.offset, start);
+        let after = lay_at(&doc, 1.6, 700.0);
+        let kept = place.scroll(&after, &doc).expect("the paragraph is placed");
+        assert_eq!(
+            top_offset(&after, &doc, kept),
+            start,
+            "the same paragraph at another text size"
+        );
+    }
+
+    #[test]
+    fn the_top_of_the_view_is_found_under_a_footnote_definition() {
+        // The definition is written under its paragraph, and the page
+        // places it at its end, after the last paragraph.
+        top_of_view_under("[^1]: The note.\n\n");
+    }
+
+    #[test]
+    fn the_top_of_the_view_is_found_under_a_closed_details_section() {
+        // The blocks of a closed section have no place on the page.
+        top_of_view_under("<details>\n<summary>More</summary>\n\nHidden text.\n\n</details>\n\n");
+    }
+
+    #[test]
+    fn a_view_on_the_notes_at_the_end_of_the_page_names_the_definition() {
+        let source = format!(
+            "Paragraph 0 cites a note[^1].\n\n[^1]: The note.\n\n{}",
+            paragraphs(80)
+        );
+        let doc = crate::doc::markdown::parse(source.as_str());
+        let note = doc
+            .blocks
+            .iter()
+            .find(|block| matches!(block.kind, BlockKind::FootnoteDef { .. }))
+            .expect("the definition is a block")
+            .range
+            .start;
+        let last = source.find("Paragraph 80:").unwrap();
+        let lay = lay_at(&doc, 1.0, 700.0);
+        let top = offset_top(&lay, &doc, note).expect("the note is placed");
+        assert!(
+            top > offset_top(&lay, &doc, last).unwrap(),
+            "the note stands under the last paragraph"
+        );
+        assert_eq!(top_offset(&lay, &doc, top), note);
     }
 
     #[test]
