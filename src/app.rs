@@ -792,6 +792,16 @@ fn caret_line_edge(row_y: f32, row_h: f32, scroll_y: f32, view_h: f32) -> f32 {
     }
 }
 
+/// Whether the next frame still owes the view to the caret after a
+/// caret key showed it. `settled` says that the row of the caret
+/// answered, or that its line is seated with nothing left to wait for.
+/// What an edit owed stays owed: until the frame lays the rows out
+/// again, the box of the caret is the first row of its line, so a key
+/// read before that frame cannot bring the caret's own row into view.
+fn snap_still_owed(owed: bool, settled: bool) -> bool {
+    owed || !settled
+}
+
 /// The caret the editor takes when it opens while a landing waits: the
 /// remembered offset when it lies on the line the landing shows, which
 /// is a jump with its column, else the offset of the landing.
@@ -2219,26 +2229,30 @@ impl App {
     /// holds answers exactly. A caret on a line the layout does not
     /// hold has no row to read, the case of Ctrl+End in a long file:
     /// its line is seated like a jump, and the frame that lays its rows
-    /// out finishes on the caret's own row (`caret_snap`).
+    /// out finishes on the caret's own row (`caret_snap`). A snap that
+    /// an edit still owes the frame stays owed (`snap_still_owed`).
     fn show_caret(&mut self) {
         let view_h = self.viewport_h();
         // The caret moved on, so a seat still owed to the place it left
         // would move the view after this one.
-        if std::mem::take(&mut self.caret_snap) {
+        let owed = self.caret_snap;
+        if owed {
             self.pending_row = None;
         }
         let (Some(caret), Some(lay)) = (self.caret, self.layout.as_ref()) else {
             return;
         };
-        match caret.geometry(lay, &self.document, &mut self.fonts) {
+        let settled = match caret.geometry(lay, &self.document, &mut self.fonts) {
             Some(b) => {
                 let target = caret::snap(self.scroll_y, view_h, b);
                 if target != self.scroll_y {
                     self.scroll_to(target);
                 }
+                true
             }
-            None => self.caret_snap = !self.seat_caret_line(view_h),
-        }
+            None => self.seat_caret_line(view_h),
+        };
+        self.caret_snap = snap_still_owed(owed, settled);
     }
 
     /// Seats the line of a caret whose row the layout does not hold. The
@@ -9305,6 +9319,25 @@ mod tests {
         assert!(
             !caret_line_in_view(4990.0, row_h, scroll_y, view_h),
             "a row that the top edge cuts is not in view"
+        );
+    }
+
+    #[test]
+    fn a_caret_key_keeps_the_snap_that_an_edit_owes() {
+        use super::snap_still_owed;
+        // Until the frame after an edit lays the rows out again, the
+        // box of the caret is the first row of its line.
+        assert!(
+            snap_still_owed(true, true),
+            "a letter typed, then a caret key before the frame: the frame still snaps"
+        );
+        assert!(
+            snap_still_owed(false, false),
+            "a far caret whose line waits owes its row"
+        );
+        assert!(
+            !snap_still_owed(false, true),
+            "a caret key alone on a row the layout holds owes nothing"
         );
     }
 
