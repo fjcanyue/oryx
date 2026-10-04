@@ -381,6 +381,7 @@ pub fn run(
         cr: opened_cr,
         bom: opened_bom,
         caret_snap: false,
+        caret_seat: None,
         blink_visible: true,
         blink_flip: Instant::now(),
         drawn_once: false,
@@ -800,6 +801,55 @@ fn caret_line_edge(row_y: f32, row_h: f32, scroll_y: f32, view_h: f32) -> f32 {
 /// read before that frame cannot bring the caret's own row into view.
 fn snap_still_owed(owed: bool, settled: bool) -> bool {
     owed || !settled
+}
+
+/// The view as the seat of a far caret's line left it. While the view
+/// stays there, the caret's own row is still owed. A view that moved
+/// since, by the wheel or the scrollbar, owes the caret nothing.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct CaretSeat {
+    /// The offset of the caret when its line was seated.
+    offset: usize,
+    /// The scroll that the seat left.
+    scroll: f32,
+}
+
+/// What a frame does for a caret that is still owed its view.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum CaretDue {
+    /// The layout holds the row of the caret: the view snaps to it.
+    Snap,
+    /// No row to read and no seat made yet: the line is seated with the
+    /// block table.
+    Seat,
+    /// The line is seated and the layout pass still runs: the row
+    /// waits, and the view stays where it is.
+    Wait,
+    /// Nothing more is owed.
+    Drop,
+}
+
+/// What the frame owes a caret at `offset`. `has_box` says that the
+/// layout holds its row, `seat` is the seat made for its line, and
+/// `pending` says that the layout pass still runs. A line is seated
+/// once: while the pass of a file of lines runs, the layout cannot
+/// take the rows of a far line, and a seat made again at each frame
+/// would hold the view against the wheel.
+fn caret_due(
+    has_box: bool,
+    seat: Option<CaretSeat>,
+    offset: usize,
+    scroll_y: f32,
+    pending: bool,
+) -> CaretDue {
+    match seat.filter(|seat| seat.offset == offset) {
+        Some(seat) if seat.scroll != scroll_y => CaretDue::Drop,
+        Some(_) if has_box => CaretDue::Snap,
+        Some(_) if pending => CaretDue::Wait,
+        Some(_) => CaretDue::Drop,
+        None if has_box => CaretDue::Snap,
+        None => CaretDue::Seat,
+    }
 }
 
 /// The caret the editor takes when it opens while a landing waits: the
@@ -1549,6 +1599,9 @@ struct App {
     /// layout, or the caret moved to a line the layout does not hold;
     /// the next placed frame snaps the view to the caret.
     caret_snap: bool,
+    /// The seat made for the line of a caret that the layout did not
+    /// hold, while its row is still owed (`caret_snap`).
+    caret_seat: Option<CaretSeat>,
     /// The blink's current half and when it flips, driven by the timer;
     /// every caret action restarts the visible half.
     blink_visible: bool,
@@ -2239,6 +2292,7 @@ impl App {
         if owed {
             self.pending_row = None;
         }
+        self.caret_seat = None;
         let (Some(caret), Some(lay)) = (self.caret, self.layout.as_ref()) else {
             return;
         };
@@ -2257,25 +2311,42 @@ impl App {
 
     /// Seats the line of a caret whose row the layout does not hold. The
     /// block table answers for the line, as for a jump, and the line
-    /// comes to the edge of the view it was beyond. True when nothing is
-    /// left to wait for: the line already stands in the view, or the
-    /// layout has no answer and no pass that could bring one.
+    /// comes to the edge of the view it was beyond. A line that stands
+    /// in the view stays where it is. True when nothing is left to wait
+    /// for: the line stands in the view and no pass runs, or the layout
+    /// has no answer and no pass that could bring one. While the pass
+    /// runs, the row of the caret is still owed, and `caret_seat` keeps
+    /// the view that the seat left.
     fn seat_caret_line(&mut self, view_h: f32) -> bool {
         let Some(caret) = self.caret else {
             return true;
         };
         let row_h = self.row_h();
-        // While the pass runs, the table is short of the lines it has
-        // not placed: the seat waits for them, as a jump does.
         let pending = self.layout_pending();
         match self.editor_row_y(caret.offset) {
-            Some(y) if !pending && caret_line_in_view(y, row_h, self.scroll_y, view_h) => true,
+            Some(y) if caret_line_in_view(y, row_h, self.scroll_y, view_h) => {
+                if pending {
+                    self.caret_seat = Some(CaretSeat {
+                        offset: caret.offset,
+                        scroll: self.scroll_y,
+                    });
+                }
+                !pending
+            }
             Some(y) => {
+                // While the pass runs, the table is short of the lines
+                // it has not placed: the seat waits for them in
+                // `pending_row`, as a jump does. A seat that was spent
+                // is kept, so that no frame makes it again.
                 let below = caret_line_edge(y, row_h, self.scroll_y, view_h);
                 self.seat_editor_on(Place {
                     offset: caret.offset,
                     below,
                     line: false,
+                });
+                self.caret_seat = self.pending_row.is_none().then_some(CaretSeat {
+                    offset: caret.offset,
+                    scroll: self.scroll_y,
                 });
                 false
             }
@@ -2285,18 +2356,35 @@ impl App {
 
     /// The frame's part of bringing the view to the caret (`caret_snap`):
     /// the exact row once the layout holds it, and until then the seat
-    /// of its line. True once the view is settled or nothing more can
-    /// come.
+    /// of its line, made once (`caret_due`). True once the view is
+    /// settled, the reader moved it, or nothing more can come.
     fn settle_caret(&mut self, view_h: f32) -> bool {
         let (Some(caret), Some(lay)) = (self.caret, self.layout.as_ref()) else {
             return self.caret.is_none();
         };
-        if let Some(b) = caret.geometry(lay, &self.document, &mut self.fonts) {
-            let target = caret::snap(self.scroll_y, view_h, b);
-            self.scroll_y = scroll::clamp(target, lay.height, view_h);
-            return true;
+        let found = caret.geometry(lay, &self.document, &mut self.fonts);
+        let height = lay.height;
+        let due = caret_due(
+            found.is_some(),
+            self.caret_seat,
+            caret.offset,
+            self.scroll_y,
+            self.layout_pending(),
+        );
+        match (due, found) {
+            (CaretDue::Snap, Some(b)) => {
+                let target = caret::snap(self.scroll_y, view_h, b);
+                self.scroll_y = scroll::clamp(target, height, view_h);
+                self.caret_seat = None;
+                true
+            }
+            (CaretDue::Seat, _) => self.seat_caret_line(view_h),
+            (CaretDue::Wait, _) => false,
+            _ => {
+                self.caret_seat = None;
+                true
+            }
         }
-        self.seat_caret_line(view_h)
     }
 
     /// Bare keys the caret owns while editing. Chords fall through and
@@ -2613,6 +2701,7 @@ impl App {
         self.caret = Some(Caret::at(offset));
         self.wake_caret();
         self.caret_snap = true;
+        self.caret_seat = None;
         self.refresh_title();
     }
 
@@ -9339,6 +9428,69 @@ mod tests {
             !snap_still_owed(false, true),
             "a caret key alone on a row the layout holds owes nothing"
         );
+    }
+
+    #[test]
+    fn a_seated_caret_line_leaves_the_view_to_the_wheel() {
+        use super::{caret_due, CaretDue, CaretSeat};
+        let seat = Some(CaretSeat {
+            offset: 40,
+            scroll: 5000.0,
+        });
+        // The row of the caret answers, the seat, the offset of the
+        // caret, the scroll, the pass still runs.
+        let rule = [
+            (
+                (false, None, 40, 5000.0, true),
+                CaretDue::Seat,
+                "a far caret with no seat yet is seated",
+            ),
+            (
+                (false, seat, 40, 5000.0, true),
+                CaretDue::Wait,
+                "while the pass runs, a seated line is not seated again",
+            ),
+            (
+                (false, seat, 40, 4700.0, true),
+                CaretDue::Drop,
+                "the wheel moved the view: nothing more is owed",
+            ),
+            (
+                (true, seat, 40, 4700.0, false),
+                CaretDue::Drop,
+                "at the end of the pass either",
+            ),
+            (
+                (true, seat, 40, 5000.0, false),
+                CaretDue::Snap,
+                "the view stayed: the row of the caret comes into it",
+            ),
+            (
+                (true, None, 40, 5000.0, false),
+                CaretDue::Snap,
+                "after an edit the frame snaps to the caret",
+            ),
+            (
+                (false, seat, 41, 5000.0, true),
+                CaretDue::Seat,
+                "a seat made for another place of the caret does not count",
+            ),
+            (
+                (false, seat, 40, 5000.0, false),
+                CaretDue::Drop,
+                "no row, and no pass left to bring one",
+            ),
+        ];
+        // The rows are judged together, so that a wrong row does not
+        // hide the rows after it.
+        let wrong: Vec<String> = rule
+            .iter()
+            .filter_map(|&((has_box, seat, offset, scroll_y, pending), due, what)| {
+                let got = caret_due(has_box, seat, offset, scroll_y, pending);
+                (got != due).then(|| format!("{what}: {got:?}, not {due:?}"))
+            })
+            .collect();
+        assert!(wrong.is_empty(), "{}", wrong.join("\n"));
     }
 
     #[test]
