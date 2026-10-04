@@ -332,10 +332,10 @@ The numbers below come from the last phase gate, release build, on a 2019 Linux 
 
 | File | Open | Parse | Highlight | Full pass | PDF export |
 |---|---|---|---|---|---|
-| 1 MB markdown | 40 ms | 31 ms | 0.7 s | 0.18 s | 0.96 s |
-| 1 MB source file | 40 ms | 0 ms | 2.8 s | 0.11 s | 0.9 s |
-| 8 MB markdown | 40 ms | 262 ms | 5.8 s | 1.5 s | 9.4 s |
-| 8 MB source file | 40 ms | 0 ms | 24.1 s | 0.86 s | 8.1 s |
+| 1 MB markdown | 40 ms | 31 ms | 0.65 s | 0.18 s | 0.95 s |
+| 1 MB source file | 40 ms | 0 ms | 2.7 s | 0.11 s | 0.84 s |
+| 8 MB markdown | 40 ms | 256 ms | 5.7 s | 1.5 s | 8.8 s |
+| 8 MB source file | 40 ms | 0 ms | 24.2 s | 0.85 s | 7.7 s |
 
 Memory: Settled is what the file takes once everything is loaded and laid out, Peak the most it takes on the way there, Export the extra during a PDF export.
 
@@ -343,7 +343,7 @@ Memory: Settled is what the file takes once everything is loaded and laid out, P
 |---|---|---|---|
 | 1 MB markdown | 22 MB | 34 MB | +10 MB |
 | 1 MB source file | 11 MB | 12 MB | +11 MB |
-| 8 MB markdown | 173 MB | 257 MB | +34 MB |
+| 8 MB markdown | 172 MB | 255 MB | +34 MB |
 | 8 MB source file | 88 MB | 95 MB | +11 MB |
 
 Books open the same way. *The Adventures of Sherlock Holmes* (EPUB) shows its first chapters in 4 ms and exports its 211 pages in 0.8 s; a 300-chapter FB2 opens in 27 ms, a MOBI in 14 ms, a 40-page CBZ in 1 ms and the same comic as CBR in 7 ms. The performance tests in the repository check these timings and the memory figures.
