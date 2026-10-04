@@ -7736,6 +7736,13 @@ impl App {
             // Anything the slide, the pass or a recolor left unindexed
             // joins the y index before this frame queries it.
             lay.index_more();
+            // A band painted while the pass was inside a code block
+            // lacks what the layout could not give then. The block has
+            // closed and the window has slid, so the band goes.
+            if self.band.as_ref().is_some_and(|band| band.outdated(lay)) {
+                self.band = None;
+                self.pending_band_for = None;
+            }
         }
         let before_search = self.scroll_y;
         self.sync_search();

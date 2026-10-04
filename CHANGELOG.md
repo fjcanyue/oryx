@@ -33,6 +33,7 @@
 - A font or a size changed in the settings while the editor or the help page is open now shows on the page when you return to it. Before, the page kept the old one until a reload.
 - `Ctrl+D` in the editor now turns the page when you return to it. Before, the page kept its direction until a reload.
 - The help page now has its own reading direction. Before, it took the direction of your file, and `Ctrl+D` on the help page changed the direction of your file.
+- `Ctrl+Plus` and `Ctrl+Minus` far down a large code or text file now show the text again after a moment. Before, the page stayed blank.
 - Changing the theme now keeps the page where you were reading. Before, the view could move.
 - In the editor, a jump to a far line of a very large file is faster.
 

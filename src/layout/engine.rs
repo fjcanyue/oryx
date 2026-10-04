@@ -1285,6 +1285,27 @@ struct Assembly {
     seam: Option<PosMarks>,
 }
 
+impl LayoutDoc {
+    /// Whether `window_to` can slide the window. Not before the pass
+    /// has kept a first block. Not while elements stand beyond the
+    /// marks either: they belong to the pass's open code block, and
+    /// moving them would break the indices the pass holds, so the slide
+    /// waits for the block to close. A code or text file is one such
+    /// block, so its window slides only once the pass has ended.
+    pub fn slides(&self) -> bool {
+        let Some(window) = self.window.as_ref() else {
+            return false;
+        };
+        let ends = window.marks.back().cloned().unwrap_or_else(PosMarks::zero);
+        self.runs.len() <= ends.runs
+            && self.rects.len() <= ends.rects
+            && self.images.len() <= ends.images
+            && self.math_glyphs.len() <= ends.math
+            && self.table_rows.len() <= ends.rows
+            && self.code_lines.len() <= ends.code
+    }
+}
+
 /// Slides the materialized window to cover the band at `scroll`,
 /// evicting what fell behind and re-shaping missing blocks at their
 /// recorded positions, through the pool when one is given. With
@@ -1304,24 +1325,8 @@ pub fn window_to(
     viewport_h: f32,
     fill_band: bool,
 ) -> bool {
-    if lay.window.is_none() || lay.table.entries.is_empty() {
+    if !lay.slides() || lay.table.entries.is_empty() {
         return false;
-    }
-    // Elements beyond the marks belong to the pass's open code block;
-    // moving them would break the indices the pass holds, so the slide
-    // waits for the block to close.
-    {
-        let window = lay.window.as_ref().expect("windowed layout");
-        let ends = window.marks.back().cloned().unwrap_or_else(PosMarks::zero);
-        if lay.runs.len() > ends.runs
-            || lay.rects.len() > ends.rects
-            || lay.images.len() > ends.images
-            || lay.math_glyphs.len() > ends.math
-            || lay.table_rows.len() > ends.rows
-            || lay.code_lines.len() > ends.code
-        {
-            return false;
-        }
     }
     let range = retain_range(scroll, viewport_h);
     let fill = if fill_band {

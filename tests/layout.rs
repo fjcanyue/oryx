@@ -4655,3 +4655,141 @@ fn a_theme_change_refills_the_colors_and_moves_nothing() {
         assert_eq!(rect_keys_in(&lay, y0, y1), rect_keys_in(&fresh, y0, y1));
     }
 }
+
+/// The frames the app draws after a zoom step: a new pass that keeps
+/// the scroll of the view and brings it back once the placed height
+/// reaches it.
+struct Restart<'a> {
+    doc: &'a Document,
+    out: LayoutDoc,
+    pass: oryx::layout::LayoutPass,
+    fonts: FontStore,
+    media: MediaCache,
+    scroll_y: f32,
+    kept_scroll: Option<f32>,
+    vh: f32,
+}
+
+impl<'a> Restart<'a> {
+    fn new(doc: &'a Document, kept_scroll: f32, vh: f32) -> Restart<'a> {
+        let (out, pass) = layout_begin(doc, &cfg(), 900.0);
+        Restart {
+            doc,
+            out,
+            pass,
+            fonts: fonts(),
+            media: MediaCache::offline(PathBuf::from(".")),
+            scroll_y: kept_scroll,
+            kept_scroll: Some(kept_scroll),
+            vh,
+        }
+    }
+
+    /// A frame of the app: `steps` steps of the pass, the kept scroll,
+    /// the clamp, the slide of the window. True when the pass has ended.
+    fn frame(&mut self, steps: usize) -> bool {
+        use oryx::paint::scroll;
+        self.pass.retain_around(self.scroll_y, self.vh);
+        let mut done = false;
+        for _ in 0..steps {
+            done = layout_step(
+                self.doc,
+                &theme(),
+                &mut self.fonts,
+                &mut self.media,
+                &cfg(),
+                &mut self.out,
+                &mut self.pass,
+            );
+            if done {
+                break;
+            }
+        }
+        if let Some(target) = self.kept_scroll {
+            if scroll::reached(target, self.out.height, self.vh) {
+                self.kept_scroll = None;
+                self.scroll_y = target;
+            }
+        }
+        self.scroll_y = scroll::clamp(self.scroll_y, self.out.height, self.vh);
+        window_to(
+            self.doc,
+            &theme(),
+            &mut self.fonts,
+            &mut self.media,
+            &cfg(),
+            &mut self.out,
+            None,
+            self.scroll_y,
+            self.vh,
+            true,
+        );
+        self.out.index_more();
+        done
+    }
+
+    /// The band the app paints at this frame, with the line numbers.
+    fn band(&mut self) -> oryx::paint::scroll::BandCache {
+        oryx::paint::scroll::BandCache::repaint(
+            &self.out,
+            self.doc,
+            &theme(),
+            &mut self.fonts,
+            &mut self.media,
+            &[],
+            Some(theme().syntax.comment),
+            self.scroll_y,
+            900,
+            self.vh as u32,
+        )
+    }
+}
+
+/// A zoom step starts the pass again with the view far down the file. A
+/// code file is one block, and while the pass is inside it the layout
+/// gives the band no line of the view. Once the block closes the layout
+/// has them, so a band painted before is painted again.
+#[test]
+fn a_band_painted_inside_an_open_code_block_is_painted_again_when_the_block_closes() {
+    let code: String = (0..3000)
+        .map(|i| format!("    let value_{i} = compute({i}); // line {i}\n"))
+        .collect();
+    let path = std::env::temp_dir().join("oryx_zoom_restart_test.rs");
+    std::fs::write(&path, &code).unwrap();
+    let doc = load::open(&path, None).unwrap().document;
+    std::fs::remove_file(&path).ok();
+    let vh = 600.0;
+    let kept_scroll = (2700.0 * metrics::LINE_HEIGHT * cfg().code_size).floor();
+    let mut frames = Restart::new(&doc, kept_scroll, vh);
+    while frames.kept_scroll.is_some() {
+        assert!(
+            !frames.frame(100),
+            "the kept scroll comes back while the pass is inside the block"
+        );
+    }
+    assert_eq!(frames.scroll_y, kept_scroll);
+    let early = frames.band();
+    let paper = early.pixels[0];
+    assert!(
+        early.pixels.iter().all(|&pixel| pixel == paper),
+        "the layout gives no line of the view while the block is open"
+    );
+    assert!(
+        !early.outdated(&frames.out),
+        "the layout has nothing more to give yet"
+    );
+    while !frames.frame(100) {}
+    assert_eq!(frames.scroll_y, kept_scroll);
+    assert!(
+        early.outdated(&frames.out),
+        "the block closed, and the band lacks the lines of the view"
+    );
+    let late = frames.band();
+    assert!(
+        late.view(frames.scroll_y, vh as u32)
+            .iter()
+            .any(|&pixel| pixel != paper),
+        "the view is drawn"
+    );
+    assert!(!late.outdated(&frames.out));
+}

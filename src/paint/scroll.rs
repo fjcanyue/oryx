@@ -232,6 +232,10 @@ pub struct BandCache {
     pub width: u32,
     pub height: u32,
     pub doc_height: f32,
+    /// Painted while the layout could not slide its window: the pass
+    /// was inside a code block, so lines of the band may be missing,
+    /// and the line numbers under the top of the block are.
+    pub partial: bool,
 }
 
 impl BandCache {
@@ -266,6 +270,7 @@ impl BandCache {
             width,
             height,
             doc_height,
+            partial: !layout.slides(),
         }
     }
 
@@ -279,6 +284,14 @@ impl BandCache {
         let margin = viewport_h * 0.5;
         (scroll_y - self.y_top < margin && self.y_top > 0.0)
             || (bottom - view_bottom < margin && bottom < self.doc_height)
+    }
+
+    /// True when the band was painted while the layout could not slide
+    /// its window, and the layout can slide it now. The layout then
+    /// has the lines and the line numbers that the band lacks, so the
+    /// band is painted again, though the view did not move.
+    pub fn outdated(&self, layout: &LayoutDoc) -> bool {
+        self.partial && layout.slides()
     }
 
     /// The viewport slice at `scroll_y`, without repainting.
@@ -681,6 +694,7 @@ mod tests {
             width: 1,
             height,
             doc_height,
+            partial: false,
         }
     }
 
@@ -719,6 +733,7 @@ mod tests {
             width,
             height: rows,
             doc_height: 1000.0,
+            partial: false,
         };
         let view = b.view(103.0, 2);
         assert_eq!(view.len(), 8);
