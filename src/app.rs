@@ -2669,6 +2669,7 @@ impl App {
         let moved = needed.max(margin) != self.cfg.gutter.max(margin);
         self.cfg.gutter = needed;
         if moved && paint::gutter::numbered(&self.document) {
+            self.keep_view();
             self.layout = None;
             self.band = None;
         }
@@ -6250,6 +6251,7 @@ impl App {
             self.sidebar = None;
             self.sidebar_canvas = None;
         }
+        self.keep_view();
         self.layout = None;
         self.band = None;
         self.request_redraw();
@@ -6307,6 +6309,7 @@ impl App {
                 self.save_sidebar_state();
             }
         }
+        self.keep_view();
         self.layout = None;
         self.band = None;
         self.request_redraw();
@@ -6844,10 +6847,20 @@ impl App {
         // moment.
         self.cfg.direction = stash.cfg.direction;
         self.cfg.justify = justify_pref(&self.config, &self.document);
+        // A view that the help page still kept is not this document's.
+        self.kept_view = None;
+        self.layout = stash.layout;
+        self.pass = stash.pass;
+        let same = same_layout(&self.cfg, &stash.cfg);
+        if !same {
+            // The page is laid out again under the settings of the
+            // moment, and keeps the place its old layout shows.
+            self.keep_view_with(row_height(&self.document, &stash.cfg));
+        }
         (self.layout, self.pass) = kept_layout(
-            stash.layout,
-            stash.pass,
-            same_layout(&self.cfg, &stash.cfg),
+            self.layout.take(),
+            self.pass.take(),
+            same,
             self.theme == stash.theme,
         );
         // The outline belongs to the rendered page. A return into a
@@ -7008,10 +7021,20 @@ impl App {
 
     /// Notes what the view shows before its layout is dropped for a new
     /// one of the same text, so that the pass brings it back
-    /// (`resolve_pending`). Nothing is taken while a landing waits,
-    /// which says where the view goes, or while an earlier kept view
-    /// waits, which is still the place of the reader.
+    /// (`resolve_pending`): a zoom step, a new width of the window or
+    /// of the sidebar, a font or a size of the settings, the room of
+    /// the line numbers, the justification, the direction. Called
+    /// before the setting changes, since the caret's row is measured at
+    /// the size the layout was made with. Nothing is taken while a
+    /// landing waits, which says where the view goes, or while an
+    /// earlier kept view waits, which is still the place of the reader.
     fn keep_view(&mut self) {
+        self.keep_view_with(self.row_h());
+    }
+
+    /// As `keep_view`, for a layout made with rows of `row_h`: a page
+    /// set aside comes back under the settings of the moment.
+    fn keep_view_with(&mut self, row_h: f32) {
         let landing_waits = self.pending_row.is_some()
             || self.pending_offset.is_some()
             || self.pending_anchor.is_some();
@@ -7025,13 +7048,9 @@ impl App {
             (edit::Mode::Edit, Some(caret)) => self.editor_row_y(caret.offset),
             _ => None,
         };
-        self.kept_view = Kept::of(
-            caret_row,
-            self.row_h(),
-            self.scroll_y,
-            self.viewport_h(),
-            || scroll::TopPlace::of(lay, &self.document, self.scroll_y),
-        );
+        self.kept_view = Kept::of(caret_row, row_h, self.scroll_y, self.viewport_h(), || {
+            scroll::TopPlace::of(lay, &self.document, self.scroll_y)
+        });
     }
 
     /// Session zoom, never persisted. The view keeps its place: the
@@ -7068,6 +7087,7 @@ impl App {
         let value = *pref;
         config::save(&self.config);
         self.cfg.justify = value;
+        self.keep_view();
         self.layout = None;
         self.band = None;
         self.request_redraw();
@@ -7087,6 +7107,7 @@ impl App {
             self.direction_marks.insert(path, next);
         }
         self.show_notice(direction_notice(next));
+        self.keep_view();
         self.layout = None;
         self.band = None;
         self.request_redraw();
@@ -7173,6 +7194,7 @@ impl App {
                 code_size,
                 ui_scale,
             }) => {
+                self.keep_view();
                 self.cfg.body_family = body_family.clone();
                 self.cfg.code_family = code_family.clone();
                 self.cfg.body_size = body_size;
@@ -7531,6 +7553,9 @@ impl App {
         if self.layout.is_some() && (self.layout_width == avail || self.settle_at.is_some()) {
             return false;
         }
+        // A new width, of the window or of the sidebar, with the layout
+        // of the old one still here: the view keeps its place.
+        self.keep_view();
         let landing_waits = self.pending_row.is_some()
             || self.pending_offset.is_some()
             || self.pending_anchor.is_some();
@@ -8345,6 +8370,7 @@ impl ApplicationHandler for App {
                 wake.by(at);
             } else {
                 self.settle_at = None;
+                self.keep_view();
                 self.layout = None;
                 self.pass = None;
                 self.request_redraw();

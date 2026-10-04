@@ -35,6 +35,7 @@
 - The help page now has its own reading direction. Before, it took the direction of your file, and `Ctrl+D` on the help page changed the direction of your file.
 - `Ctrl+Plus` and `Ctrl+Minus` far down a large code or text file now show the text again after a moment. Before, the page stayed blank.
 - `Ctrl+Plus` and `Ctrl+Minus` now keep your place: the line at the top of the page stays at the top, and in the editor the line of the caret stays where it is. Before, far down a long file, the view moved to other lines.
+- The page also keeps your place when the window or the sidebar changes its width, and when you change a font or a size in the settings. Before, far down a long file, the view moved to other lines.
 - Changing the theme now keeps the page where you were reading. Before, the view could move.
 - In the editor, a jump to a far line of a very large file is faster.
 
