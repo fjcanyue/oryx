@@ -665,8 +665,9 @@ impl Place {
     /// In the editor, a caret the reader had scrolled away from (`away`)
     /// comes back at its true distance from the view, outside it again.
     /// On the page that distance measures nothing, since it counts rows
-    /// of the editor: the line of such a caret shows inside the view, at
-    /// the edge the caret was beyond.
+    /// of the editor. The page cannot bring that view back, so the step
+    /// is a jump to the line of the caret, which stands in the middle. A
+    /// caret row that an edge only cut shows whole at that edge.
     fn returned(
         offset: usize,
         below: f32,
@@ -681,6 +682,10 @@ impl Place {
                 below,
                 line: false,
             };
+        }
+        let outside = below + row_h <= 0.0 || below >= view_h;
+        if away && outside {
+            return Place::centered(offset, view_h, row_h);
         }
         let floor = if editing || away { 0.0 } else { f32::MIN };
         Place {
@@ -9081,18 +9086,23 @@ mod tests {
         let (view_h, row_h) = (600.0, 20.0);
         assert_eq!(
             Place::returned(5, -1120.0, true, view_h, row_h, false).below,
-            0.0,
-            "a caret that was above the view: its line at the top edge"
+            290.0,
+            "a caret that was above the view: its line in the middle"
         );
         assert_eq!(
             Place::returned(5, 1600.0, true, view_h, row_h, false).below,
-            580.0,
-            "a caret that was below the view: its line at the bottom edge"
+            290.0,
+            "a caret that was below the view: its line in the middle"
         );
         assert_eq!(
             Place::returned(5, -8.0, true, view_h, row_h, false).below,
             0.0,
-            "a caret row that the top edge cut shows whole"
+            "a caret row that the top edge cut shows whole at that edge"
+        );
+        assert_eq!(
+            Place::returned(5, 592.0, true, view_h, row_h, false).below,
+            580.0,
+            "a caret row that the bottom edge cut shows whole at that edge"
         );
     }
 

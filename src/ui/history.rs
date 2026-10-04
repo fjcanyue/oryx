@@ -28,7 +28,7 @@ pub struct Entry {
     /// edges, after the reader scrolled away from it. `below` is then
     /// its true distance from the top of the view, and a step in the
     /// editor brings back the view with the caret where it was. On the
-    /// page, a step shows the caret's line inside the view.
+    /// page, a step shows the caret's line in the middle of the view.
     pub away: bool,
 }
 
