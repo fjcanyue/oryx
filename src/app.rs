@@ -7023,7 +7023,8 @@ impl App {
     /// one of the same text, so that the pass brings it back
     /// (`resolve_pending`): a zoom step, a new width of the window or
     /// of the sidebar, a font or a size of the settings, the room of
-    /// the line numbers, the justification, the direction. Called
+    /// the line numbers, the justification, the direction, a picture
+    /// that arrives from the network with its size. Called
     /// before the setting changes, since the caret's row is measured at
     /// the size the layout was made with. Nothing is taken while a
     /// landing waits, which says where the view goes, or while an
@@ -8451,6 +8452,10 @@ impl ApplicationHandler for App {
         }
         match self.media.drain_remote() {
             images::Folded::Relayout => {
+                // A picture that arrives takes its size, and the page
+                // above the view grows with it: the view keeps its
+                // place, or the text would move under the reader.
+                self.keep_view();
                 self.layout = None;
                 self.band = None;
                 self.request_redraw();
