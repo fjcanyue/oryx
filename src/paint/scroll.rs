@@ -1,6 +1,7 @@
 //! Scroll clamping and the band cache. Scrolling inside the band is a
 //! memcpy slice; the band repaints recentered only near its edges.
 
+use std::ops::Range;
 use std::time::Duration;
 
 use crate::doc::images::MediaCache;
@@ -53,6 +54,89 @@ pub fn offset_top(lay: &LayoutDoc, doc: &Document, offset: usize) -> Option<f32>
         _ => 0,
     };
     lay.approx_top(block, line)
+}
+
+/// The top and the bottom of what `offset_top` answers for: the block
+/// of a source offset, or its line inside a code block whose lines
+/// answer for a source offset. None before the pass places the block.
+pub fn offset_span(lay: &LayoutDoc, doc: &Document, offset: usize) -> Option<Range<f32>> {
+    let block = doc.block_at_offset(offset)?;
+    if let BlockKind::CodeBlock { lines, .. } = &doc.blocks[block].kind {
+        if let Some(row) = lines.row_at(&doc.source, offset) {
+            let line = row.min(lines.len().saturating_sub(1));
+            // The lines tile the block, so a line ends where the next
+            // one starts.
+            let top = lay.approx_top(block, line)?;
+            let bottom = lay.approx_top(block, line + 1)?;
+            return Some(top..bottom.max(top));
+        }
+    }
+    lay.block_span(block)
+}
+
+/// What stands at the top of a view, kept so that a new layout of the
+/// same text shows it there again: after a zoom step, a new width or a
+/// new font, the page above the view has another height, and the
+/// scroll as a distance in pixels would show other lines.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TopPlace {
+    /// The source offset `top_offset` answers for the view: a block,
+    /// or a line of a code or text file.
+    pub offset: usize,
+    /// How far under the top of that block or line the top edge of the
+    /// view stood.
+    above: f32,
+    /// The height of that block or line in the layout the place was
+    /// taken from.
+    height: f32,
+    /// The heights are those of the whole block, since its line did
+    /// not hold the top edge.
+    whole: bool,
+}
+
+impl TopPlace {
+    /// The place at the top of the view at `scroll_y`. None at the top
+    /// of the file and inside the margin above the first block, where
+    /// the distance itself is the place, and before the pass has placed
+    /// a block.
+    pub fn of(lay: &LayoutDoc, doc: &Document, scroll_y: f32) -> Option<TopPlace> {
+        let offset = top_offset(lay, doc, scroll_y);
+        let block = doc.block_at_offset(offset)?;
+        let holds = |span: &Range<f32>| span.start <= scroll_y + 1.0 && scroll_y <= span.end;
+        let (span, whole) = match offset_span(lay, doc, offset).filter(holds) {
+            Some(span) => (span, false),
+            None => (lay.block_span(block)?, true),
+        };
+        if scroll_y + 1.0 < span.start {
+            return None;
+        }
+        Some(TopPlace {
+            offset,
+            above: (scroll_y - span.start).max(0.0),
+            height: span.end - span.start,
+            whole,
+        })
+    }
+
+    /// The scroll that shows the place again on a layout of the same
+    /// text: the same share of the block or the line stands above the
+    /// top edge. A layout that left the block as it was answers the
+    /// scroll the place was taken at. None before the pass places the
+    /// block.
+    pub fn scroll(&self, lay: &LayoutDoc, doc: &Document) -> Option<f32> {
+        let span = if self.whole {
+            lay.block_span(doc.block_at_offset(self.offset)?)?
+        } else {
+            offset_span(lay, doc, self.offset)?
+        };
+        let height = span.end - span.start;
+        let above = if height == self.height || self.height <= 0.0 {
+            self.above
+        } else {
+            self.above * height / self.height
+        };
+        Some(span.start + above)
+    }
 }
 
 /// The line of its block an offset stands on, counted as the editor
@@ -328,6 +412,123 @@ mod tests {
         (1..=count)
             .map(|i| format!("let line_{i} = {i};\n"))
             .collect()
+    }
+
+    fn lay_at(doc: &Document, zoom: f32, width: f32) -> LayoutDoc {
+        let mut fonts = FontStore::new();
+        let mut media = MediaCache::offline(PathBuf::from("."));
+        let cfg = ViewConfig {
+            zoom,
+            ..ViewConfig::default()
+        };
+        layout(
+            doc,
+            &Theme::default_dark(),
+            &mut fonts,
+            &mut media,
+            &cfg,
+            width,
+        )
+    }
+
+    /// Paragraphs of several rows, each naming itself.
+    fn paragraphs(count: usize) -> String {
+        (1..=count)
+            .map(|i| {
+                format!(
+                    "Paragraph {i}: the reader follows this text across the page, and each \
+                     paragraph is long enough to take several rows at the width of the \
+                     window, so a change of size moves the breaks of its lines.\n\n"
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_block_at_the_top_of_the_view_stays_there_at_another_text_size() {
+        let source = paragraphs(120);
+        let doc = crate::doc::markdown::parse(source.as_str());
+        let start = source.find("Paragraph 90:").unwrap();
+        let before = lay_at(&doc, 1.0, 700.0);
+        let span = offset_span(&before, &doc, start).expect("the paragraph is placed");
+        // The top edge of the view cuts the paragraph in its middle.
+        let scroll = span.start + (span.end - span.start) / 2.0;
+        let place = TopPlace::of(&before, &doc, scroll).expect("a block stands at the top");
+        assert_eq!(place.offset, start);
+        for (zoom, width) in [(1.6, 700.0), (0.7, 700.0), (1.0, 450.0)] {
+            let after = lay_at(&doc, zoom, width);
+            let kept = place.scroll(&after, &doc).expect("the paragraph is placed");
+            assert_eq!(
+                top_offset(&after, &doc, kept),
+                start,
+                "the same paragraph at the top, zoom {zoom}, width {width}"
+            );
+            let span = offset_span(&after, &doc, start).unwrap();
+            let share = (kept - span.start) / (span.end - span.start);
+            assert!(
+                (share - 0.5).abs() < 0.01,
+                "the same share of it above the edge: {share}"
+            );
+        }
+        // What the page did before: the distance times the zoom ratio.
+        let after = lay_at(&doc, 1.6, 700.0);
+        assert_ne!(
+            top_offset(&after, &doc, scroll * 1.6),
+            start,
+            "the scaled distance shows another paragraph"
+        );
+    }
+
+    #[test]
+    fn the_line_at_the_top_of_the_view_stays_there_in_a_file_of_lines() {
+        // Every third line is long enough to wrap at the larger size.
+        let source: String = (1..=600)
+            .map(|i| {
+                let tail = if i % 3 == 0 {
+                    "value ".repeat(14)
+                } else {
+                    String::new()
+                };
+                format!("let line_{i} = {i}; // {tail}\n")
+            })
+            .collect();
+        let doc = load::code_document(Some("rust"), &source);
+        let start = source.find("let line_500 ").unwrap();
+        let before = lay_at(&doc, 1.0, 1000.0);
+        let top = offset_top(&before, &doc, start).unwrap();
+        let place = TopPlace::of(&before, &doc, top + 3.0).expect("a line stands at the top");
+        assert_eq!(place.offset, start);
+        let after = lay_at(&doc, 1.6, 1000.0);
+        let kept = place.scroll(&after, &doc).expect("the line is placed");
+        assert_eq!(top_offset(&after, &doc, kept), start, "the same line");
+        assert_ne!(
+            top_offset(&after, &doc, (top + 3.0) * 1.6),
+            start,
+            "the scaled distance shows another line"
+        );
+    }
+
+    #[test]
+    fn a_layout_that_did_not_change_brings_the_same_view_back() {
+        let source = paragraphs(60);
+        let doc = crate::doc::markdown::parse(source.as_str());
+        let lay = lay_at(&doc, 1.0, 700.0);
+        for scroll in [120.0_f32, 1234.5, 3000.25, lay.height - 600.0] {
+            let place = TopPlace::of(&lay, &doc, scroll).expect("a block stands at the top");
+            assert_eq!(place.scroll(&lay, &doc), Some(scroll));
+        }
+    }
+
+    #[test]
+    fn a_view_at_the_top_of_the_file_names_no_place() {
+        let source = paragraphs(10);
+        let doc = crate::doc::markdown::parse(source.as_str());
+        let lay = lay_at(&doc, 1.0, 700.0);
+        assert_eq!(
+            TopPlace::of(&lay, &doc, 0.0),
+            None,
+            "the view stays at the top"
+        );
     }
 
     #[test]
