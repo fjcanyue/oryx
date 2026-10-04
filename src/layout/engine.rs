@@ -1160,7 +1160,11 @@ impl ElementCounts {
 /// Settles the block just placed against the retention bound: outside
 /// it the geometry drops back to `counts`, inside it the materialized
 /// window extends over the position. `lines` is the retained line
-/// range, meaningful for code blocks.
+/// range, meaningful for code blocks. A window that holds no position
+/// yet follows the pass, so the next kept position joins it. When the
+/// scroll lies past the end of the page, as after the page got much
+/// shorter, the pass keeps no block: its empty window is what lets
+/// `window_to` fill the view once the scroll is clamped.
 fn settle_retention(
     out: &mut LayoutDoc,
     pass: &LayoutPass,
@@ -1176,6 +1180,16 @@ fn settle_retention(
     let retained = entry.y <= range.end && entry.bottom().max(entry.y) >= range.start;
     if !retained {
         counts.truncate(out);
+        match out.window.as_mut() {
+            Some(window) if window.marks.is_empty() => window.start = position + 1,
+            Some(_) => {}
+            None => {
+                out.window = Some(WindowState {
+                    start: position + 1,
+                    marks: std::collections::VecDeque::new(),
+                });
+            }
+        }
         return;
     }
     let marks = PosMarks::of(out, lines);
@@ -1287,7 +1301,7 @@ struct Assembly {
 
 impl LayoutDoc {
     /// Whether `window_to` can slide the window. Not before the pass
-    /// has kept a first block. Not while elements stand beyond the
+    /// has settled a first block. Not while elements stand beyond the
     /// marks either: they belong to the pass's open code block, and
     /// moving them would break the indices the pass holds, so the slide
     /// waits for the block to close. A code or text file is one such

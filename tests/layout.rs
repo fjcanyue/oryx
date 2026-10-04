@@ -4793,3 +4793,52 @@ fn a_band_painted_inside_an_open_code_block_is_painted_again_when_the_block_clos
     );
     assert!(!late.outdated(&frames.out));
 }
+
+/// A new layout can be much shorter than the one before it: the sidebar
+/// closes, the window gets wider, the file was cut on disk. The pass
+/// starts with the scroll of the old layout, more than five screens past
+/// the end of the new one, and ends in its first frame. The view then
+/// shows the end of the page.
+#[test]
+fn a_page_that_got_much_shorter_under_the_view_shows_its_end() {
+    let page: String = (1..=120)
+        .map(|i| format!("Paragraph {i}: a line of text for the page.\n\n"))
+        .collect();
+    // A code file is one block, as the source view of the editor is.
+    let lines: String = (1..=400)
+        .map(|i| format!("let line_{i} = {i};\n"))
+        .collect();
+    let path = std::env::temp_dir().join("oryx_shorter_page_test.rs");
+    std::fs::write(&path, &lines).unwrap();
+    let file = load::open(&path, None).unwrap().document;
+    std::fs::remove_file(&path).ok();
+    let docs = [
+        ("a page", markdown::parse(page.as_str())),
+        ("a file of lines", file),
+    ];
+    let vh = 600.0;
+    for (what, doc) in &docs {
+        let whole = lay_doc(doc, 900.0, &mut fonts());
+        assert!(whole.height > 6.0 * vh, "{what} is several screens long");
+        let old_scroll = whole.height + 8.0 * vh;
+        let mut frames = Restart::new(doc, old_scroll, vh);
+        assert!(
+            frames.frame(usize::MAX),
+            "{what}: the pass ends in its first frame"
+        );
+        assert_eq!(frames.out.height, whole.height, "{what}");
+        assert_eq!(
+            frames.scroll_y,
+            whole.height - vh,
+            "{what}: the view stands at the end"
+        );
+        let band = frames.band();
+        let paper = band.pixels[0];
+        assert!(
+            band.view(frames.scroll_y, vh as u32)
+                .iter()
+                .any(|&pixel| pixel != paper),
+            "{what}: the end is drawn"
+        );
+    }
+}
