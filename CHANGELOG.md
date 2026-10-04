@@ -39,6 +39,7 @@
 - Pictures that load from the internet no longer move the text you are reading. Before, when a picture above arrived, the page showed other lines.
 - At the end of a long file, the page now shows its text after you close the sidebar or make the window wider, and after the file gets shorter on disk. Before, the page could stay blank.
 - A markdown page that has footnotes or a closed section now reopens where you were reading when you come back to it in the same session. Before, it could reopen near the top.
+- In the editor, `Ctrl+End` and `Ctrl+Home` now show the caret in a long file. Before, the view could stop in the middle of the file, and the text you typed next was out of view.
 - Changing the theme now keeps the page where you were reading. Before, the view could move.
 - In the editor, a jump to a far line of a very large file is faster.
 

@@ -776,6 +776,22 @@ fn kept_caret_height(below: f32, view_h: f32, row_h: f32) -> f32 {
     below.min((view_h - row_h).max(0.0)).max(0.0)
 }
 
+/// Whether the first row of a caret's line stands whole in the view.
+fn caret_line_in_view(row_y: f32, row_h: f32, scroll_y: f32, view_h: f32) -> bool {
+    row_y >= scroll_y && row_y + row_h <= scroll_y + view_h
+}
+
+/// The height the line of a far caret is seated at: the top edge of the
+/// view when the line is above it, else the bottom edge, as the view
+/// follows a caret that walks out of it.
+fn caret_line_edge(row_y: f32, row_h: f32, scroll_y: f32, view_h: f32) -> f32 {
+    if row_y < scroll_y {
+        0.0
+    } else {
+        (view_h - row_h).max(0.0)
+    }
+}
+
 /// The caret the editor takes when it opens while a landing waits: the
 /// remembered offset when it lies on the line the landing shows, which
 /// is a jump with its column, else the offset of the landing.
@@ -1520,7 +1536,8 @@ struct App {
     /// writes back first.
     bom: bool,
     /// A typing edit or caret motion moved content under a stale
-    /// layout; the next placed frame snaps the view to the caret.
+    /// layout, or the caret moved to a line the layout does not hold;
+    /// the next placed frame snaps the view to the caret.
     caret_snap: bool,
     /// The blink's current half and when it flips, driven by the timer;
     /// every caret action restarts the visible half.
@@ -2185,25 +2202,87 @@ impl App {
     }
 
     /// One caret motion: step through the runs, restart the blink, and
-    /// snap the view back to the caret.
+    /// bring the view back to the caret.
     fn step_caret(&mut self, motion: Motion) {
         let page = self.page_step();
-        let view_h = self.viewport_h();
         let (Some(caret), Some(lay)) = (self.caret, self.layout.as_ref()) else {
             return;
         };
         let stepped = caret.step(motion, lay, &self.document, &mut self.fonts, page);
-        let snapped = stepped
-            .geometry(lay, &self.document, &mut self.fonts)
-            .map(|b| caret::snap(self.scroll_y, view_h, b));
         self.caret = Some(stepped);
         self.wake_caret();
-        if let Some(target) = snapped {
-            if target != self.scroll_y {
-                self.scroll_to(target);
-            }
-        }
+        self.show_caret();
         self.request_redraw();
+    }
+
+    /// Brings the view to the caret after it moved. A row the layout
+    /// holds answers exactly. A caret on a line the layout does not
+    /// hold has no row to read, the case of Ctrl+End in a long file:
+    /// its line is seated like a jump, and the frame that lays its rows
+    /// out finishes on the caret's own row (`caret_snap`).
+    fn show_caret(&mut self) {
+        let view_h = self.viewport_h();
+        // The caret moved on, so a seat still owed to the place it left
+        // would move the view after this one.
+        if std::mem::take(&mut self.caret_snap) {
+            self.pending_row = None;
+        }
+        let (Some(caret), Some(lay)) = (self.caret, self.layout.as_ref()) else {
+            return;
+        };
+        match caret.geometry(lay, &self.document, &mut self.fonts) {
+            Some(b) => {
+                let target = caret::snap(self.scroll_y, view_h, b);
+                if target != self.scroll_y {
+                    self.scroll_to(target);
+                }
+            }
+            None => self.caret_snap = !self.seat_caret_line(view_h),
+        }
+    }
+
+    /// Seats the line of a caret whose row the layout does not hold. The
+    /// block table answers for the line, as for a jump, and the line
+    /// comes to the edge of the view it was beyond. True when nothing is
+    /// left to wait for: the line already stands in the view, or the
+    /// layout has no answer and no pass that could bring one.
+    fn seat_caret_line(&mut self, view_h: f32) -> bool {
+        let Some(caret) = self.caret else {
+            return true;
+        };
+        let row_h = self.row_h();
+        // While the pass runs, the table is short of the lines it has
+        // not placed: the seat waits for them, as a jump does.
+        let pending = self.layout_pending();
+        match self.editor_row_y(caret.offset) {
+            Some(y) if !pending && caret_line_in_view(y, row_h, self.scroll_y, view_h) => true,
+            Some(y) => {
+                let below = caret_line_edge(y, row_h, self.scroll_y, view_h);
+                self.seat_editor_on(Place {
+                    offset: caret.offset,
+                    below,
+                    line: false,
+                });
+                false
+            }
+            None => !pending,
+        }
+    }
+
+    /// The frame's part of bringing the view to the caret (`caret_snap`):
+    /// the exact row once the layout holds it, and until then the seat
+    /// of its line. True once the view is settled or nothing more can
+    /// come.
+    fn settle_caret(&mut self, view_h: f32) -> bool {
+        let (Some(caret), Some(lay)) = (self.caret, self.layout.as_ref()) else {
+            return self.caret.is_none();
+        };
+        if let Some(b) = caret.geometry(lay, &self.document, &mut self.fonts) {
+            let target = caret::snap(self.scroll_y, view_h, b);
+            self.scroll_y = scroll::clamp(target, lay.height, view_h);
+            return true;
+        }
+        self.seat_caret_line(view_h)
     }
 
     /// Bare keys the caret owns while editing. Chords fall through and
@@ -4024,17 +4103,9 @@ impl App {
 
     /// Seats the caret at an offset, blink restarted, view snapped.
     fn place_caret_at(&mut self, offset: usize) {
-        let view_h = self.viewport_h();
         self.caret = Some(Caret::at(offset));
         self.wake_caret();
-        if let (Some(c), Some(lay)) = (self.caret, self.layout.as_ref()) {
-            if let Some(b) = c.geometry(lay, &self.document, &mut self.fonts) {
-                let target = caret::snap(self.scroll_y, view_h, b);
-                if target != self.scroll_y {
-                    self.scroll_to(target);
-                }
-            }
-        }
+        self.show_caret();
         self.request_redraw();
     }
 
@@ -7896,17 +7967,12 @@ impl App {
         self.sync_search();
         self.settle_search_anchor();
         self.settle_landing();
-        // A typing edit landed under a fresh layout: snap the view to
-        // the caret once its line is placed, inside the same re-window
-        // the search landing uses.
-        if self.caret_snap {
-            if let (Some(c), Some(lay)) = (self.caret, self.layout.as_ref()) {
-                if let Some(cb) = c.geometry(lay, &self.document, &mut self.fonts) {
-                    let target = caret::snap(self.scroll_y, size.height as f32, cb);
-                    self.scroll_y = scroll::clamp(target, lay.height, size.height as f32);
-                    self.caret_snap = false;
-                }
-            }
+        // A typing edit landed under a fresh layout, or the caret moved
+        // to a line the layout did not hold: snap the view to the caret
+        // once its line is placed, inside the same re-window the search
+        // landing uses. A landing that still waits comes first.
+        if self.caret_snap && self.pending_row.is_none() {
+            self.caret_snap = !self.settle_caret(size.height as f32);
         }
         // A search step that scrolled re-slides the window so this
         // frame paints the landing, not a cold viewport; the match
@@ -9214,6 +9280,31 @@ mod tests {
             kept_caret_height(580.0, 600.0, 32.0),
             568.0,
             "a taller row on the last row of the view moves up to show whole"
+        );
+    }
+
+    #[test]
+    fn the_line_of_a_far_caret_comes_to_the_edge_it_was_beyond() {
+        use super::{caret_line_edge, caret_line_in_view};
+        let (row_h, view_h, scroll_y) = (20.0, 600.0, 5000.0);
+        assert_eq!(
+            caret_line_edge(44_000.0, row_h, scroll_y, view_h),
+            580.0,
+            "Ctrl+End: a line under the view comes to the bottom edge"
+        );
+        assert_eq!(
+            caret_line_edge(0.0, row_h, scroll_y, view_h),
+            0.0,
+            "Ctrl+Home: a line above the view comes to the top edge"
+        );
+        assert!(caret_line_in_view(5300.0, row_h, scroll_y, view_h));
+        assert!(
+            !caret_line_in_view(5590.0, row_h, scroll_y, view_h),
+            "a row that the bottom edge cuts is not in view"
+        );
+        assert!(
+            !caret_line_in_view(4990.0, row_h, scroll_y, view_h),
+            "a row that the top edge cuts is not in view"
         );
     }
 

@@ -863,6 +863,10 @@ impl Caret {
     /// below the last line, the blank-row seat below, as every editor
     /// draws it; the selection's `model_pos` folds that offset onto
     /// the last line for its own reasons, and the caret does not.
+    /// None for a caret on a line the layout does not hold: a large
+    /// file is laid out around the view only, and a caret moved far
+    /// across it, as with Ctrl+End, has no row to read. The block table
+    /// answers for its line (`LayoutDoc::approx_top`).
     pub fn geometry(
         self,
         lay: &LayoutDoc,
@@ -890,7 +894,11 @@ impl Caret {
         // nearest text line, one advance per blank row between.
         if let Some(li) = lines.iter().rposition(|l| l.end < offset) {
             let line = &lines[li];
-            let gap = doc.source.get(line.end..offset)?.matches('\n').count();
+            let between = doc.source.get(line.end..offset)?;
+            if !one_row_a_line(lay, doc, between, offset) {
+                return None;
+            }
+            let gap = between.matches('\n').count();
             if gap == 0 {
                 return None;
             }
@@ -905,7 +913,11 @@ impl Caret {
         // Nothing above: blank rows at the top of the file anchor to
         // the first text line below instead.
         let below = lines.iter().find(|l| l.start > offset)?;
-        let gap = doc.source.get(offset..below.start)?.matches('\n').count();
+        let between = doc.source.get(offset..below.start)?;
+        if !one_row_a_line(lay, doc, between, offset) {
+            return None;
+        }
+        let gap = between.matches('\n').count();
         if gap == 0 {
             return None;
         }
@@ -917,6 +929,40 @@ impl Caret {
             h: below.h,
         })
     }
+}
+
+/// Whether one row stands for each line of `between`, the source from
+/// the caret to the nearest row the layout holds. Blank lines take a
+/// row each. Text there means lines the layout does not hold, and they
+/// may wrap: a large file is laid out around the view only, and the
+/// caret was moved far across it. The caret's own line is left to the
+/// count when the layout holds it and it draws no glyph for the caret.
+fn one_row_a_line(lay: &LayoutDoc, doc: &Document, between: &str, offset: usize) -> bool {
+    between.bytes().all(|byte| byte.is_ascii_whitespace()) || line_held(lay, doc, offset)
+}
+
+/// Whether the layout holds the source line an offset stands on. A file
+/// of lines is one block with a record for each line that is laid out
+/// and not empty. The row after the final newline goes with the last
+/// line. A document that is not a block of lines answers true: its
+/// blocks are held whole.
+fn line_held(lay: &LayoutDoc, doc: &Document, offset: usize) -> bool {
+    let Some(block) = doc.block_at_offset(offset) else {
+        return true;
+    };
+    let BlockKind::CodeBlock { lines, .. } = &doc.blocks[block].kind else {
+        return true;
+    };
+    let Some(row) = lines.row_at(&doc.source, offset) else {
+        return true;
+    };
+    let line = row.min(lines.len().saturating_sub(1));
+    let at = lay
+        .code_lines
+        .partition_point(|record| (record.block, record.line) < (block, line));
+    lay.code_lines
+        .get(at)
+        .is_some_and(|record| record.block == block && record.line == line)
 }
 
 /// The caret's seat on a page the layout holds no glyphs for, an empty
@@ -1240,6 +1286,71 @@ mod tests {
             src.push_str(&format!("## Section {i}\n\nA paragraph of prose for section {i}, long enough to wrap once or twice across the width the tests lay out at.\n\n"));
         }
         md_doc(&src)
+    }
+
+    /// A file laid out as the app does it: a pass that keeps the rows
+    /// around a view at the top of the file, and drops the others.
+    fn lay_around_the_top(doc: &Document, width: f32, view_h: f32) -> (LayoutDoc, FontStore) {
+        use crate::layout::{layout_begin, layout_more};
+        let mut fonts = FontStore::new();
+        let mut media = MediaCache::offline(PathBuf::from("."));
+        let cfg = ViewConfig::default();
+        let (mut out, mut pass) = layout_begin(doc, &cfg, width);
+        pass.retain_around(0.0, view_h);
+        let done = layout_more(
+            doc,
+            &Theme::default_dark(),
+            &mut fonts,
+            &mut media,
+            &cfg,
+            &mut out,
+            &mut pass,
+            None,
+        );
+        assert!(done);
+        (out, fonts)
+    }
+
+    #[test]
+    fn a_caret_on_a_line_the_layout_does_not_hold_has_no_box() {
+        // Each paragraph is one line of the file and wraps to several
+        // rows, with a blank line after it.
+        let source: String = (1..=300)
+            .map(|i| {
+                format!(
+                    "Paragraph {i}: {}\n\n",
+                    "the reader follows this text across the page ".repeat(5)
+                )
+            })
+            .collect();
+        let doc = text_doc(&source);
+        let (l, mut fonts) = lay_around_the_top(&doc, 700.0, 600.0);
+        assert!(
+            Caret::at(3).geometry(&l, &doc, &mut fonts).is_some(),
+            "a caret in the laid out part has its box"
+        );
+        let blank = source.find("\n\n").unwrap() + 1;
+        assert!(
+            Caret::at(blank).geometry(&l, &doc, &mut fonts).is_some(),
+            "a blank row of the laid out part too"
+        );
+        // Ctrl+End: the caret stands far under the rows the layout
+        // holds. One row for each line between them would stop short
+        // of it, since the lines wrap.
+        let rows = source.matches('\n').count();
+        let seat = l.code_line_seat(0, rows).expect("the table has the row");
+        assert!(seat.y > 20.0 * 600.0, "the end is far under the view");
+        assert!(
+            Caret::at(source.len())
+                .geometry(&l, &doc, &mut fonts)
+                .is_none(),
+            "the row after the last line is not laid out"
+        );
+        let far = source.find("Paragraph 250:").unwrap() + 5;
+        assert!(
+            Caret::at(far).geometry(&l, &doc, &mut fonts).is_none(),
+            "a line of text far under the view is not laid out"
+        );
     }
 
     #[test]
