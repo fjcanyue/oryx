@@ -2,6 +2,8 @@
 
 ## v1.2.1
 
+This is a maintenance release focused on stability and fixes, including several on very large files. Most fixes are about keeping the reading position stable, whatever action you perform. The active location and line now stay stable when you zoom, resize the window, open the sidebar, change a font, or switch between reading and editing. Display bugs were also addressed, and Oryx now performs better on large files: a theme change is immediate, and jumps to a line in the editor are a little faster. On Windows, the sidebar issue where it could not reach the other drives was fixed.
+
 ### New features
 
 #### Themes
@@ -17,8 +19,6 @@
 - Oryx can be installed on a Mac with Homebrew: `brew install --cask wmahfoudh/tap/oryx`.
 
 ### Fixes
-
-Most fixes are about keeping the reading position stable, whatever action you perform. The active location and line now stay stable when you zoom, resize the window, open the sidebar, change a font, or switch between reading and editing. Display bugs were also addressed, and Oryx now performs better on large files, with faster jumps to a line in the editor. On Windows, the sidebar issue where it could not reach the other drives was fixed.
 
 - In a book, the outline now highlights the chapter you are reading. Before, in some books, the wrong entry was highlighted.
 - `Ctrl+G` now shows the line in the middle of the window. Before, the line was at the very top.
