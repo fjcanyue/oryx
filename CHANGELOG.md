@@ -8,11 +8,17 @@
 
 - A new theme, `black-and-white`, made for printing: a white page, black text and grays.
 
+#### Line numbers
+
+- In the editor, the number of the current line is shown in a small box, so it is easier to see.
+
 #### macOS
 
 - Oryx can be installed on a Mac with Homebrew: `brew install --cask wmahfoudh/tap/oryx`.
 
 ### Fixes
+
+Most fixes are about keeping the reading position stable, whatever action you perform. The active location and line now stay stable when you zoom, resize the window, open the sidebar, change a font, or switch between reading and editing. Display bugs were also addressed, and Oryx now performs better on large files, with faster jumps to a line in the editor. On Windows, the sidebar issue where it could not reach the other drives was fixed.
 
 - In a book, the outline now highlights the chapter you are reading. Before, in some books, the wrong entry was highlighted.
 - `Ctrl+G` now shows the line in the middle of the window. Before, the line was at the very top.
@@ -23,7 +29,6 @@
 - `Alt+Left` now goes back to the file you just left, even when a save failed. Before, in that case, it could stay where it was.
 - A jump to an empty line after a long table or a long paragraph now shows the end of that table or paragraph, and so does leaving the editor from such a line. Before, Oryx showed its beginning.
 - In a very large markdown file, `Ctrl+E` far down the page now opens the editor on the lines you were reading. Before, the view could end thousands of lines below the caret.
-- In the editor, the current line number is now shown in a small box, so it is easier to see.
 - On Windows, the sidebar can now reach your other drives: `..` at the top of a drive shows the list of drives. Before, the sidebar could not leave the drive it started on.
 - On Windows, the open and save dialogs now start in the folder of your file when it is on a network drive. Before, they started in Documents.
 - On Linux, the AppImage now starts under firejail. Before, it stopped with "Permission denied".
@@ -39,8 +44,8 @@
 - Pictures that load from the internet no longer move the text you are reading. Before, when a picture above arrived, the page showed other lines.
 - At the end of a long file, the page now shows its text after you close the sidebar or make the window wider, and after the file gets shorter on disk. Before, the page could stay blank.
 - A markdown page that has footnotes or a closed section now reopens where you were reading when you come back to it in the same session. Before, it could reopen near the top.
-- In the editor, `Ctrl+End` and `Ctrl+Home` now show the caret in a long file. Before, the view could stop in the middle of the file, and the text you typed next was out of view.
 - Changing the theme now keeps the page where you were reading. Before, the view could move.
+- In the editor, `Ctrl+End` and `Ctrl+Home` now show the caret in a long file. Before, the view could stop in the middle of the file, and the text you typed next was out of view.
 - In the editor, a jump to a far line of a very large file is faster.
 
 ## v1.2.0
