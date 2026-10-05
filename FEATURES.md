@@ -215,7 +215,7 @@ Oryx comes with 33 themes, 11 of them made for Oryx. A theme is a TOML file that
 
 `Ctrl+T` opens the list of themes. The arrow keys move through the list and show each theme on your document, `Enter` keeps the selected theme, and `Escape` goes back to the one you had.
 
-In the list, each theme has small icons at its right: one opens the theme in the theme editor, and one duplicates it. A theme of your own also has a cross that deletes it, and a double click on its name renames it.
+In the list, each theme has small icons at its right: one opens the theme in the theme editor, and one duplicates it. A custom theme also has a cross that deletes it, and a double click on its name renames it.
 
 The theme editor changes any of the 51 colors with a color picker, and the document updates as you change them. Editing a theme that ships with Oryx creates a copy, so the original stays unchanged. Your themes are saved in `~/.local/share/oryx/themes` on Linux, in `%APPDATA%\oryx\themes` on Windows (with the MSI or the zip) and in `~/Library/Application Support/oryx/themes` on a Mac. Oryx also reads the themes installed by a package, in folders like `/usr/share/oryx/themes`.
 
