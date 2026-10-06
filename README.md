@@ -18,7 +18,6 @@ It also edits code, opens ebooks and comics, on Linux, Windows and macOS.
 
 [Install](#install) · [Features](FEATURES.md) · [Shortcuts](SHORTCUTS.md) · [Changelog](CHANGELOG.md)
 
-<!-- GIF: the main demo (oryx-main.txt), about 47 s, 2000x1200, under 5 MB. -->
 <img src="images/oryx.gif" alt="Oryx demo: an 8 MB file, editing, themes, then code, an ebook and a comic">
 
 </div>
@@ -102,7 +101,6 @@ Oryx has no menus and no toolbars. Everything is done with the keyboard and mous
 
 A few rules hold everywhere: `Escape` closes whatever is open (when nothing is open, it quits Oryx), formatting shortcuts are toggles and in the dialogs the arrow keys move and change values. `F1` shows the full list of shortcuts and the supported markdown syntax, and can be searched. The shortcuts and the command line options are also listed in [SHORTCUTS.md](SHORTCUTS.md).
 
-<!-- GIF: the editor tricks (editor-tricks.txt), one part or the three, under 5 MB. -->
 <img src="images/editor-tricks.gif" alt="Editing markdown in Oryx with the keyboard only: lists, tasks, headings, links, pictures, moving lines and find and replace">
 
 | Key | What it does |
