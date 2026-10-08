@@ -16,6 +16,54 @@ Workspace search in the sidebar's Files tab, built on ripgrep's own search crate
 - Plain queries are literal; `Alt+R` (or the `.*` toggle) switches to regular expressions in ripgrep's Rust `regex` flavor — linear-time, without backreferences and lookarounds (the in-document `Ctrl+F` keeps `fancy-regex` with them).
 - `Enter` (or a click) opens the file at the match, verified against the line as the search read it; a file changed since lands on its line rather than nowhere. Binary files are skipped on their first NUL byte, and a file with unsaved edits is searched as it stands in the editor, not as it lies on disk.
 
+## v1.2.1
+
+This is a maintenance release focused on stability and fixes, including several on very large files. Most fixes are about keeping the reading position stable, whatever action you perform. The active location and line now stay stable when you zoom, resize the window, open the sidebar, change a font, or switch between reading and editing. Display bugs were also addressed, and Oryx now performs better on large files: a theme change is immediate, and jumps to a line in the editor are a little faster. On Windows, the sidebar issue where it could not reach the other drives was fixed.
+
+### New features
+
+#### Themes
+
+- A new theme, `black-and-white`, made for printing: a white page, black text and grays.
+
+#### Line numbers
+
+- In the editor, the number of the current line is shown in a small box, so it is easier to see.
+
+#### macOS
+
+- Oryx can be installed on a Mac with Homebrew: `brew install --cask wmahfoudh/tap/oryx`.
+
+### Fixes
+
+- In a book, the outline now highlights the chapter you are reading. Before, in some books, the wrong entry was highlighted.
+- `Ctrl+G` now shows the line in the middle of the window. Before, the line was at the very top.
+- `Alt+Left` and `Alt+Right` now bring you back to the same view you left. Before, the line went to the top of the window.
+- `Ctrl+E` in the middle of a table or of an indented code block now opens the editor on the lines you were reading. Before, the editor opened at the start of the table or of the block.
+- After `Ctrl+G` while reading, `Ctrl+E` now puts the caret on the line you jumped to. Before, the caret was on the first line in view.
+- After `Alt+Left` or `Alt+Right` while reading, `Ctrl+E` now puts the caret back where it was at that place. Before, the caret could be on another line.
+- `Alt+Left` now goes back to the file you just left, even when a save failed. Before, in that case, it could stay where it was.
+- A jump to an empty line after a long table or a long paragraph now shows the end of that table or paragraph, and so does leaving the editor from such a line. Before, Oryx showed its beginning.
+- In a very large markdown file, `Ctrl+E` far down the page now opens the editor on the lines you were reading. Before, the view could end thousands of lines below the caret.
+- On Windows, the sidebar can now reach your other drives: `..` at the top of a drive shows the list of drives. Before, the sidebar could not leave the drive it started on.
+- On Windows, the open and save dialogs now start in the folder of your file when it is on a network drive. Before, they started in Documents.
+- On Linux, the AppImage now starts under firejail. Before, it stopped with "Permission denied".
+- The theme editor now saves your changes to `oryx-hero` in a copy, as for the other themes that ship with Oryx. Before, it changed the shipped theme itself.
+- The theme browser no longer deletes or renames a theme that ships with Oryx. Duplicate it to get a custom theme that you can change. Before, two clicks on the cross deleted the theme until the next install.
+- The sidebar now keeps its width when you open a file from another folder. Before, it went back to its default width.
+- A font or a size changed in the settings while the editor or the help page is open now shows on the page when you return to it. Before, the page kept the old one until a reload.
+- `Ctrl+D` in the editor now turns the page when you return to it. Before, the page kept its direction until a reload.
+- The help page now has its own reading direction. Before, it took the direction of your file, and `Ctrl+D` on the help page changed the direction of your file.
+- `Ctrl+Plus` and `Ctrl+Minus` far down a large code or text file now show the text again after a moment. Before, the page stayed blank.
+- `Ctrl+Plus` and `Ctrl+Minus` now keep your place: the line at the top of the page stays at the top, and in the editor the line of the caret stays where it is. Before, far down a long file, the view moved to other lines.
+- The page also keeps your place when the window or the sidebar changes its width, and when you change a font or a size in the settings. Before, far down a long file, the view moved to other lines.
+- Pictures that load from the internet no longer move the text you are reading. Before, when a picture above arrived, the page showed other lines.
+- At the end of a long file, the page now shows its text after you close the sidebar or make the window wider, and after the file gets shorter on disk. Before, the page could stay blank.
+- A markdown page that has footnotes or a closed section now reopens where you were reading when you come back to it in the same session. Before, it could reopen near the top.
+- Changing the theme now keeps the page where you were reading. Before, the view could move.
+- In the editor, `Ctrl+End` and `Ctrl+Home` now show the caret in a long file. Before, the view could stop in the middle of the file, and the text you typed next was out of view.
+- In the editor, a jump to a far line of a very large file is faster.
+
 ## v1.2.0
 
 ### New features

@@ -1,0 +1,82 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<svg
+   width="314"
+   height="128"
+   viewBox="0 0 314 128"
+   version="1.1"
+   id="svg5"
+   sodipodi:docname="wordmark-light.svg"
+   inkscape:version="1.4.4 (dcaf3e7d9e, 2026-05-05)"
+   xmlns:inkscape="http://www.inkscape.org/namespaces/inkscape"
+   xmlns:sodipodi="http://sodipodi.sourceforge.net/DTD/sodipodi-0.dtd"
+   xmlns="http://www.w3.org/2000/svg"
+   xmlns:svg="http://www.w3.org/2000/svg">
+  <defs
+     id="defs5">
+    <rect
+       x="127.95908"
+       y="27.438562"
+       width="220.09326"
+       height="89.06144"
+       id="rect8" />
+  </defs>
+  <sodipodi:namedview
+     id="namedview5"
+     pagecolor="#ffffff"
+     bordercolor="#000000"
+     borderopacity="0.25"
+     inkscape:showpageshadow="2"
+     inkscape:pageopacity="0.0"
+     inkscape:pagecheckerboard="0"
+     inkscape:deskcolor="#d1d1d1"
+     inkscape:zoom="1.6987894"
+     inkscape:cx="202.79147"
+     inkscape:cy="127.4437"
+     inkscape:window-width="1536"
+     inkscape:window-height="788"
+     inkscape:window-x="0"
+     inkscape:window-y="0"
+     inkscape:window-maximized="1"
+     inkscape:current-layer="svg5" />
+  <path
+     id="rect7"
+     style="fill:#e0def4;fill-opacity:1"
+     d="M 29,0 C 12.934,0 0,12.934 0,29 v 70 c 0,16.066 12.934,29 29,29 H 50.001953 99 250 285 c 16.066,0 29,-12.934 29,-29 V 29 C 314,12.934 301.066,0 285,0 H 250 99 50.001953 Z" />
+  <path
+     d="M 47,82 C 45,56 40,34 31,14 l 5,-1 c 11,23 17,45 19,69 z"
+     fill="#e0def4"
+     id="path1"
+     style="fill:#191724;fill-opacity:1" />
+  <path
+     d="M 81,82 C 83,56 88,34 97,14 L 92,13 C 81,36 75,58 73,82 Z"
+     fill="#e0def4"
+     id="path2"
+     style="fill:#191724;fill-opacity:1" />
+  <path
+     d="M 54,86 36,78"
+     stroke="#eb6f92"
+     stroke-width="9"
+     stroke-linecap="round"
+     id="path3" />
+  <path
+     d="M 74,86 92,78"
+     stroke="#eb6f92"
+     stroke-width="9"
+     stroke-linecap="round"
+     id="path4" />
+  <path
+     d="m 54,78 h 20 l -5,34 c -1,6 -9,6 -10,0 z"
+     fill="#e0def4"
+     id="path5"
+     style="fill:#191724;fill-opacity:1" />
+  <text
+     xml:space="preserve"
+     id="text7"
+     style="font-size:72px;writing-mode:lr-tb;direction:ltr;white-space:pre;shape-inside:url(#rect8);fill:#191724;fill-opacity:1"
+     transform="translate(-8.127708,-4.100384)"><tspan
+       x="127.95898"
+       y="92.950466"
+       id="tspan4"><tspan
+         style="font-weight:600;font-family:'Space Grotesk';-inkscape-font-specification:'Space Grotesk Semi-Bold'"
+         id="tspan2">Oryx</tspan></tspan></text>
+</svg>

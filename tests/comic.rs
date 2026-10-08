@@ -280,7 +280,7 @@ fn refusals_speak_plainly() {
 /// Lays out a comic built from the given pages under one display state.
 fn comic_layout(entries: &[(&str, &[u8])], comic: ComicFit, width: f32) -> LayoutDoc {
     let book = comic::open_book(cbz(entries), "T").unwrap();
-    let mut media = MediaCache::new(PathBuf::from("."));
+    let mut media = MediaCache::offline(PathBuf::from("."));
     media.adopt(book.pages);
     let cfg = ViewConfig {
         comic,
@@ -384,7 +384,7 @@ fn two_pages_pair_after_the_cover() {
 #[test]
 fn a_text_document_ignores_the_comic_fit() {
     let doc = markdown::parse("# Title\n\nSome prose under it.");
-    let mut media = MediaCache::new(PathBuf::from("."));
+    let mut media = MediaCache::offline(PathBuf::from("."));
     let mut fonts = FontStore::new();
     let plain = layout(
         &doc,
@@ -489,7 +489,7 @@ fn rtl_pairing_puts_the_right_page_first() {
         .map(|(n, b)| (n.as_str(), b.as_slice()))
         .collect();
     let book = comic::open_book(cbz(&entries), "T").unwrap();
-    let mut media = MediaCache::new(PathBuf::from("."));
+    let mut media = MediaCache::offline(PathBuf::from("."));
     media.adopt(book.pages);
     let cfg = ViewConfig {
         comic: ComicFit::Two { height: 400.0 },

@@ -175,7 +175,7 @@ pub const TIPS: &[Tip] = &[
     Tip {
         kind: TipKind::Tip,
         area: Area::Files,
-        text: r#"Did your machine go down in the middle of a note? Oryx keeps a copy of the note while you type, and the next time you start it, it asks whether you want the note back. `R` recovers it, `D` discards it, and `Escape` leaves it for the next time."#,
+        text: r#"Oryx keeps a copy of a note while you type. After a crash, the next start asks whether you want the note back. `R` recovers it, `D` discards it, and `Escape` leaves it for the next time."#,
     },
     Tip {
         kind: TipKind::Tip,
@@ -365,7 +365,7 @@ pub const TIPS: &[Tip] = &[
     Tip {
         kind: TipKind::Tip,
         area: Area::Finding,
-        text: r#"Looking for the task markers you left behind? Switch the search to regular expressions with `Alt+R` and search for `TODO|FIXME`."#,
+        text: r#"Regular expression search supports `|` for or. Press `Alt+R` in the search bar and search for `TODO|FIXME` to find every TODO and every FIXME."#,
     },
     Tip {
         kind: TipKind::Tip,
@@ -535,17 +535,17 @@ pub const TIPS: &[Tip] = &[
     Tip {
         kind: TipKind::Tip,
         area: Area::Editing,
-        text: r#"Do you like to see line numbers? Turn them on in the settings (`Ctrl+,`), and Oryx numbers the lines of your code and text files in the left margin, and of a markdown file while you edit it. In the editor, the number of the line you are on reads brighter."#,
+        text: r#"To turn on line numbers, open the settings with `Ctrl+,`. The numbers show in the left margin of code and text files, and of a markdown file while you edit it. In the editor, the number of the current line is in a small box."#,
     },
     Tip {
         kind: TipKind::Tip,
         area: Area::Editing,
-        text: r#"Do you write to a length? Turn on the word count in the settings (`Ctrl+,`), and Oryx shows the words, characters, lines and reading time of your file in the bottom right corner. Select some text and it counts only that part."#,
+        text: r#"To turn on the word count, open the settings with `Ctrl+,`. A markdown or text file shows its words, characters, lines and reading time in the bottom right corner. A code file shows its lines and characters. Select some text to count only that part."#,
     },
     Tip {
         kind: TipKind::Tip,
         area: Area::Editing,
-        text: r#"Do you forget to save? Turn on autosave in the settings (`Ctrl+,`), and Oryx saves your file when you switch to another window, or once you have stopped typing for a while, from 5 seconds to 15 minutes, whichever you choose."#,
+        text: r#"To turn on autosave, open the settings with `Ctrl+,`. Oryx can save your file when you switch to another window, or after you stop typing, from 5 seconds to 15 minutes."#,
     },
     Tip {
         kind: TipKind::Note,
@@ -570,7 +570,7 @@ pub const TIPS: &[Tip] = &[
     Tip {
         kind: TipKind::Tip,
         area: Area::Looks,
-        text: r#"In the theme browser, each row has three small icons at its right: one opens the theme in the color editor, one duplicates it and one deletes it. A double click on the name renames it."#,
+        text: r#"In the theme browser, each row has small icons at its right: one opens the theme in the color editor and one duplicates it. A custom theme also has a cross that deletes it, and a double click on its name renames it."#,
     },
     Tip {
         kind: TipKind::Tip,
@@ -580,7 +580,7 @@ pub const TIPS: &[Tip] = &[
     Tip {
         kind: TipKind::Tip,
         area: Area::Looks,
-        text: r#"Would you like a theme of your own? Give one of the TOML theme files to an AI assistant, along with a picture whose colors you like, and ask for a matching theme."#,
+        text: r#"To make a custom theme, give one of the TOML theme files to an AI assistant, along with a picture whose colors you like, and ask for a matching theme."#,
     },
     Tip {
         kind: TipKind::Tip,
@@ -590,7 +590,7 @@ pub const TIPS: &[Tip] = &[
     Tip {
         kind: TipKind::Tip,
         area: Area::Looks,
-        text: r#"Does the page look too small or too large on your screen? The interface scale in the settings adjusts it from -50% to +100%, and Oryx remembers your choice."#,
+        text: r#"If the page looks too small or too large, change the interface scale in the settings, from -50% to +100%. Oryx remembers your choice."#,
     },
     Tip {
         kind: TipKind::Tip,
@@ -616,6 +616,11 @@ pub const TIPS: &[Tip] = &[
         kind: TipKind::Note,
         area: Area::Export,
         text: r#"The export settings are separate from your reading settings. You can read in a dark theme at a large size and export in a light one at a small size, without switching back and forth."#,
+    },
+    Tip {
+        kind: TipKind::Tip,
+        area: Area::Export,
+        text: r#"`black-and-white` is a theme made for printing. Choose it in the export settings (`Ctrl+Shift+P`)."#,
     },
     Tip {
         kind: TipKind::Tip,

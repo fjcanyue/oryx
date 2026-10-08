@@ -161,7 +161,7 @@ fn a_generated_arabic_epub_meets_the_open_budget() {
     let prefix_ms = t.elapsed().as_millis();
 
     let mut fonts = FontStore::new();
-    let mut media = MediaCache::new(PathBuf::from("."));
+    let mut media = MediaCache::offline(PathBuf::from("."));
     let t = std::time::Instant::now();
     let l = layout(
         &doc,

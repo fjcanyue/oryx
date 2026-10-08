@@ -1,0 +1,64 @@
+[surface]
+background = "#FFFFFF"
+foreground = "#000000"
+
+[headings]
+h1 = "#000000"
+h2 = "#000000"
+h3 = "#000000"
+h4 = "#000000"
+h5 = "#404040"
+h6 = "#595959"
+
+[text]
+body = "#000000"
+bold = "#000000"
+italic = "#000000"
+strike = "#767676"
+inline_code = "#000000"
+inline_code_bg = "#EEEEEE"
+link = "#000000"
+math = "#000000"
+
+[blocks]
+code_bg = "#FFFFFF"
+code_border = "#808080"
+quote_bg = "#FFFFFF"
+quote_bar = "#808080"
+table_border = "#808080"
+table_header_bg = "#E6E6E6"
+table_row_alt_bg = "#F5F5F5"
+rule = "#808080"
+frontmatter_bg = "#F5F5F5"
+frontmatter_fg = "#595959"
+
+[syntax]
+keyword = "#000000"
+string = "#404040"
+number = "#000000"
+function = "#000000"
+type = "#262626"
+comment = "#767676"
+operator = "#262626"
+variable = "#000000"
+punctuation = "#404040"
+
+[alerts]
+note = "#404040"
+tip = "#404040"
+important = "#000000"
+warning = "#000000"
+caution = "#000000"
+
+[ui]
+sidebar_bg = "#F5F5F5"
+sidebar_fg = "#262626"
+sidebar_dir = "#000000"
+scrollbar = "#BFBFBF"
+scrollbar_hover = "#808080"
+selection_bg = "#D0D0D0"
+overlay_bg = "#F5F5F5"
+overlay_fg = "#000000"
+overlay_highlight = "#D0D0D0"
+search_match_bg = "#00000026"
+search_current_bg = "#00000059"

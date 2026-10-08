@@ -307,7 +307,7 @@ fn windows_1251_decodes() {
     assert!(
         doc.source.contains("Привет, world."),
         "the 1251 body decodes: {:?}",
-        &doc.source
+        doc.source
     );
 }
 

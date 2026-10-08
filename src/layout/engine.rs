@@ -889,6 +889,28 @@ impl LayoutDoc {
         Some(entry.y)
     }
 
+    /// The model block standing at height `y`, from the block table:
+    /// the block of the last placed position whose top is at or above
+    /// `y`, the inverse of `approx_top(block, 0)`. The positions are in
+    /// the order of the page, not of the source: a footnote definition
+    /// stands at the end of the page wherever the source declares it,
+    /// and a block folded inside a closed details group has no
+    /// position. None above the first block, and before the pass
+    /// places one.
+    pub fn block_at(&self, y: f32) -> Option<usize> {
+        let top = |position: usize| {
+            let entry = &self.table.entries[position];
+            if entry.flags & ENTRY_CODE != 0 {
+                self.table.code_line_top(position, 0)
+            } else {
+                entry.y
+            }
+        };
+        let after = partition(self.table.entries.len(), |position| top(position) <= y);
+        let position = after.checked_sub(1)?;
+        Some(self.table.entries[position].block as usize)
+    }
+
     /// The line of code block `block` standing at height `y`, from the
     /// block table: the last of its `lines` whose top is at or above
     /// `y`, the inverse of `approx_top`. None before the pass places
@@ -1161,7 +1183,11 @@ impl ElementCounts {
 /// Settles the block just placed against the retention bound: outside
 /// it the geometry drops back to `counts`, inside it the materialized
 /// window extends over the position. `lines` is the retained line
-/// range, meaningful for code blocks.
+/// range, meaningful for code blocks. A window that holds no position
+/// yet follows the pass, so the next kept position joins it. When the
+/// scroll lies past the end of the page, as after the page got much
+/// shorter, the pass keeps no block: its empty window is what lets
+/// `window_to` fill the view once the scroll is clamped.
 fn settle_retention(
     out: &mut LayoutDoc,
     pass: &LayoutPass,
@@ -1177,6 +1203,16 @@ fn settle_retention(
     let retained = entry.y <= range.end && entry.bottom().max(entry.y) >= range.start;
     if !retained {
         counts.truncate(out);
+        match out.window.as_mut() {
+            Some(window) if window.marks.is_empty() => window.start = position + 1,
+            Some(_) => {}
+            None => {
+                out.window = Some(WindowState {
+                    start: position + 1,
+                    marks: std::collections::VecDeque::new(),
+                });
+            }
+        }
         return;
     }
     let marks = PosMarks::of(out, lines);
@@ -1286,6 +1322,27 @@ struct Assembly {
     seam: Option<PosMarks>,
 }
 
+impl LayoutDoc {
+    /// Whether `window_to` can slide the window. Not before the pass
+    /// has settled a first block. Not while elements stand beyond the
+    /// marks either: they belong to the pass's open code block, and
+    /// moving them would break the indices the pass holds, so the slide
+    /// waits for the block to close. A code or text file is one such
+    /// block, so its window slides only once the pass has ended.
+    pub fn slides(&self) -> bool {
+        let Some(window) = self.window.as_ref() else {
+            return false;
+        };
+        let ends = window.marks.back().cloned().unwrap_or_else(PosMarks::zero);
+        self.runs.len() <= ends.runs
+            && self.rects.len() <= ends.rects
+            && self.images.len() <= ends.images
+            && self.math_glyphs.len() <= ends.math
+            && self.table_rows.len() <= ends.rows
+            && self.code_lines.len() <= ends.code
+    }
+}
+
 /// Slides the materialized window to cover the band at `scroll`,
 /// evicting what fell behind and re-shaping missing blocks at their
 /// recorded positions, through the pool when one is given. With
@@ -1305,24 +1362,8 @@ pub fn window_to(
     viewport_h: f32,
     fill_band: bool,
 ) -> bool {
-    if lay.window.is_none() || lay.table.entries.is_empty() {
+    if !lay.slides() || lay.table.entries.is_empty() {
         return false;
-    }
-    // Elements beyond the marks belong to the pass's open code block;
-    // moving them would break the indices the pass holds, so the slide
-    // waits for the block to close.
-    {
-        let window = lay.window.as_ref().expect("windowed layout");
-        let ends = window.marks.back().cloned().unwrap_or_else(PosMarks::zero);
-        if lay.runs.len() > ends.runs
-            || lay.rects.len() > ends.rects
-            || lay.images.len() > ends.images
-            || lay.math_glyphs.len() > ends.math
-            || lay.table_rows.len() > ends.rows
-            || lay.code_lines.len() > ends.code
-        {
-            return false;
-        }
     }
     let range = retain_range(scroll, viewport_h);
     let fill = if fill_band {
@@ -6903,7 +6944,7 @@ mod tests {
 
     fn lay_of(doc: &Document) -> LayoutDoc {
         let mut fonts = FontStore::new();
-        let mut media = MediaCache::new(PathBuf::from("."));
+        let mut media = MediaCache::offline(PathBuf::from("."));
         layout(
             doc,
             &Theme::default_dark(),
@@ -7012,7 +7053,7 @@ mod tests {
         let doc =
             markdown::parse("Some ==highlighted with equal signs== here and more words to fill.\n");
         let mut fonts = FontStore::new();
-        let mut media = MediaCache::new(PathBuf::from("."));
+        let mut media = MediaCache::offline(PathBuf::from("."));
         let theme = Theme::default_dark();
         for justify in [false, true] {
             let cfg = ViewConfig {
@@ -7202,7 +7243,7 @@ mod tests {
         use crate::style::fonts::MATH_FAMILY;
         let doc = markdown::parse("# Title\n\nSome **bold** text.\n");
         let mut fonts = FontStore::new();
-        let mut media = MediaCache::new(PathBuf::from("."));
+        let mut media = MediaCache::offline(PathBuf::from("."));
         let cfg = ViewConfig {
             body_family: MATH_FAMILY.to_string(),
             ..ViewConfig::default()
@@ -7259,7 +7300,7 @@ mod tests {
             "short dashes"
         );
         let mut fonts = FontStore::new();
-        let mut media = MediaCache::new(PathBuf::from("."));
+        let mut media = MediaCache::offline(PathBuf::from("."));
         let cfg = ViewConfig {
             print: true,
             ..ViewConfig::default()

@@ -153,7 +153,9 @@ pub fn band_numbered(
 
     pixmap
         .data()
-        .chunks_exact(4)
+        .as_chunks::<4>()
+        .0
+        .iter()
         .map(|px| ((px[0] as u32) << 16) | ((px[1] as u32) << 8) | px[2] as u32)
         .collect()
 }
@@ -397,7 +399,7 @@ mod tests {
     fn corner_pixel(doc: &Document) -> u32 {
         let theme = Theme::default_dark();
         let mut fonts = FontStore::new();
-        let mut media = MediaCache::new(PathBuf::from("."));
+        let mut media = MediaCache::offline(PathBuf::from("."));
         let lay = layout(
             doc,
             &theme,
@@ -414,7 +416,7 @@ mod tests {
         use crate::paint::scroll::{frame_offset, BandCache};
         let theme = Theme::default_dark();
         let mut fonts = FontStore::new();
-        let mut media = MediaCache::new(PathBuf::from("."));
+        let mut media = MediaCache::offline(PathBuf::from("."));
         let text: String = (0..40).map(|i| format!("let value_{i} = {i};\n")).collect();
         let doc = load::code_document(Some("rust"), &text);
         let lay = layout(

@@ -1,6 +1,7 @@
 //! Scroll clamping and the band cache. Scrolling inside the band is a
 //! memcpy slice; the band repaints recentered only near its edges.
 
+use std::ops::Range;
 use std::time::Duration;
 
 use crate::doc::images::MediaCache;
@@ -17,14 +18,13 @@ pub fn clamp(y: f32, doc_height: f32, viewport_h: f32) -> f32 {
 /// of the block there, and inside a code block whose lines are the
 /// source's own, the start of the line there. A code or text file is
 /// one such block, so its place is a line, not the top of the file.
+/// The block is looked up on the page, not in the order of the source:
+/// a footnote definition stands at the end of the page, and the blocks
+/// of a closed details group are not on it.
 pub fn top_offset(lay: &LayoutDoc, doc: &Document, scroll_y: f32) -> usize {
-    let mut at = None;
-    for index in 0..doc.blocks.len() {
-        match lay.approx_top(index, 0) {
-            Some(top) if top <= scroll_y + 1.0 => at = Some(index),
-            _ => break,
-        }
-    }
+    let at = lay
+        .block_at(scroll_y + 1.0)
+        .filter(|&index| index < doc.blocks.len());
     let Some(index) = at else {
         return 0;
     };
@@ -42,8 +42,8 @@ pub fn top_offset(lay: &LayoutDoc, doc: &Document, scroll_y: f32) -> usize {
 
 /// Where a source offset stands on the page, the inverse of
 /// `top_offset`: the top of its block, or of its line inside a code
-/// block whose lines are the source's own. None before the pass places
-/// the block.
+/// block whose lines answer for a source offset. None before the pass
+/// places the block.
 pub fn offset_top(lay: &LayoutDoc, doc: &Document, offset: usize) -> Option<f32> {
     let block = doc.block_at_offset(offset)?;
     let line = match &doc.blocks[block].kind {
@@ -53,6 +53,183 @@ pub fn offset_top(lay: &LayoutDoc, doc: &Document, offset: usize) -> Option<f32>
         _ => 0,
     };
     lay.approx_top(block, line)
+}
+
+/// The top and the bottom of what `offset_top` answers for: the block
+/// of a source offset, or its line inside a code block whose lines
+/// answer for a source offset. None before the pass places the block.
+pub fn offset_span(lay: &LayoutDoc, doc: &Document, offset: usize) -> Option<Range<f32>> {
+    let block = doc.block_at_offset(offset)?;
+    if let BlockKind::CodeBlock { lines, .. } = &doc.blocks[block].kind {
+        if let Some(row) = lines.row_at(&doc.source, offset) {
+            let line = row.min(lines.len().saturating_sub(1));
+            // The lines tile the block, so a line ends where the next
+            // one starts.
+            let top = lay.approx_top(block, line)?;
+            let bottom = lay.approx_top(block, line + 1)?;
+            return Some(top..bottom.max(top));
+        }
+    }
+    lay.block_span(block)
+}
+
+/// What stands at the top of a view, kept so that a new layout of the
+/// same text shows it there again: after a zoom step, a new width or a
+/// new font, the page above the view has another height, and the
+/// scroll as a distance in pixels would show other lines.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TopPlace {
+    /// The source offset `top_offset` answers for the view: a block,
+    /// or a line of a code or text file.
+    pub offset: usize,
+    /// How far under the top of that block or line the top edge of the
+    /// view stood.
+    above: f32,
+    /// The height of that block or line in the layout the place was
+    /// taken from.
+    height: f32,
+    /// The heights are those of the whole block, since its line did
+    /// not hold the top edge.
+    whole: bool,
+}
+
+impl TopPlace {
+    /// The place at the top of the view at `scroll_y`. None at the top
+    /// of the file and inside the margin above the first block, where
+    /// the distance itself is the place, and before the pass has placed
+    /// a block.
+    pub fn of(lay: &LayoutDoc, doc: &Document, scroll_y: f32) -> Option<TopPlace> {
+        let offset = top_offset(lay, doc, scroll_y);
+        let block = doc.block_at_offset(offset)?;
+        let holds = |span: &Range<f32>| span.start <= scroll_y + 1.0 && scroll_y <= span.end;
+        let (span, whole) = match offset_span(lay, doc, offset).filter(holds) {
+            Some(span) => (span, false),
+            None => (lay.block_span(block)?, true),
+        };
+        if scroll_y + 1.0 < span.start {
+            return None;
+        }
+        Some(TopPlace {
+            offset,
+            above: (scroll_y - span.start).max(0.0),
+            height: span.end - span.start,
+            whole,
+        })
+    }
+
+    /// The scroll that shows the place again on a layout of the same
+    /// text: the same share of the block or the line stands above the
+    /// top edge. A layout that left the block as it was answers the
+    /// scroll the place was taken at. None before the pass places the
+    /// block.
+    pub fn scroll(&self, lay: &LayoutDoc, doc: &Document) -> Option<f32> {
+        let span = if self.whole {
+            lay.block_span(doc.block_at_offset(self.offset)?)?
+        } else {
+            offset_span(lay, doc, self.offset)?
+        };
+        let height = span.end - span.start;
+        let above = if height == self.height || self.height <= 0.0 {
+            self.above
+        } else {
+            self.above * height / self.height
+        };
+        Some(span.start + above)
+    }
+}
+
+/// The line of its block an offset stands on, counted as the editor
+/// counts rows: a line's break belongs to the line, and past the final
+/// break stands the row the caret opens there. A code block's line
+/// table answers by a binary search, where a count of the breaks from
+/// the block's start grew with the file on every call; a body with text
+/// of its own whose source lines are not recorded still counts them.
+pub fn source_row(doc: &Document, block: usize, offset: usize) -> usize {
+    let Some(block) = doc.blocks.get(block) else {
+        return 0;
+    };
+    if let BlockKind::CodeBlock { lines, .. } = &block.kind {
+        if let Some(row) = lines.row_at(&doc.source, offset) {
+            return row;
+        }
+    }
+    let start = block.range.start;
+    let end = offset.min(doc.source.len()).max(start);
+    doc.source[start..end].matches('\n').count()
+}
+
+/// How far under the top of the view a landing stands its block, when
+/// `below` was asked for a line inside it that draws no row of its own,
+/// an image's or a rule's. A block that would run past the bottom edge
+/// is lifted until it shows whole, and one taller than the view stands
+/// at the top edge, so the reader sees where it starts. A line of a
+/// code block whose lines answer for a source offset is placed itself,
+/// not its block, and keeps `below`.
+pub fn fitted_below(
+    lay: &LayoutDoc,
+    doc: &Document,
+    offset: usize,
+    below: f32,
+    view_h: f32,
+) -> f32 {
+    let Some(block) = doc.block_at_offset(offset) else {
+        return below;
+    };
+    if matches!(&doc.blocks[block].kind, BlockKind::CodeBlock { lines, .. } if !lines.is_empty() && lines.has_rows())
+    {
+        return below;
+    }
+    match lay.block_span(block) {
+        Some(span) => fit(below, span.end - span.start, view_h),
+        None => below,
+    }
+}
+
+/// Where the row of the source line holding `offset` stands before the
+/// page has drawn it: its block's top plus the line's share of the
+/// block's height, counted in bytes. Only for a line with text in a
+/// block drawn as rows of text, whose exact row the frame finds once
+/// the slide draws it (`caret::line_top`); None for a blank line, for
+/// the other blocks, and before the pass places the block.
+pub fn line_estimate(lay: &LayoutDoc, doc: &Document, offset: usize) -> Option<f32> {
+    let source = &doc.source;
+    // A remembered offset may fall inside a character after an edit.
+    let mut offset = offset.min(source.len());
+    while !source.is_char_boundary(offset) {
+        offset -= 1;
+    }
+    let start = source[..offset].rfind('\n').map_or(0, |at| at + 1);
+    let end = source[offset..]
+        .find('\n')
+        .map_or(source.len(), |at| offset + at);
+    if source[start..end].trim().is_empty() {
+        return None;
+    }
+    let index = doc.block_at_offset(end)?;
+    let block = &doc.blocks[index];
+    let rows = matches!(
+        block.kind,
+        BlockKind::Heading { .. }
+            | BlockKind::Paragraph { .. }
+            | BlockKind::ListItem { .. }
+            | BlockKind::Table { .. }
+            | BlockKind::FootnoteDef { .. }
+            | BlockKind::Summary { .. }
+    );
+    if !rows {
+        return None;
+    }
+    let span = lay.block_span(index)?;
+    let share = start.saturating_sub(block.range.start) as f32 / block.range.len().max(1) as f32;
+    Some(span.start + share.min(1.0) * (span.end - span.start))
+}
+
+/// A top the edge already cut keeps its height.
+fn fit(below: f32, block_h: f32, view_h: f32) -> f32 {
+    if below <= 0.0 {
+        return below;
+    }
+    below.min((view_h - block_h).max(0.0))
 }
 
 /// The offset a frame paints the page at: the scroll position floored
@@ -138,6 +315,10 @@ pub struct BandCache {
     pub width: u32,
     pub height: u32,
     pub doc_height: f32,
+    /// Painted while the layout could not slide its window: the pass
+    /// was inside a code block, so lines of the band may be missing,
+    /// and the line numbers under the top of the block are.
+    pub partial: bool,
 }
 
 impl BandCache {
@@ -172,6 +353,7 @@ impl BandCache {
             width,
             height,
             doc_height,
+            partial: !layout.slides(),
         }
     }
 
@@ -185,6 +367,14 @@ impl BandCache {
         let margin = viewport_h * 0.5;
         (scroll_y - self.y_top < margin && self.y_top > 0.0)
             || (bottom - view_bottom < margin && bottom < self.doc_height)
+    }
+
+    /// True when the band was painted while the layout could not slide
+    /// its window, and the layout can slide it now. The layout then
+    /// has the lines and the line numbers that the band lacks, so the
+    /// band is painted again, though the view did not move.
+    pub fn outdated(&self, layout: &LayoutDoc) -> bool {
+        self.partial && layout.slides()
     }
 
     /// The viewport slice at `scroll_y`, without repainting.
@@ -206,7 +396,7 @@ mod tests {
 
     fn lay_of(doc: &Document) -> LayoutDoc {
         let mut fonts = FontStore::new();
-        let mut media = MediaCache::new(PathBuf::from("."));
+        let mut media = MediaCache::offline(PathBuf::from("."));
         layout(
             doc,
             &Theme::default_dark(),
@@ -221,6 +411,188 @@ mod tests {
         (1..=count)
             .map(|i| format!("let line_{i} = {i};\n"))
             .collect()
+    }
+
+    fn lay_at(doc: &Document, zoom: f32, width: f32) -> LayoutDoc {
+        let mut fonts = FontStore::new();
+        let mut media = MediaCache::offline(PathBuf::from("."));
+        let cfg = ViewConfig {
+            zoom,
+            ..ViewConfig::default()
+        };
+        layout(
+            doc,
+            &Theme::default_dark(),
+            &mut fonts,
+            &mut media,
+            &cfg,
+            width,
+        )
+    }
+
+    /// Paragraphs of several rows, each naming itself.
+    fn paragraphs(count: usize) -> String {
+        (1..=count)
+            .map(|i| {
+                format!(
+                    "Paragraph {i}: the reader follows this text across the page, and each \
+                     paragraph is long enough to take several rows at the width of the \
+                     window, so a change of size moves the breaks of its lines.\n\n"
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_block_at_the_top_of_the_view_stays_there_at_another_text_size() {
+        let source = paragraphs(120);
+        let doc = crate::doc::markdown::parse(source.as_str());
+        let start = source.find("Paragraph 90:").unwrap();
+        let before = lay_at(&doc, 1.0, 700.0);
+        let span = offset_span(&before, &doc, start).expect("the paragraph is placed");
+        // The top edge of the view cuts the paragraph in its middle.
+        let scroll = span.start + (span.end - span.start) / 2.0;
+        let place = TopPlace::of(&before, &doc, scroll).expect("a block stands at the top");
+        assert_eq!(place.offset, start);
+        for (zoom, width) in [(1.6, 700.0), (0.7, 700.0), (1.0, 450.0)] {
+            let after = lay_at(&doc, zoom, width);
+            let kept = place.scroll(&after, &doc).expect("the paragraph is placed");
+            assert_eq!(
+                top_offset(&after, &doc, kept),
+                start,
+                "the same paragraph at the top, zoom {zoom}, width {width}"
+            );
+            let span = offset_span(&after, &doc, start).unwrap();
+            let share = (kept - span.start) / (span.end - span.start);
+            assert!(
+                (share - 0.5).abs() < 0.01,
+                "the same share of it above the edge: {share}"
+            );
+        }
+        // What the page did before: the distance times the zoom ratio.
+        let after = lay_at(&doc, 1.6, 700.0);
+        assert_ne!(
+            top_offset(&after, &doc, scroll * 1.6),
+            start,
+            "the scaled distance shows another paragraph"
+        );
+    }
+
+    #[test]
+    fn the_line_at_the_top_of_the_view_stays_there_in_a_file_of_lines() {
+        // Every third line is long enough to wrap at the larger size.
+        let source: String = (1..=600)
+            .map(|i| {
+                let tail = if i % 3 == 0 {
+                    "value ".repeat(14)
+                } else {
+                    String::new()
+                };
+                format!("let line_{i} = {i}; // {tail}\n")
+            })
+            .collect();
+        let doc = load::code_document(Some("rust"), &source);
+        let start = source.find("let line_500 ").unwrap();
+        let before = lay_at(&doc, 1.0, 1000.0);
+        let top = offset_top(&before, &doc, start).unwrap();
+        let place = TopPlace::of(&before, &doc, top + 3.0).expect("a line stands at the top");
+        assert_eq!(place.offset, start);
+        let after = lay_at(&doc, 1.6, 1000.0);
+        let kept = place.scroll(&after, &doc).expect("the line is placed");
+        assert_eq!(top_offset(&after, &doc, kept), start, "the same line");
+        assert_ne!(
+            top_offset(&after, &doc, (top + 3.0) * 1.6),
+            start,
+            "the scaled distance shows another line"
+        );
+    }
+
+    #[test]
+    fn a_layout_that_did_not_change_brings_the_same_view_back() {
+        let source = paragraphs(60);
+        let doc = crate::doc::markdown::parse(source.as_str());
+        let lay = lay_at(&doc, 1.0, 700.0);
+        for scroll in [120.0_f32, 1234.5, 3000.25, lay.height - 600.0] {
+            let place = TopPlace::of(&lay, &doc, scroll).expect("a block stands at the top");
+            assert_eq!(place.scroll(&lay, &doc), Some(scroll));
+        }
+    }
+
+    #[test]
+    fn a_view_at_the_top_of_the_file_names_no_place() {
+        let source = paragraphs(10);
+        let doc = crate::doc::markdown::parse(source.as_str());
+        let lay = lay_at(&doc, 1.0, 700.0);
+        assert_eq!(
+            TopPlace::of(&lay, &doc, 0.0),
+            None,
+            "the view stays at the top"
+        );
+    }
+
+    /// The top of the view at paragraph 60 of a page whose first
+    /// paragraph is followed by `between`: the place found there, and
+    /// brought back at another text size.
+    fn top_of_view_under(between: &str) {
+        let source = format!(
+            "Paragraph 0 cites a note[^1].\n\n{between}{}",
+            paragraphs(80)
+        );
+        let doc = crate::doc::markdown::parse(source.as_str());
+        let start = source.find("Paragraph 60:").unwrap();
+        let lay = lay_at(&doc, 1.0, 700.0);
+        let top = offset_top(&lay, &doc, start).expect("the paragraph is placed");
+        assert_eq!(
+            top_offset(&lay, &doc, top + 3.0),
+            start,
+            "the paragraph at the top of the view"
+        );
+        let place = TopPlace::of(&lay, &doc, top + 3.0).expect("a block stands at the top");
+        assert_eq!(place.offset, start);
+        let after = lay_at(&doc, 1.6, 700.0);
+        let kept = place.scroll(&after, &doc).expect("the paragraph is placed");
+        assert_eq!(
+            top_offset(&after, &doc, kept),
+            start,
+            "the same paragraph at another text size"
+        );
+    }
+
+    #[test]
+    fn the_top_of_the_view_is_found_under_a_footnote_definition() {
+        // The definition is written under its paragraph, and the page
+        // places it at its end, after the last paragraph.
+        top_of_view_under("[^1]: The note.\n\n");
+    }
+
+    #[test]
+    fn the_top_of_the_view_is_found_under_a_closed_details_section() {
+        // The blocks of a closed section have no place on the page.
+        top_of_view_under("<details>\n<summary>More</summary>\n\nHidden text.\n\n</details>\n\n");
+    }
+
+    #[test]
+    fn a_view_on_the_notes_at_the_end_of_the_page_names_the_definition() {
+        let source = format!(
+            "Paragraph 0 cites a note[^1].\n\n[^1]: The note.\n\n{}",
+            paragraphs(80)
+        );
+        let doc = crate::doc::markdown::parse(source.as_str());
+        let note = doc
+            .blocks
+            .iter()
+            .find(|block| matches!(block.kind, BlockKind::FootnoteDef { .. }))
+            .expect("the definition is a block")
+            .range
+            .start;
+        let last = source.find("Paragraph 80:").unwrap();
+        let lay = lay_at(&doc, 1.0, 700.0);
+        let top = offset_top(&lay, &doc, note).expect("the note is placed");
+        assert!(
+            top > offset_top(&lay, &doc, last).unwrap(),
+            "the note stands under the last paragraph"
+        );
+        assert_eq!(top_offset(&lay, &doc, top), note);
     }
 
     #[test]
@@ -297,6 +669,205 @@ mod tests {
             top_offset(&lay, &doc, offset_top(&lay, &doc, end).unwrap()),
             end
         );
+    }
+
+    #[test]
+    fn a_landing_block_shows_whole_or_from_its_top() {
+        let view_h = 600.0;
+        assert_eq!(
+            fit(290.0, 40.0, view_h),
+            290.0,
+            "a short block keeps the middle"
+        );
+        assert_eq!(
+            fit(290.0, 450.0, view_h),
+            150.0,
+            "a block that fits is lifted until its bottom shows"
+        );
+        assert_eq!(
+            fit(290.0, 2000.0, view_h),
+            0.0,
+            "a taller one stands at the top"
+        );
+        assert_eq!(fit(0.0, 2000.0, view_h), 0.0);
+        assert_eq!(
+            fit(-12.0, 450.0, view_h),
+            -12.0,
+            "a top the edge cut keeps its cut"
+        );
+    }
+
+    #[test]
+    fn a_tall_block_stands_from_its_top_and_a_code_line_by_itself() {
+        let mut source = String::from("Before the table.\n\n| a | b |\n|---|---|\n");
+        for i in 0..80 {
+            source.push_str(&format!("| row {i} | cell {i} |\n"));
+        }
+        source.push_str("\nA short paragraph.\n\n```rust\n");
+        source.push_str(&code_lines(200));
+        source.push_str("```\n");
+        let doc = crate::doc::markdown::parse(source.as_str());
+        let lay = lay_of(&doc);
+        let view_h = 600.0;
+        let row = source.find("| row 40 ").unwrap();
+        assert_eq!(fitted_below(&lay, &doc, row, 290.0, view_h), 0.0);
+        let short = source.find("A short").unwrap();
+        assert_eq!(fitted_below(&lay, &doc, short, 290.0, view_h), 290.0);
+        let code = source.find("let line_120 ").unwrap();
+        assert_eq!(
+            fitted_below(&lay, &doc, code, 290.0, view_h),
+            290.0,
+            "a code line stands itself in the middle, not its block"
+        );
+    }
+
+    #[test]
+    fn a_line_not_drawn_yet_stands_near_its_row() {
+        let mut source = String::from("Before the table.\n\n| a | b |\n|---|---|\n");
+        for i in 0..80 {
+            source.push_str(&format!("| row {i} | cell {i} |\n"));
+        }
+        source.push_str("\n---\n\n```rust\n");
+        source.push_str(&code_lines(20));
+        source.push_str("```\n");
+        let doc = crate::doc::markdown::parse(source.as_str());
+        let lay = lay_of(&doc);
+        for row in [5, 40, 74] {
+            let at = source.find(&format!("| row {row} ")).unwrap();
+            let exact = crate::edit::caret::line_top(&lay, &doc, at).unwrap();
+            let guess = line_estimate(&lay, &doc, at).unwrap();
+            assert!(
+                (guess - exact).abs() < 90.0,
+                "row {row}: the guess {guess} stands within two rows of {exact}"
+            );
+        }
+        assert_eq!(
+            line_estimate(&lay, &doc, source.find("---\n\n```").unwrap()),
+            None
+        );
+        let blank = source.find("\n\n---").unwrap() + 1;
+        assert_eq!(
+            line_estimate(&lay, &doc, blank),
+            None,
+            "a blank line draws no row"
+        );
+        assert_eq!(
+            line_estimate(&lay, &doc, source.find("let line_5 ").unwrap()),
+            None
+        );
+    }
+
+    #[test]
+    fn a_line_of_a_code_body_of_its_own_is_placed_by_itself() {
+        let shapes = [
+            ("1. Run:\n\n   ```sh\n", "   ", "   ```\n\n"),
+            ("Run:\n\n", "    ", "\n"),
+            ("> Run:\n>\n> ```sh\n", "> ", "> ```\n\n"),
+        ];
+        for (open, indent, close) in shapes {
+            let mut source = format!("Before the code.\n\n{open}");
+            for i in 0..150 {
+                source.push_str(&format!("{indent}echo step {i:03}\n"));
+            }
+            source.push_str(close);
+            source.push_str("After.\n");
+            let doc = crate::doc::markdown::parse(source.as_str());
+            let lay = lay_of(&doc);
+            let at = source.find("echo step 100").unwrap();
+            let block = doc.block_at_offset(at).unwrap();
+            assert!(lay.approx_top(block, 100) > lay.approx_top(block, 0));
+            assert_eq!(
+                offset_top(&lay, &doc, at),
+                lay.approx_top(block, 100),
+                "{open:?}: the line answers its own row"
+            );
+            assert_eq!(
+                fitted_below(&lay, &doc, at, 290.0, 600.0),
+                290.0,
+                "{open:?}: and stands itself in the middle"
+            );
+        }
+    }
+
+    #[test]
+    fn a_code_body_with_no_place_in_the_source_stands_from_its_top() {
+        let mut source = String::from("Before the code.\n\n<pre>\n");
+        for i in 0..150 {
+            source.push_str(&format!("echo step {i:03}\n"));
+        }
+        source.push_str("</pre>\n\nAfter.\n");
+        let doc = crate::doc::markdown::parse(source.as_str());
+        let lay = lay_of(&doc);
+        // The lines of a pre block are a copy with no place in the source.
+        let block = doc
+            .blocks
+            .iter()
+            .position(|block| {
+                matches!(&block.kind, BlockKind::CodeBlock { lines, .. } if !lines.has_rows())
+            })
+            .expect("a code block whose lines do not answer");
+        let at = doc.blocks[block].range.start;
+        assert_eq!(doc.block_at_offset(at), Some(block));
+        assert_eq!(offset_top(&lay, &doc, at), lay.approx_top(block, 0));
+        assert_eq!(
+            fitted_below(&lay, &doc, at, 290.0, 600.0),
+            0.0,
+            "the block is taller than the view and no line of it answers"
+        );
+    }
+
+    #[test]
+    fn an_offset_inside_a_character_answers_the_estimate_of_its_line() {
+        let source = "Before.\n\néé and words\n\nAfter.\n";
+        let doc = crate::doc::markdown::parse(source);
+        let lay = lay_of(&doc);
+        let line = source.find("éé").unwrap();
+        let whole = line_estimate(&lay, &doc, line);
+        assert!(whole.is_some(), "the line has a row");
+        assert_eq!(
+            line_estimate(&lay, &doc, line + 1),
+            whole,
+            "inside the first é"
+        );
+        assert_eq!(
+            line_estimate(&lay, &doc, line + 3),
+            whole,
+            "inside the second é"
+        );
+    }
+
+    #[test]
+    fn a_line_counts_by_the_table_as_by_the_breaks() {
+        let sources = [
+            code_lines(30) + "\n\nlast",
+            code_lines(12),
+            "\n\n\n".to_string(),
+            "one line".to_string(),
+        ];
+        for source in &sources {
+            for doc in [
+                load::code_document(Some("rust"), source),
+                load::text_document(source),
+            ] {
+                if let Some(BlockKind::CodeBlock { lines, .. }) =
+                    doc.blocks.first().map(|b| &b.kind)
+                {
+                    assert!(lines.row_at(&doc.source, 0).is_some(), "the table answers");
+                }
+                for offset in 0..=source.len() {
+                    let Some(block) = doc.block_at_offset(offset) else {
+                        continue;
+                    };
+                    let start = doc.blocks[block].range.start;
+                    let counted = source[start..offset.max(start)].matches('\n').count();
+                    assert_eq!(
+                        source_row(&doc, block, offset),
+                        counted,
+                        "offset {offset} of {source:?}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]
@@ -388,6 +959,7 @@ mod tests {
             width: 1,
             height,
             doc_height,
+            partial: false,
         }
     }
 
@@ -426,6 +998,7 @@ mod tests {
             width,
             height: rows,
             doc_height: 1000.0,
+            partial: false,
         };
         let view = b.view(103.0, 2);
         assert_eq!(view.len(), 8);

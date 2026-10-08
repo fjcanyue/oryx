@@ -632,7 +632,7 @@ impl Builder {
             let (width, height) = (img.placement.width, img.placement.height);
             let mut rgb = Vec::with_capacity(img.data.len() / 4 * 3);
             let mut alpha = Vec::with_capacity(img.data.len() / 4);
-            for pixel in img.data.chunks_exact(4) {
+            for pixel in img.data.as_chunks::<4>().0 {
                 rgb.extend_from_slice(&pixel[..3]);
                 alpha.push(pixel[3]);
             }
@@ -779,7 +779,7 @@ impl Builder {
         let pixels = media.scaled(src, width, height)?.to_vec();
         let mut rgb = Vec::with_capacity(pixels.len() / 4 * 3);
         let mut alpha = Vec::with_capacity(pixels.len() / 4);
-        for pixel in pixels.chunks_exact(4) {
+        for pixel in pixels.as_chunks::<4>().0 {
             rgb.extend_from_slice(&pixel[..3]);
             alpha.push(pixel[3]);
         }

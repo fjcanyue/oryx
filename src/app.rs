@@ -301,9 +301,10 @@ pub fn run(
         last_pass: Duration::ZERO,
         settle_at: None,
         pass_spent: Duration::ZERO,
-        pending_scroll: None,
+        kept_view: None,
         pending_anchor: None,
         pending_offset: None,
+        landing_settle: None,
         history: History::default(),
         pending_step: None,
         search_origin: None,
@@ -389,6 +390,7 @@ pub fn run(
         cr: opened_cr,
         bom: opened_bom,
         caret_snap: false,
+        caret_seat: None,
         blink_visible: true,
         ime_on: false,
         blink_flip: Instant::now(),
@@ -634,11 +636,330 @@ fn window_rects(
 struct Place {
     offset: usize,
     below: f32,
+    /// The offset names a line to show, a caret's or a jump's, rather
+    /// than what stood at the top of the page: on a rendered page the
+    /// line's own row stands at `below`, not its block's top (`line_landing`).
+    /// Never set for a place the page itself recorded, which comes back
+    /// pixel for pixel through its block.
+    line: bool,
 }
 
 impl Place {
     fn top(offset: usize) -> Place {
-        Place { offset, below: 0.0 }
+        Place {
+            offset,
+            below: 0.0,
+            line: false,
+        }
+    }
+
+    fn by_line(self, line: bool) -> Place {
+        Place { line, ..self }
+    }
+
+    /// A jump to a line: the line stands in the middle of the view,
+    /// with as much of the file above it as below. The scroll's clamp
+    /// keeps a line near the file's start or end as close to the
+    /// middle as the file allows.
+    fn centered(offset: usize, view_h: f32, row_h: f32) -> Place {
+        Place {
+            offset,
+            below: ((view_h - row_h) / 2.0).max(0.0),
+            line: false,
+        }
+    }
+
+    /// A step of the history: the line comes back at the height it
+    /// stood at, kept inside the view when the window shrank since.
+    /// While editing the caret's row comes back whole; while reading, a
+    /// line the top edge cut keeps its cut, so the view is the one left.
+    /// In the editor, a caret the reader had scrolled away from (`away`)
+    /// comes back at its true distance from the view, outside it again.
+    /// On the page that distance measures nothing, since it counts rows
+    /// of the editor. The page cannot bring that view back, so the step
+    /// is a jump to the line of the caret, which stands in the middle. A
+    /// caret row that an edge only cut shows whole at that edge.
+    fn returned(
+        offset: usize,
+        below: f32,
+        away: bool,
+        view_h: f32,
+        row_h: f32,
+        editing: bool,
+    ) -> Place {
+        if away && editing {
+            return Place {
+                offset,
+                below,
+                line: false,
+            };
+        }
+        let outside = below + row_h <= 0.0 || below >= view_h;
+        if away && outside {
+            return Place::centered(offset, view_h, row_h);
+        }
+        let floor = if editing || away { 0.0 } else { f32::MIN };
+        Place {
+            offset,
+            below: below.min((view_h - row_h).max(0.0)).max(floor),
+            line: false,
+        }
+    }
+}
+
+/// The place a landing still waiting for the layout will show, which is
+/// where the reader stands for the history. While a landing waits the
+/// view has not moved, so a measure of the screen would file the place
+/// left a second time, or the distance of a caret the view has not
+/// followed yet. In the editor only a landing on the caret counts, since
+/// the caret may have moved since. While reading, the landing of a page
+/// is applied after the landing of a row, so it is the one that stays.
+fn waiting_place(row: Option<Place>, page: Option<Place>, caret: Option<usize>) -> Option<Place> {
+    match caret {
+        Some(caret) => row.filter(|place| place.offset == caret),
+        None => page.or(row),
+    }
+}
+
+/// Whether a new layout pass with no kept place keeps the scroll of the
+/// view as a distance, to bring it back once the layout reaches that
+/// height again. Not while a landing waits: the landing says where the
+/// view goes, and on a large file the kept distance would be applied
+/// after it. After a crossing between the page and the editor the kept
+/// distance would even be the other document's.
+fn keeps_scroll(scroll_y: f32, landing_waits: bool) -> bool {
+    scroll_y > 0.0 && !landing_waits
+}
+
+/// What a new layout pass keeps of the view, brought back once the
+/// layout reaches it. A new size or a new width changes the height of
+/// the page above the view, so a distance in pixels would show other
+/// lines: the pass keeps a place in the text where it can.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Kept {
+    /// The scroll as a distance from the top of the page, when no
+    /// layout was there to read a place from: a reload.
+    Distance(f32),
+    /// In the editor, how far under the top of the view the caret's row
+    /// stood. The caret is where the reader works, so its row keeps its
+    /// height on the screen.
+    Caret(f32),
+    /// The block or the line at the top of the view.
+    Top(scroll::TopPlace),
+}
+
+impl Kept {
+    /// What the view keeps. `caret_row` is the top of the caret's row
+    /// while editing. A caret in view is kept at its height. A caret
+    /// the reader scrolled away from, or whose row an edge cuts, is
+    /// left where it is: the view is kept by its top, as on the page.
+    /// None at the top of the file, where the view stays.
+    fn of(
+        caret_row: Option<f32>,
+        row_h: f32,
+        scroll_y: f32,
+        view_h: f32,
+        top: impl FnOnce() -> Option<scroll::TopPlace>,
+    ) -> Option<Kept> {
+        let in_view = caret_row
+            .map(|row_y| filed_height(row_y, row_h, scroll_y, view_h))
+            .filter(|(_, away)| !away);
+        match in_view {
+            Some((below, _)) => Some(Kept::Caret(below)),
+            None => top().map(Kept::Top),
+        }
+    }
+
+    /// A zoom step made while the kept view still waits for the layout.
+    /// A distance grows with the text. A place holds, so several steps
+    /// in a row return to the place of the first one.
+    fn zoomed(self, ratio: f32) -> Kept {
+        match self {
+            Kept::Distance(y) => Kept::Distance(y * ratio),
+            place => place,
+        }
+    }
+}
+
+/// The height a kept caret row comes back at: where it stood, moved up
+/// when its rows grew taller and the bottom edge would cut it.
+fn kept_caret_height(below: f32, view_h: f32, row_h: f32) -> f32 {
+    below.min((view_h - row_h).max(0.0)).max(0.0)
+}
+
+/// Whether the first row of a caret's line stands whole in the view.
+fn caret_line_in_view(row_y: f32, row_h: f32, scroll_y: f32, view_h: f32) -> bool {
+    row_y >= scroll_y && row_y + row_h <= scroll_y + view_h
+}
+
+/// The height the line of a far caret is seated at: the top edge of the
+/// view when the line is above it, else the bottom edge, as the view
+/// follows a caret that walks out of it.
+fn caret_line_edge(row_y: f32, row_h: f32, scroll_y: f32, view_h: f32) -> f32 {
+    if row_y < scroll_y {
+        0.0
+    } else {
+        (view_h - row_h).max(0.0)
+    }
+}
+
+/// Whether the next frame still owes the view to the caret after a
+/// caret key showed it. `settled` says that the row of the caret
+/// answered, or that its line is seated with nothing left to wait for.
+/// What an edit owed stays owed: until the frame lays the rows out
+/// again, the box of the caret is the first row of its line, so a key
+/// read before that frame cannot bring the caret's own row into view.
+fn snap_still_owed(owed: bool, settled: bool) -> bool {
+    owed || !settled
+}
+
+/// The view as the seat of a far caret's line left it. While the view
+/// stays there, the caret's own row is still owed. A view that moved
+/// since, by the wheel or the scrollbar, owes the caret nothing.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct CaretSeat {
+    /// The offset of the caret when its line was seated.
+    offset: usize,
+    /// The scroll that the seat left.
+    scroll: f32,
+}
+
+/// What a frame does for a caret that is still owed its view.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum CaretDue {
+    /// The layout holds the row of the caret: the view snaps to it.
+    Snap,
+    /// No row to read and no seat made yet: the line is seated with the
+    /// block table.
+    Seat,
+    /// The line is seated and the layout pass still runs: the row
+    /// waits, and the view stays where it is.
+    Wait,
+    /// Nothing more is owed.
+    Drop,
+}
+
+/// What the frame owes a caret at `offset`. `has_box` says that the
+/// layout holds its row, `seat` is the seat made for its line, and
+/// `pending` says that the layout pass still runs. A line is seated
+/// once: while the pass of a file of lines runs, the layout cannot
+/// take the rows of a far line, and a seat made again at each frame
+/// would hold the view against the wheel.
+fn caret_due(
+    has_box: bool,
+    seat: Option<CaretSeat>,
+    offset: usize,
+    scroll_y: f32,
+    pending: bool,
+) -> CaretDue {
+    match seat.filter(|seat| seat.offset == offset) {
+        Some(seat) if seat.scroll != scroll_y => CaretDue::Drop,
+        Some(_) if has_box => CaretDue::Snap,
+        Some(_) if pending => CaretDue::Wait,
+        Some(_) => CaretDue::Drop,
+        None if has_box => CaretDue::Snap,
+        None => CaretDue::Seat,
+    }
+}
+
+/// The caret the editor takes when it opens while a landing waits: the
+/// remembered offset when it lies on the line the landing shows, which
+/// is a jump with its column, else the offset of the landing.
+fn waiting_caret(source: &str, place: Place, remembered: Option<usize>) -> usize {
+    let Some(mark) = remembered else {
+        return place.offset;
+    };
+    let (low, high) = (mark.min(place.offset), mark.max(place.offset));
+    // The same line when no line break stands between the two.
+    match source.get(low..high) {
+        Some(between) if !between.contains('\n') => mark,
+        _ => place.offset,
+    }
+}
+
+/// The height the history files for the caret's row, and whether the
+/// row stood outside the view or cut by one of its edges. A row in view
+/// files the height a step keeps inside the view. A row the reader
+/// scrolled away from files its true distance from the top of the view,
+/// so the step brings back the view that was left, not the caret.
+fn filed_height(row_y: f32, row_h: f32, scroll_y: f32, view_h: f32) -> (f32, bool) {
+    let below = row_y - scroll_y;
+    let held = caret::held(row_y, row_h, scroll_y, view_h);
+    (below, below != held)
+}
+
+/// What the history files for a caret whose landing still waits for
+/// the layout: the height the landing will stand its row at, and whether
+/// that height is outside the view or cut by one of its edges, the case
+/// of a step back to a caret the reader had scrolled away from.
+fn waiting_height(place: Place, row_h: f32, view_h: f32) -> (f32, bool) {
+    // The height is counted from the top of the view the landing will
+    // show, so that view starts at zero.
+    filed_height(place.below, row_h, 0.0, view_h)
+}
+
+/// The offset the editor remembers after a step of the history made
+/// while reading, so that it opens with its caret there while the line
+/// is still in view, as after a jump to a line. Only a place that names
+/// a line has one: a place taken in the editor is the caret itself. A
+/// place taken while reading is the top of a view.
+fn step_mark(place: &history::Entry) -> Option<usize> {
+    place.editing.then_some(place.offset)
+}
+
+/// The height of the row a jump or a step of the history lands: a file
+/// of lines, the editor's source view among them, draws its rows in
+/// the lines' face (`layout::line_face`), the code size unless the file
+/// is plain text; a rendered page's rows are body text.
+fn row_height(doc: &Document, cfg: &ViewConfig) -> f32 {
+    let size = if doc.code_file || doc.plain_file {
+        layout::line_face(doc, cfg).1
+    } else {
+        cfg.body_size * cfg.zoom
+    };
+    metrics::LINE_HEIGHT * size
+}
+
+/// Whether two view settings lay a page out the same: the fonts, their
+/// sizes, the zoom, the reading direction and the justification. Each
+/// can change while a page is set aside: the fonts in the settings
+/// dialog, the direction with `Ctrl+D` in the editor, the justification
+/// with `Ctrl+J` on the help page. The comic's fit does not move while
+/// the page is away, and the room for line numbers is the editor's.
+fn same_layout(a: &ViewConfig, b: &ViewConfig) -> bool {
+    a.body_family == b.body_family
+        && a.code_family == b.code_family
+        && a.body_size == b.body_size
+        && a.code_size == b.code_size
+        && a.zoom == b.zoom
+        && a.direction == b.direction
+        && a.justify == b.justify
+}
+
+/// A page set aside, behind the editor or the help page, keeps its
+/// layout on return while its view settings lay it out the same
+/// (`same_layout`). Under another theme the rows around the view are
+/// refilled in the new colors, a theme being colors only, provided the
+/// page was measured to its end; a page still being measured, or under
+/// other settings, is laid out again.
+fn kept_layout(
+    layout: Option<LayoutDoc>,
+    pass: Option<LayoutPass>,
+    same_layout: bool,
+    same_theme: bool,
+) -> (Option<LayoutDoc>, Option<LayoutPass>) {
+    if !same_layout {
+        return (None, None);
+    }
+    if same_theme {
+        return (layout, pass);
+    }
+    let mut layout = layout;
+    let settled = pass.as_ref().is_some_and(LayoutPass::is_complete);
+    if settled && layout.as_mut().is_some_and(LayoutDoc::rematerialize) {
+        (layout, pass)
+    } else {
+        (None, None)
     }
 }
 
@@ -654,10 +975,12 @@ struct Parked {
     /// The undo head at the crossing; an equal head on the way out
     /// means equal bytes, so the parked page is still the truth.
     head: usize,
-    /// The look the parked layout was built under. A theme or zoom
-    /// change while editing drops the layout and keeps the model.
-    zoom: f32,
-    theme: String,
+    /// The look the parked layout was built under: a change of font,
+    /// of size, of zoom or of direction while editing drops the layout
+    /// and keeps the model, a theme change refills its colors
+    /// (`kept_layout`).
+    cfg: ViewConfig,
+    theme: Theme,
 }
 
 /// Everything the help page displaces, moved back verbatim on return.
@@ -683,10 +1006,11 @@ struct Stash {
     /// The selection anchors on the model, which returns untouched, so
     /// it survives the trip whole.
     selection: Option<Selection>,
-    /// The look the stashed layout was built under; a change while the
-    /// help page showed drops it on return.
-    zoom: f32,
-    theme: String,
+    /// The look the stashed layout was built under, weighed on return
+    /// as the parked page's is (`kept_layout`). Its direction is the
+    /// document's own, and the return gives it back.
+    cfg: ViewConfig,
+    theme: Theme,
     /// A parse was still streaming at the swap, so the model is
     /// partial; the return reopens from disk instead of restoring it.
     reopen: bool,
@@ -916,6 +1240,19 @@ fn recover_args(folder: &Path, at: Option<(i32, i32)>) -> Vec<std::ffi::OsString
     args
 }
 
+/// The folder a system dialog starts on, in a form the dialog reads.
+/// The real path of a folder on a network share is `\\?\UNC\server\share`
+/// on Windows, and the dialog library drops the `\\?\` and hands the
+/// system `UNC\server\share`, which names nothing: the dialog then
+/// opens on the system's default folder. The plain form
+/// `\\server\share` is read. Any other path is unchanged.
+fn dialog_start(dir: PathBuf) -> PathBuf {
+    match dir.to_str().and_then(|text| text.strip_prefix(r"\\?\UNC\")) {
+        Some(share) => PathBuf::from(format!(r"\\{share}")),
+        None => dir,
+    }
+}
+
 /// Where the Save As dialog opens: the open file's folder; on the
 /// untitled note, the folder of the file that was open before it,
 /// else the home folder, never the note's own.
@@ -1036,14 +1373,18 @@ struct App {
     settle_at: Option<Instant>,
     /// Slice time the running pass has spent, which becomes `last_pass`.
     pass_spent: Duration,
-    /// Scroll position to restore once the pass places it: a reload, or a
-    /// relayout that must keep the reading position.
-    pending_scroll: Option<f32>,
+    /// What the running pass brings back of the view once it places it:
+    /// the place taken before a new layout of the same text, or the
+    /// scroll of a reload.
+    kept_view: Option<Kept>,
     /// Anchor target clicked before its heading was placed.
     pending_anchor: Option<String>,
     /// A book source offset to land on once delivered and placed: a
     /// restored reading position or an internal link's target.
     pending_offset: Option<Place>,
+    /// A line landing made this frame, whose exact row `settle_landing`
+    /// finds once the slide has drawn the rows around it.
+    landing_settle: Option<Place>,
     /// The places jumps left behind, in this file and in the ones open
     /// before it; Alt+Left and Alt+Right walk them as a browser does.
     history: History,
@@ -1271,8 +1612,12 @@ struct App {
     /// writes back first.
     bom: bool,
     /// A typing edit or caret motion moved content under a stale
-    /// layout; the next placed frame snaps the view to the caret.
+    /// layout, or the caret moved to a line the layout does not hold;
+    /// the next placed frame snaps the view to the caret.
     caret_snap: bool,
+    /// The seat made for the line of a caret that the layout did not
+    /// hold, while its row is still owed (`caret_snap`).
+    caret_seat: Option<CaretSeat>,
     /// The blink's current half and when it flips, driven by the timer;
     /// every caret action restarts the visible half.
     blink_visible: bool,
@@ -1468,6 +1813,10 @@ type OverlayCanvas = (tiny_skia::Pixmap, Option<(f32, f32, f32, f32)>);
 impl App {
     fn line_step(&self) -> f32 {
         metrics::LINE_HEIGHT * self.cfg.body_size * self.cfg.zoom
+    }
+
+    fn row_h(&self) -> f32 {
+        row_height(&self.document, &self.cfg)
     }
 
     fn doc_height(&self) -> f32 {
@@ -1699,24 +2048,35 @@ impl App {
             .and_then(|p| self.edit_marks.get(p))
             .copied();
         let sel = self.selection.filter(|s| !s.is_empty());
-        let offset = match self.layout.as_ref() {
-            Some(lay) => caret::landing(
-                lay,
-                &self.document,
-                sel.as_ref(),
-                remembered,
-                self.scroll_y,
-                view_h,
-            ),
+        // A landing that still waits for the layout is where the reader
+        // stands: the editor opens there, not on the view the landing
+        // has not reached yet, and the landing is dropped, or it would
+        // move the view away from the caret later.
+        let waiting =
+            waiting_place(self.pending_row, self.pending_offset, None).filter(|_| sel.is_none());
+        self.drop_waiting_landings();
+        let (offset, below) = match (waiting, self.layout.as_ref()) {
+            (Some(place), _) => {
+                let caret = waiting_caret(&self.document.source, place, remembered);
+                (caret::clamp(&self.document, caret), place.below)
+            }
+            (None, Some(lay)) => {
+                let offset = caret::landing(
+                    lay,
+                    &self.document,
+                    sel.as_ref(),
+                    remembered,
+                    self.scroll_y,
+                    view_h,
+                );
+                let below = caret::place_box(lay, &self.document, offset, view_h)
+                    .map_or(0.0, |(y, h)| caret::held(y, h, self.scroll_y, view_h));
+                (offset, below)
+            }
             // The path a reload and a file switch take: the layout is
             // fresh and the file may have shrunk since the mark was set.
-            None => caret::clamp(&self.document, remembered.unwrap_or(0)),
+            (None, None) => (caret::clamp(&self.document, remembered.unwrap_or(0)), 0.0),
         };
-        let below = self
-            .layout
-            .as_ref()
-            .and_then(|lay| caret::place_box(lay, &self.document, offset))
-            .map_or(0.0, |(y, h)| caret::held(y, h, self.scroll_y, view_h));
         self.mode = edit::Mode::Edit;
         self.caret = Some(Caret::at(offset));
         self.ensure_ledger();
@@ -1731,16 +2091,30 @@ impl App {
                 scroll_y: self.scroll_y,
                 layout_width: self.layout_width,
                 head,
-                zoom: self.cfg.zoom,
-                theme: self.config.theme.clone(),
+                cfg: self.cfg.clone(),
+                theme: self.theme.clone(),
             };
             self.edit_park = Some(Box::new(parked));
+            // The justification is the page's: the source view has none.
+            self.cfg.justify = justify_pref(&self.config, &self.document);
             self.swapped_document(None, None);
             // The reading scroll means nothing in the source view: the
             // two documents share no coordinate but the bytes. The row
             // the caret landed on takes the height its line had on the
             // page, so the line does not move under the reader's eyes.
-            self.seat_editor_on(Place { offset, below });
+            self.seat_editor_on(Place {
+                offset,
+                below,
+                line: false,
+            });
+        } else if waiting.is_some() {
+            // A code or text file keeps its document, and the landing
+            // that waited is now the caret's.
+            self.seat_editor_on(Place {
+                offset,
+                below,
+                line: false,
+            });
         }
         // The caret owns the keys; a sidebar holding them would strand
         // the arrows. Same funnel as the Right key's explicit handoff.
@@ -1774,11 +2148,11 @@ impl App {
     }
 
     /// Puts the row holding the place's offset at its height in the
-    /// editor: at the top the way a jump lands, or where a crossing
-    /// found the line on the page, never the way a typed caret is kept
-    /// in view. A placed row answers exactly; past the placed height
-    /// the block table answers by line index, which is what a source
-    /// view is indexed by.
+    /// editor: at the top the way an outline jump lands, in the middle
+    /// for a jump to a line, or where a crossing found the line on the
+    /// page, never the way a typed caret is kept in view. A placed row
+    /// answers exactly; past the placed height the block table answers
+    /// by line index, which is what a source view is indexed by.
     fn seat_editor_on(&mut self, place: Place) {
         // A row the block table knows may still lie below the height the
         // pass has placed; scrolling now would stop short, so the target
@@ -1807,10 +2181,7 @@ impl App {
             return Some(y);
         }
         let block = self.document.block_at_offset(offset)?;
-        let start = self.document.blocks.get(block)?.range.start;
-        let end = offset.min(self.document.source.len()).max(start);
-        let line = self.document.source[start..end].matches('\n').count();
-        lay.approx_top(block, line)
+        lay.approx_top(block, scroll::source_row(&self.document, block, offset))
     }
 
     /// Rebuilds the page held behind the editor from the buffer, which
@@ -1855,10 +2226,17 @@ impl App {
         // the caret's row on the screen, which its line keeps.
         let below = left_at
             .zip(self.layout.as_ref())
-            .and_then(|(offset, lay)| caret::place_box(lay, &self.document, offset))
+            .and_then(|(offset, lay)| {
+                caret::place_box(lay, &self.document, offset, self.viewport_h())
+            })
             .map_or(0.0, |(y, h)| {
                 caret::held(y, h, self.scroll_y, self.viewport_h())
             });
+        // A landing on the caret that still waits for the layout: the
+        // view has not followed the caret yet, so the height the
+        // landing asked for answers, not the screen.
+        let waiting = left_at.and_then(|caret| waiting_place(self.pending_row, None, Some(caret)));
+        let below = waiting.map_or(below, |place| place.below);
         if let (Some(path), Some(c)) = (self.path.clone(), self.caret) {
             self.edit_marks.insert(path, c.offset);
         }
@@ -1870,16 +2248,21 @@ impl App {
         }
         if let Some(parked) = self.edit_park.take() {
             let head = self.undo.as_ref().map_or(0, Undo::head);
-            let same_look = self.cfg.zoom == parked.zoom && self.config.theme == parked.theme;
             if head == parked.head {
                 // The held outline describes this very page; rebuilding
                 // it here would cost a parse of the whole page for nothing.
                 self.document = parked.document;
                 self.layout_width = parked.layout_width;
-                self.swapped_document(
-                    parked.layout.filter(|_| same_look),
-                    parked.pass.filter(|_| same_look),
+                // The page takes its justification back before its kept
+                // layout is weighed against the settings of the moment.
+                self.cfg.justify = justify_pref(&self.config, &self.document);
+                let (layout, pass) = kept_layout(
+                    parked.layout,
+                    parked.pass,
+                    same_layout(&self.cfg, &parked.cfg),
+                    self.theme == parked.theme,
                 );
+                self.swapped_document(layout, pass);
             } else {
                 let text = Arc::clone(&self.document.source);
                 let kind = self
@@ -1889,6 +2272,7 @@ impl App {
                 if let Some(kind) = kind {
                     self.document = edit::rendered_document(kind, &text);
                 }
+                self.cfg.justify = justify_pref(&self.config, &self.document);
                 self.swapped_document(None, None);
                 self.outline = OutlineTree::build(&self.document);
             }
@@ -1907,7 +2291,13 @@ impl App {
                     .and_then(|lay| caret::row_top(lay, &self.document, offset))
                 {
                     Some(y) => self.scroll_to(caret::seated(y, below)),
-                    None => self.pending_offset = Some(Place { offset, below }),
+                    None => {
+                        self.pending_offset = Some(Place {
+                            offset,
+                            below,
+                            line: true,
+                        })
+                    }
                 }
             }
         }
@@ -1927,25 +2317,126 @@ impl App {
     }
 
     /// One caret motion: step through the runs, restart the blink, and
-    /// snap the view back to the caret.
+    /// bring the view back to the caret.
     fn step_caret(&mut self, motion: Motion) {
         let page = self.page_step();
-        let view_h = self.viewport_h();
         let (Some(caret), Some(lay)) = (self.caret, self.layout.as_ref()) else {
             return;
         };
         let stepped = caret.step(motion, lay, &self.document, &mut self.fonts, page);
-        let snapped = stepped
-            .geometry(lay, &self.document, &mut self.fonts)
-            .map(|b| caret::snap(self.scroll_y, view_h, b));
         self.caret = Some(stepped);
         self.wake_caret();
-        if let Some(target) = snapped {
-            if target != self.scroll_y {
-                self.scroll_to(target);
+        self.show_caret();
+        self.request_redraw();
+    }
+
+    /// Brings the view to the caret after it moved. A row the layout
+    /// holds answers exactly. A caret on a line the layout does not
+    /// hold has no row to read, the case of Ctrl+End in a long file:
+    /// its line is seated like a jump, and the frame that lays its rows
+    /// out finishes on the caret's own row (`caret_snap`). A snap that
+    /// an edit still owes the frame stays owed (`snap_still_owed`).
+    fn show_caret(&mut self) {
+        let view_h = self.viewport_h();
+        // The caret moved on, so a seat still owed to the place it left
+        // would move the view after this one.
+        let owed = self.caret_snap;
+        if owed {
+            self.pending_row = None;
+        }
+        self.caret_seat = None;
+        let (Some(caret), Some(lay)) = (self.caret, self.layout.as_ref()) else {
+            return;
+        };
+        let settled = match caret.geometry(lay, &self.document, &mut self.fonts) {
+            Some(b) => {
+                let target = caret::snap(self.scroll_y, view_h, b);
+                if target != self.scroll_y {
+                    self.scroll_to(target);
+                }
+                true
+            }
+            None => self.seat_caret_line(view_h),
+        };
+        self.caret_snap = snap_still_owed(owed, settled);
+    }
+
+    /// Seats the line of a caret whose row the layout does not hold. The
+    /// block table answers for the line, as for a jump, and the line
+    /// comes to the edge of the view it was beyond. A line that stands
+    /// in the view stays where it is. True when nothing is left to wait
+    /// for: the line stands in the view and no pass runs, or the layout
+    /// has no answer and no pass that could bring one. While the pass
+    /// runs, the row of the caret is still owed, and `caret_seat` keeps
+    /// the view that the seat left.
+    fn seat_caret_line(&mut self, view_h: f32) -> bool {
+        let Some(caret) = self.caret else {
+            return true;
+        };
+        let row_h = self.row_h();
+        let pending = self.layout_pending();
+        match self.editor_row_y(caret.offset) {
+            Some(y) if caret_line_in_view(y, row_h, self.scroll_y, view_h) => {
+                if pending {
+                    self.caret_seat = Some(CaretSeat {
+                        offset: caret.offset,
+                        scroll: self.scroll_y,
+                    });
+                }
+                !pending
+            }
+            Some(y) => {
+                // While the pass runs, the table is short of the lines
+                // it has not placed: the seat waits for them in
+                // `pending_row`, as a jump does. A seat that was spent
+                // is kept, so that no frame makes it again.
+                let below = caret_line_edge(y, row_h, self.scroll_y, view_h);
+                self.seat_editor_on(Place {
+                    offset: caret.offset,
+                    below,
+                    line: false,
+                });
+                self.caret_seat = self.pending_row.is_none().then_some(CaretSeat {
+                    offset: caret.offset,
+                    scroll: self.scroll_y,
+                });
+                false
+            }
+            None => !pending,
+        }
+    }
+
+    /// The frame's part of bringing the view to the caret (`caret_snap`):
+    /// the exact row once the layout holds it, and until then the seat
+    /// of its line, made once (`caret_due`). True once the view is
+    /// settled, the reader moved it, or nothing more can come.
+    fn settle_caret(&mut self, view_h: f32) -> bool {
+        let (Some(caret), Some(lay)) = (self.caret, self.layout.as_ref()) else {
+            return self.caret.is_none();
+        };
+        let found = caret.geometry(lay, &self.document, &mut self.fonts);
+        let height = lay.height;
+        let due = caret_due(
+            found.is_some(),
+            self.caret_seat,
+            caret.offset,
+            self.scroll_y,
+            self.layout_pending(),
+        );
+        match (due, found) {
+            (CaretDue::Snap, Some(b)) => {
+                let target = caret::snap(self.scroll_y, view_h, b);
+                self.scroll_y = scroll::clamp(target, height, view_h);
+                self.caret_seat = None;
+                true
+            }
+            (CaretDue::Seat, _) => self.seat_caret_line(view_h),
+            (CaretDue::Wait, _) => false,
+            _ => {
+                self.caret_seat = None;
+                true
             }
         }
-        self.request_redraw();
     }
 
     /// Bare keys the caret owns while editing. Chords fall through and
@@ -2262,6 +2753,7 @@ impl App {
         self.caret = Some(Caret::at(offset));
         self.wake_caret();
         self.caret_snap = true;
+        self.caret_seat = None;
         self.refresh_title();
     }
 
@@ -2411,6 +2903,7 @@ impl App {
         let moved = needed.max(margin) != self.cfg.gutter.max(margin);
         self.cfg.gutter = needed;
         if moved && paint::gutter::numbered(&self.document) {
+            self.keep_view();
             self.layout = None;
             self.band = None;
         }
@@ -2705,7 +3198,7 @@ impl App {
             self.path.as_deref(),
             home.as_deref(),
         ) {
-            dialog = dialog.set_directory(dir);
+            dialog = dialog.set_directory(dialog_start(dir));
         }
         if let Some(name) = self
             .path
@@ -2773,7 +3266,7 @@ impl App {
         // the one they came from, never Oryx's own folder that goes at
         // quit with anything saved into it.
         if let Some(dir) = self.document_dir() {
-            dialog = dialog.set_directory(dir);
+            dialog = dialog.set_directory(dialog_start(dir));
         }
         let Some(target) = dialog.save_file() else {
             return;
@@ -3256,6 +3749,11 @@ impl App {
                 if self.save() {
                     self.resolve_confirm(event_loop);
                 } else {
+                    // The open the question held does not happen, so a
+                    // step that waited on it is given up, as on Cancel:
+                    // left standing, it would turn the next open of that
+                    // file into the step.
+                    self.pending_step = None;
                     self.ask_next_leftover();
                 }
             }
@@ -3766,17 +4264,9 @@ impl App {
 
     /// Seats the caret at an offset, blink restarted, view snapped.
     fn place_caret_at(&mut self, offset: usize) {
-        let view_h = self.viewport_h();
         self.caret = Some(Caret::at(offset));
         self.wake_caret();
-        if let (Some(c), Some(lay)) = (self.caret, self.layout.as_ref()) {
-            if let Some(b) = c.geometry(lay, &self.document, &mut self.fonts) {
-                let target = caret::snap(self.scroll_y, view_h, b);
-                if target != self.scroll_y {
-                    self.scroll_to(target);
-                }
-            }
-        }
+        self.show_caret();
         self.request_redraw();
     }
 
@@ -4207,9 +4697,9 @@ impl App {
 
     /// Goes to a line of the open file. In the editor the caret lands
     /// on the line, at the column when one was given, and the row comes
-    /// to the top the way every jump lands. While reading, the row of a
-    /// code or text file comes to the top, or the block of a rendered
-    /// page that holds the line; the place left is kept for Back.
+    /// to the middle of the view. While reading, the row of a code or
+    /// text file comes to the middle, or the block of a rendered page
+    /// that holds the line; the place left is kept for Back.
     fn go_to(&mut self, target: goto::Target) {
         if !self.has_lines() {
             return;
@@ -4220,6 +4710,7 @@ impl App {
         }
         let offset = goto::offset(&self.document.source, target);
         self.push_jump();
+        self.drop_waiting_landings();
         if self.mode == edit::Mode::Edit {
             self.selection = None;
             self.sel_anchor = None;
@@ -4227,6 +4718,11 @@ impl App {
             self.caret = Some(Caret::at(offset));
             self.wake_caret();
         } else {
+            // The editor opened after the jump puts its caret on the
+            // line of the jump, while that line is still in view.
+            if let Some(path) = self.path.clone() {
+                self.edit_marks.insert(path, offset);
+            }
             // A rendered page is indexed by blocks, and a line mostly
             // opens on markup no drawn row holds (`#`, `-`, `|`), so the
             // block's own top is the landing, through the outline's
@@ -4245,12 +4741,13 @@ impl App {
                 if folded {
                     self.restart_layout();
                 }
-                self.pending_offset = Some(Place::top(line_end));
+                self.pending_offset =
+                    Some(Place::centered(line_end, self.viewport_h(), self.row_h()).by_line(true));
                 self.request_redraw();
                 return;
             }
         }
-        self.seat_editor_on(Place::top(offset));
+        self.seat_editor_on(Place::centered(offset, self.viewport_h(), self.row_h()));
         self.request_redraw();
     }
 
@@ -5727,21 +6224,55 @@ impl App {
     }
 
     /// Where the reader stands, as the history files it: the caret
-    /// while editing, else what shows at the top of the view. An
-    /// untitled note is no place to come back to, since it goes when
-    /// another file opens.
+    /// while editing, else what shows at the top of the view. A landing
+    /// that still waits for the layout answers before the screen, which
+    /// has not moved yet (`waiting_place`). An untitled note is no place
+    /// to come back to, since it goes when another file opens.
     fn here(&self) -> Option<history::Entry> {
         if self.on_note() {
             return None;
         }
-        let offset = match (self.mode, self.caret) {
-            (edit::Mode::Edit, Some(caret)) => caret.offset,
-            _ => self.top_offset()?,
+        let editing = matches!((self.mode, self.caret), (edit::Mode::Edit, Some(_)));
+        let caret = self.caret.filter(|_| editing).map(|caret| caret.offset);
+        let waiting = waiting_place(self.pending_row, self.pending_offset, caret);
+        let (offset, below, editing, away) = match (caret, waiting) {
+            (Some(caret), Some(place)) => {
+                let (below, away) = waiting_height(place, self.row_h(), self.viewport_h());
+                (caret, below, true, away)
+            }
+            (None, Some(place)) => (place.offset, place.below, place.line, false),
+            (Some(caret), None) => {
+                let (below, away) = self.editor_row_y(caret).map_or((0.0, false), |y| {
+                    filed_height(y, self.row_h(), self.scroll_y, self.viewport_h())
+                });
+                (caret, below, true, away)
+            }
+            (None, None) => {
+                let offset = self.top_offset()?;
+                let below = self
+                    .layout
+                    .as_ref()
+                    .and_then(|lay| scroll::offset_top(lay, &self.document, offset))
+                    .map_or(0.0, |y| y - self.scroll_y);
+                (offset, below, false, false)
+            }
         };
         Some(history::Entry {
             file: self.path.clone(),
             offset,
+            below,
+            editing,
+            away,
         })
+    }
+
+    /// Drops the landings that still wait for the layout. A new landing
+    /// replaces them, or an older one would move the view after it.
+    fn drop_waiting_landings(&mut self) {
+        self.kept_view = None;
+        self.pending_anchor = None;
+        self.pending_offset = None;
+        self.pending_row = None;
     }
 
     /// Remembers where the reader is standing, so Alt+Left can bring
@@ -5777,7 +6308,7 @@ impl App {
         };
         if target.file == self.path {
             self.history.step(forward, here);
-            self.land_on(target.offset);
+            self.land_on(&target);
             return;
         }
         let Some(path) = target.file else {
@@ -5789,16 +6320,24 @@ impl App {
         }
     }
 
-    /// Shows a place of the open file: the caret goes there while
-    /// editing, the page while reading, a folded section opened first.
-    fn land_on(&mut self, offset: usize) {
-        if self.mode == edit::Mode::Edit {
+    /// Shows a place of the open file at the height its line stood:
+    /// the caret goes there while editing, the page while reading, a
+    /// folded section opened first. A caret's place shown on the page
+    /// stands its block there instead, fitted to the view.
+    fn land_on(&mut self, place: &history::Entry) {
+        self.drop_waiting_landings();
+        let (offset, below) = (place.offset, place.below);
+        let editing = self.mode == edit::Mode::Edit;
+        let (view_h, row_h) = (self.viewport_h(), self.row_h());
+        if editing {
             let offset = caret::clamp(&self.document, offset);
             self.selection = None;
             self.sel_anchor = None;
             self.band = None;
             self.caret = Some(Caret::at(offset));
-            self.seat_editor_on(Place::top(offset));
+            self.seat_editor_on(Place::returned(
+                offset, below, place.away, view_h, row_h, true,
+            ));
             self.wake_caret();
         } else {
             let folded = self
@@ -5808,12 +6347,18 @@ impl App {
             if folded {
                 self.restart_layout();
             }
-            self.pending_offset = Some(Place::top(offset));
+            if let Some((path, mark)) = self.path.clone().zip(step_mark(place)) {
+                self.edit_marks.insert(path, mark);
+            }
+            self.pending_offset = Some(
+                Place::returned(offset, below, place.away, view_h, row_h, false)
+                    .by_line(place.editing),
+            );
         }
         self.request_redraw();
     }
 
-    /// Files what an open leaves behind, and answers the offset to land
+    /// Files what an open leaves behind, and answers the place to land
     /// on when the open is a step of the history. Any other open is a
     /// jump like a link's: the place left is one to come back to.
     fn history_at_open(
@@ -5821,7 +6366,7 @@ impl App {
         step: Option<bool>,
         here: Option<history::Entry>,
         path: &Path,
-    ) -> Option<usize> {
+    ) -> Option<history::Entry> {
         if self.path.as_deref() == Some(path) {
             return None;
         }
@@ -5835,7 +6380,7 @@ impl App {
                 .is_some_and(|place| place.file.as_deref() == Some(path))
         });
         match step {
-            Some(forward) => self.history.step(forward, here).map(|place| place.offset),
+            Some(forward) => self.history.step(forward, here),
             None => {
                 if let Some(here) = here {
                     self.history.jump(here);
@@ -6473,6 +7018,7 @@ impl App {
             self.sidebar = None;
             self.sidebar_canvas = None;
         }
+        self.keep_view();
         self.layout = None;
         self.band = None;
         self.request_redraw();
@@ -6518,12 +7064,9 @@ impl App {
         let dir = dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf());
         self.remember_dir(&dir);
         match self.sidebar.as_mut() {
-            Some(side) if side.root() == dir => {}
+            Some(side) if side.shows(&dir) => {}
             Some(side) => {
-                let tab = side.tab();
-                *side = Sidebar::new(&dir);
-                side.set_show_hidden(self.config.show_hidden);
-                side.set_tab(tab);
+                *side = side.moved_to(&dir);
                 if let Some(path) = &self.path {
                     side.set_current(path);
                 }
@@ -6535,6 +7078,7 @@ impl App {
             }
         }
         self.sync_search_root();
+        self.keep_view();
         self.layout = None;
         self.band = None;
         self.request_redraw();
@@ -6660,7 +7204,7 @@ impl App {
         // alone they fire against the new one once its layout grows.
         // The bottom jump is the third, and it would seat a fresh
         // reader at the end of a file they just opened.
-        self.pending_scroll = None;
+        self.kept_view = None;
         self.pending_anchor = None;
         self.pending_row = None;
         self.pending_goto = None;
@@ -6683,11 +7227,8 @@ impl App {
             })
             .map(Place::top);
         if let Some(side) = self.sidebar.as_mut() {
-            if reroot && side.root() != dir {
-                let tab = side.tab();
-                *side = Sidebar::new(&dir);
-                side.set_show_hidden(self.config.show_hidden);
-                side.set_tab(tab);
+            if reroot && !side.shows(&dir) {
+                *side = side.moved_to(&dir);
             }
             side.set_current(&path);
         }
@@ -6727,8 +7268,8 @@ impl App {
         self.resolve_pending_search_jump();
         // A step of the history lands on its own place, over the one
         // the file remembered.
-        if let Some(offset) = landing.filter(|_| opened) {
-            self.land_on(offset);
+        if let Some(place) = landing.filter(|_| opened) {
+            self.land_on(&place);
         }
         self.request_redraw();
     }
@@ -6869,7 +7410,7 @@ impl App {
         ]);
         let target = rfd::FileDialog::new()
             .set_file_name(format!("{stem}.pdf"))
-            .set_directory(start)
+            .set_directory(dialog_start(start))
             .add_filter("PDF", &["pdf"])
             .save_file();
         let Some(target) = target else {
@@ -6948,7 +7489,7 @@ impl App {
             self.remembered_dir(),
             config::home_dir(),
         ]);
-        dialog = dialog.set_directory(start);
+        dialog = dialog.set_directory(dialog_start(start));
         if let Some(path) = dialog.pick_file() {
             if self.guard_unsaved(confirm::Pending::Open(path.clone(), true)) {
                 self.open_file(&path, true);
@@ -7018,17 +7559,21 @@ impl App {
             book_toc: std::mem::take(&mut self.book_toc),
             disk_seen: self.disk_seen.take(),
             selection: self.selection.take(),
-            zoom: self.cfg.zoom,
-            theme: self.config.theme.clone(),
+            cfg: self.cfg.clone(),
+            theme: self.theme.clone(),
             reopen,
         }));
         self.document = markdown_help();
         self.outline = OutlineTree::build(&self.document);
         self.cfg.justify = justify_pref(&self.config, &self.document);
+        // The help page opens in automatic direction. The direction of
+        // the document set aside is its own: the stash keeps it, and
+        // `help_return` gives it back.
+        self.cfg.direction = DirectionMode::Auto;
         self.scroll_y = 0.0;
         self.band = None;
         self.pending_band_for = None;
-        self.pending_scroll = None;
+        self.kept_view = None;
         self.pending_anchor = None;
         self.pending_offset = None;
         self.pending_recolor.clear();
@@ -7039,9 +7584,12 @@ impl App {
         self.request_redraw();
     }
 
-    /// Back from the help page: the stashed document returns exactly
-    /// as it was. A look changed while help showed (zoom, theme) drops
-    /// the stashed layout, and the streaming pass re-measures.
+    /// Back from the help page: the stashed document returns as it
+    /// was, in its own direction, whatever `Ctrl+D` did on the help
+    /// page. A font, a size, the zoom or the justification changed
+    /// while help showed drops the stashed layout, and the streaming
+    /// pass lays the document out again; a theme changed refills its
+    /// colors.
     fn help_return(&mut self) {
         let Some(stash) = self.help_stash.take() else {
             return;
@@ -7071,9 +7619,27 @@ impl App {
         self.media = stash.media;
         self.book_toc = stash.book_toc;
         self.disk_seen = stash.disk_seen;
-        let same_look = self.cfg.zoom == stash.zoom && self.config.theme == stash.theme;
-        self.layout = stash.layout.filter(|_| same_look);
-        self.pass = stash.pass.filter(|_| same_look);
+        // The document takes its direction and its justification back
+        // before its kept layout is weighed against the settings of the
+        // moment.
+        self.cfg.direction = stash.cfg.direction;
+        self.cfg.justify = justify_pref(&self.config, &self.document);
+        // A view that the help page still kept is not this document's.
+        self.kept_view = None;
+        self.layout = stash.layout;
+        self.pass = stash.pass;
+        let same = same_layout(&self.cfg, &stash.cfg);
+        if !same {
+            // The page is laid out again under the settings of the
+            // moment, and keeps the place its old layout shows.
+            self.keep_view_with(row_height(&self.document, &stash.cfg));
+        }
+        (self.layout, self.pass) = kept_layout(
+            self.layout.take(),
+            self.pass.take(),
+            same,
+            self.theme == stash.theme,
+        );
         // The outline belongs to the rendered page. A return into a
         // parked markdown edit must read the parked page, not the
         // source view on screen, or the panel blanks to "No headings"
@@ -7085,7 +7651,6 @@ impl App {
         } else {
             OutlineTree::from_toc(&self.book_toc, &self.document)
         };
-        self.cfg.justify = justify_pref(&self.config, &self.document);
         self.selection = stash.selection;
         self.sel_anchor = None;
         self.band = None;
@@ -7231,12 +7796,53 @@ impl App {
         }
     }
 
-    /// Session zoom around the current scroll position; never persisted.
+    /// Notes what the view shows before its layout is dropped for a new
+    /// one of the same text, so that the pass brings it back
+    /// (`resolve_pending`): a zoom step, a new width of the window or
+    /// of the sidebar, a font or a size of the settings, the room of
+    /// the line numbers, the justification, the direction, a picture
+    /// that arrives from the network with its size. Called
+    /// before the setting changes, since the caret's row is measured at
+    /// the size the layout was made with. Nothing is taken while a
+    /// landing waits, which says where the view goes, or while an
+    /// earlier kept view waits, which is still the place of the reader.
+    fn keep_view(&mut self) {
+        self.keep_view_with(self.row_h());
+    }
+
+    /// As `keep_view`, for a layout made with rows of `row_h`: a page
+    /// set aside comes back under the settings of the moment.
+    fn keep_view_with(&mut self, row_h: f32) {
+        let landing_waits = self.pending_row.is_some()
+            || self.pending_offset.is_some()
+            || self.pending_anchor.is_some();
+        if landing_waits || self.kept_view.is_some() {
+            return;
+        }
+        let Some(lay) = self.layout.as_ref() else {
+            return;
+        };
+        let caret_row = match (self.mode, self.caret) {
+            (edit::Mode::Edit, Some(caret)) => self.editor_row_y(caret.offset),
+            _ => None,
+        };
+        self.kept_view = Kept::of(caret_row, row_h, self.scroll_y, self.viewport_h(), || {
+            scroll::TopPlace::of(lay, &self.document, self.scroll_y)
+        });
+    }
+
+    /// Session zoom, never persisted. The view keeps its place: the
+    /// caret's row in the editor, the top of the view on the page.
     fn set_zoom(&mut self, zoom: f32) {
         if (zoom - self.cfg.zoom).abs() < f32::EPSILON {
             return;
         }
-        self.scroll_y *= zoom / self.cfg.zoom;
+        let ratio = zoom / self.cfg.zoom;
+        self.keep_view();
+        self.kept_view = self.kept_view.map(|kept| kept.zoomed(ratio));
+        // What the view shows while the pass runs, until the kept
+        // place is reached.
+        self.scroll_y *= ratio;
         self.cfg.zoom = zoom;
         self.layout = None;
         self.band = None;
@@ -7259,6 +7865,7 @@ impl App {
         let value = *pref;
         config::save(&self.config);
         self.cfg.justify = value;
+        self.keep_view();
         self.layout = None;
         self.band = None;
         self.request_redraw();
@@ -7278,6 +7885,7 @@ impl App {
             self.direction_marks.insert(path, next);
         }
         self.show_notice(direction_notice(next));
+        self.keep_view();
         self.layout = None;
         self.band = None;
         self.request_redraw();
@@ -7364,6 +7972,7 @@ impl App {
                 code_size,
                 ui_scale,
             }) => {
+                self.keep_view();
                 self.cfg.body_family = body_family.clone();
                 self.cfg.code_family = code_family.clone();
                 self.cfg.body_size = body_size;
@@ -7427,10 +8036,25 @@ impl App {
     }
 
     /// Restyles with an in-memory theme, persisting nothing.
+    /// A theme is colors only, so a page already measured keeps every
+    /// position and refills the rows around the view in the new colors:
+    /// the view stays on its line, however deep in the file. A page still
+    /// being measured is laid out again.
     fn set_live_theme(&mut self, theme: Theme) {
         self.theme = theme;
-        self.layout = None;
         self.band = None;
+        let settled = self.pass.as_ref().is_some_and(LayoutPass::is_complete);
+        let refilled = settled
+            && self
+                .layout
+                .as_mut()
+                .is_some_and(layout::LayoutDoc::rematerialize);
+        if refilled {
+            self.pending_band_for = None;
+            self.request_redraw();
+        } else {
+            self.layout = None;
+        }
     }
 
     /// Selects the whole document, placing the rest of it first so the
@@ -7707,8 +8331,18 @@ impl App {
         if self.layout.is_some() && (self.layout_width == avail || self.settle_at.is_some()) {
             return false;
         }
-        if self.scroll_y > 0.0 {
-            self.pending_scroll = Some(self.scroll_y);
+        // A new width, of the window or of the sidebar, with the layout
+        // of the old one still here: the view keeps its place.
+        self.keep_view();
+        let landing_waits = self.pending_row.is_some()
+            || self.pending_offset.is_some()
+            || self.pending_anchor.is_some();
+        if landing_waits {
+            // The landing says where the view goes. A view kept before
+            // it would move the page after it.
+            self.kept_view = None;
+        } else if self.kept_view.is_none() && keeps_scroll(self.scroll_y, landing_waits) {
+            self.kept_view = Some(Kept::Distance(self.scroll_y));
         }
         let (out, mut pass) = layout_begin(&self.document, &self.cfg, avail);
         pass.attach_pool(Arc::clone(&self.pool));
@@ -7813,6 +8447,45 @@ impl App {
         }
     }
 
+    /// The scroll that shows the source line at `offset` with its row
+    /// `below` the top of the view. The row the page drew answers
+    /// exactly. A row not drawn yet stands at its share of its block,
+    /// and `settle_landing` puts the exact row there once the frame's
+    /// slide draws it. A line of code is placed by the block table, and
+    /// a line that draws no row, an image's, stands its block whole in
+    /// the view, or from its top when taller. A blank line after a
+    /// block taller than the view stands at the end of that block.
+    fn line_landing(&self, lay: &LayoutDoc, offset: usize, below: f32) -> Option<f32> {
+        let doc = &self.document;
+        let row =
+            caret::line_top(lay, doc, offset).or_else(|| scroll::line_estimate(lay, doc, offset));
+        if let Some(y) = row {
+            return Some(caret::seated(y, below));
+        }
+        if let Some(end) = caret::tall_block_end(lay, doc, offset, self.viewport_h()) {
+            return Some(caret::seated(end, below));
+        }
+        let below = scroll::fitted_below(lay, doc, offset, below, self.viewport_h());
+        scroll::offset_top(lay, doc, offset).map(|y| caret::seated(y, below))
+    }
+
+    /// Finishes a line landing on the frame that made it: the slide has
+    /// drawn the rows around the landing, so the line's own row now
+    /// answers and stands at its height. A row that still does not
+    /// answer leaves the landing as it was.
+    fn settle_landing(&mut self) {
+        let Some(place) = self.landing_settle.take() else {
+            return;
+        };
+        let row = self
+            .layout
+            .as_ref()
+            .and_then(|lay| caret::line_top(lay, &self.document, place.offset));
+        if let Some(y) = row {
+            self.scroll_to(caret::seated(y, place.below));
+        }
+    }
+
     /// Applies a scroll position or an anchor asked for before the pass
     /// had placed it.
     fn resolve_pending(&mut self) {
@@ -7821,7 +8494,7 @@ impl App {
                 self.go_to(target);
             }
         }
-        if self.pending_scroll.is_none()
+        if self.kept_view.is_none()
             && self.pending_anchor.is_none()
             && self.pending_offset.is_none()
             && self.pending_row.is_none()
@@ -7830,10 +8503,32 @@ impl App {
         }
         let height = self.doc_height();
         let vh = self.viewport_h();
-        if let Some(target) = self.pending_scroll {
-            if scroll::reached(target, height, vh) {
-                self.pending_scroll = None;
-                self.scroll_y = target;
+        if let Some(kept) = self.kept_view {
+            let target = match kept {
+                Kept::Distance(y) => Some(y),
+                Kept::Caret(below) => self
+                    .caret
+                    .and_then(|caret| self.editor_row_y(caret.offset))
+                    .map(|y| caret::seated(y, kept_caret_height(below, vh, self.row_h()))),
+                Kept::Top(place) => self
+                    .layout
+                    .as_ref()
+                    .and_then(|lay| place.scroll(lay, &self.document)),
+            };
+            let settled = !self.layout_pending();
+            match target {
+                Some(y) if scroll::reached(y, height, vh) => {
+                    self.kept_view = None;
+                    self.scroll_y = scroll::clamp(y, height, vh);
+                }
+                // The pass ended short of a kept place, as after a zoom
+                // out near the end of the file: the view shows the end.
+                Some(y) if settled && !matches!(kept, Kept::Distance(_)) => {
+                    self.kept_view = None;
+                    self.scroll_y = scroll::clamp(y, height, vh);
+                }
+                _ if settled => self.kept_view = None,
+                _ => {}
             }
         }
         // A row asked for before the layout reached it: the same
@@ -7847,25 +8542,34 @@ impl App {
             match target {
                 Some(y) if scroll::reached(y, height, vh) || !self.layout_pending() => {
                     self.pending_row = None;
+                    // A kept view that still waits is older than the
+                    // landing, and would move the view after it.
+                    self.kept_view = None;
                     self.scroll_to(y);
                 }
                 None if self.layout.is_some() && !self.layout_pending() => self.pending_row = None,
                 _ => {}
             }
         }
-        if let Some(Place { offset, below }) = self.pending_offset {
+        if let Some(place) = self.pending_offset {
+            let Place { offset, below, .. } = place;
             // Held while the offset lies past the delivered source; the
             // worker's delivery brings the rest.
             let covered = offset < self.document.source.len() || !self.parse_pending;
             if covered {
-                let placed = self
-                    .layout
-                    .as_ref()
-                    .and_then(|lay| scroll::offset_top(lay, &self.document, offset))
-                    .map(|y| caret::seated(y, below));
+                let placed = self.layout.as_ref().and_then(|lay| {
+                    if place.line {
+                        self.line_landing(lay, offset, below)
+                    } else {
+                        scroll::offset_top(lay, &self.document, offset)
+                            .map(|y| caret::seated(y, below))
+                    }
+                });
                 match placed {
                     Some(y) if scroll::reached(y, height, vh) || !self.layout_pending() => {
                         self.pending_offset = None;
+                        self.kept_view = None;
+                        self.landing_settle = Some(place).filter(|place| place.line);
                         self.scroll_to(y);
                     }
                     None if !self.layout_pending() && !self.parse_pending => {
@@ -7881,6 +8585,7 @@ impl App {
         match self.layout.as_ref().and_then(|l| l.anchor_y(&name)) {
             Some(y) if scroll::reached(y, height, vh) || !self.layout_pending() => {
                 self.pending_anchor = None;
+                self.kept_view = None;
                 self.scroll_to(y);
             }
             // The pass ended without ever placing that heading.
@@ -7957,21 +8662,24 @@ impl App {
             // Anything the slide, the pass or a recolor left unindexed
             // joins the y index before this frame queries it.
             lay.index_more();
+            // A band painted while the pass was inside a code block
+            // lacks what the layout could not give then. The block has
+            // closed and the window has slid, so the band goes.
+            if self.band.as_ref().is_some_and(|band| band.outdated(lay)) {
+                self.band = None;
+                self.pending_band_for = None;
+            }
         }
         let before_search = self.scroll_y;
         self.sync_search();
         self.settle_search_anchor();
-        // A typing edit landed under a fresh layout: snap the view to
-        // the caret once its line is placed, inside the same re-window
-        // the search landing uses.
-        if self.caret_snap {
-            if let (Some(c), Some(lay)) = (self.caret, self.layout.as_ref()) {
-                if let Some(cb) = c.geometry(lay, &self.document, &mut self.fonts) {
-                    let target = caret::snap(self.scroll_y, size.height as f32, cb);
-                    self.scroll_y = scroll::clamp(target, lay.height, size.height as f32);
-                    self.caret_snap = false;
-                }
-            }
+        self.settle_landing();
+        // A typing edit landed under a fresh layout, or the caret moved
+        // to a line the layout did not hold: snap the view to the caret
+        // once its line is placed, inside the same re-window the search
+        // landing uses. A landing that still waits comes first.
+        if self.caret_snap && self.pending_row.is_none() {
+            self.caret_snap = !self.settle_caret(size.height as f32);
         }
         // A search step that scrolled re-slides the window so this
         // frame paints the landing, not a cold viewport; the match
@@ -8117,8 +8825,9 @@ impl App {
                 buffer[dst..dst + bw].copy_from_slice(&view[src..src + bw]);
             }
         }
-        // The caret's line reads its number brighter, as editors do: that
-        // line's stretch of the margin is painted again over the band.
+        // The caret's line shows its number in a box, so it is found at
+        // a glance: that line's stretch of the margin is painted again
+        // over the band.
         if self.mode == edit::Mode::Edit && numbers.is_some() {
             let line =
                 self.caret.and_then(
@@ -8129,16 +8838,10 @@ impl App {
                         _ => None,
                     },
                 );
+            let paper = paint::paper(&self.document, &self.theme);
+            let ink = paint::gutter::box_ink(&self.theme, paper);
             let strip = line.and_then(|line| {
-                paint::gutter::strip(
-                    &mut self.fonts,
-                    lay,
-                    &self.document,
-                    0,
-                    line,
-                    paint::paper(&self.document, &self.theme),
-                    self.theme.surface.foreground,
-                )
+                paint::gutter::strip(&mut self.fonts, lay, &self.document, 0, line, paper, ink)
             });
             if let Some(strip) = strip {
                 draw_strip(&mut buffer, size.width, size.height, inset, frame_y, &strip);
@@ -8449,6 +9152,7 @@ impl ApplicationHandler for App {
                 wake.by(at);
             } else {
                 self.settle_at = None;
+                self.keep_view();
                 self.layout = None;
                 self.pass = None;
                 self.request_redraw();
@@ -8529,6 +9233,10 @@ impl ApplicationHandler for App {
         }
         match self.media.drain_remote() {
             images::Folded::Relayout => {
+                // A picture that arrives takes its size, and the page
+                // above the view grows with it: the view keeps its
+                // place, or the text would move under the reader.
+                self.keep_view();
                 self.layout = None;
                 self.band = None;
                 self.request_redraw();
@@ -9027,6 +9735,596 @@ impl ApplicationHandler for App {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_jump_to_a_line_stands_it_in_the_middle() {
+        let place = super::Place::centered(7, 600.0, 20.0);
+        assert_eq!(
+            place,
+            super::Place {
+                offset: 7,
+                below: 290.0,
+                line: false,
+            }
+        );
+        let scroll = super::caret::seated(1000.0, place.below);
+        assert_eq!(1000.0 - scroll, 290.0, "as much room above the line");
+        assert_eq!(scroll + 600.0 - (1000.0 + 20.0), 290.0, "as below it");
+    }
+
+    /// A complete or a started windowed layout of a page of sections.
+    fn kept_page(complete: bool) -> (super::LayoutDoc, super::LayoutPass) {
+        use oryx::doc::images::MediaCache;
+        use oryx::layout::{layout_begin, layout_more, ViewConfig};
+        let source: String = (0..200)
+            .map(|i| format!("## Part {i}\n\nA paragraph for part {i}.\n\n"))
+            .collect();
+        let doc = oryx::doc::markdown::parse(source.as_str());
+        let cfg = ViewConfig::default();
+        let mut fonts = oryx::style::fonts::FontStore::new();
+        let mut media = MediaCache::offline(std::path::PathBuf::from("."));
+        let (mut lay, mut pass) = layout_begin(&doc, &cfg, 900.0);
+        pass.retain_around(0.0, 600.0);
+        if complete {
+            layout_more(
+                &doc,
+                &super::Theme::default_dark(),
+                &mut fonts,
+                &mut media,
+                &cfg,
+                &mut lay,
+                &mut pass,
+                None,
+            );
+        }
+        (lay, pass)
+    }
+
+    #[test]
+    fn a_page_set_aside_comes_back_in_the_new_colors() {
+        use super::kept_layout;
+        let (lay, pass) = kept_page(true);
+        let (lay, pass) = kept_layout(Some(lay), Some(pass), true, true);
+        assert!(
+            lay.is_some() && pass.is_some(),
+            "the same look comes back as is"
+        );
+        assert_ne!(lay.unwrap().window_span(), Some(0.0..0.0));
+        let (lay, pass) = kept_page(true);
+        let (lay, pass) = kept_layout(Some(lay), Some(pass), true, false);
+        assert!(pass.is_some(), "another theme keeps the measured page");
+        assert_eq!(
+            lay.unwrap().window_span(),
+            Some(0.0..0.0),
+            "with its rows emptied for the new colors"
+        );
+        let (lay, pass) = kept_page(false);
+        let (lay, pass) = kept_layout(Some(lay), Some(pass), true, false);
+        assert!(
+            lay.is_none() && pass.is_none(),
+            "a page still measuring starts over"
+        );
+        let (lay, pass) = kept_page(true);
+        let (lay, pass) = kept_layout(Some(lay), Some(pass), false, true);
+        assert!(lay.is_none() && pass.is_none(), "another zoom starts over");
+    }
+
+    #[test]
+    fn a_landing_row_is_as_tall_as_the_text_it_stands_on() {
+        use oryx::doc::load::FileKind;
+        use oryx::layout::{metrics, ViewConfig};
+        let cfg = ViewConfig {
+            body_size: 16.0,
+            code_size: 12.0,
+            zoom: 1.5,
+            ..ViewConfig::default()
+        };
+        let text = "# Title\n\nSome words.\n";
+        let page = oryx::doc::markdown::parse(text);
+        let source = oryx::edit::source_document(FileKind::Markdown, text).unwrap();
+        let opened = |name: &str, text: &str| {
+            let path = std::env::temp_dir().join(name);
+            std::fs::write(&path, text).unwrap();
+            let doc = oryx::doc::load::open(&path, None).unwrap().document;
+            std::fs::remove_file(&path).ok();
+            doc
+        };
+        let code = opened("oryx_row_height_test.rs", "fn main() {}\n");
+        let plain = opened("oryx_row_height_test.txt", "some words\n");
+        let body = metrics::LINE_HEIGHT * 16.0 * 1.5;
+        let lines = metrics::LINE_HEIGHT * 12.0 * 1.5;
+        assert_eq!(super::row_height(&page, &cfg), body, "a rendered page");
+        assert_eq!(
+            super::row_height(&source, &cfg),
+            lines,
+            "the editor's source view"
+        );
+        assert_eq!(super::row_height(&code, &cfg), lines, "a code file");
+        assert_eq!(super::row_height(&plain, &cfg), body, "a text file");
+    }
+
+    #[test]
+    fn a_view_shorter_than_a_line_lands_it_at_the_top() {
+        assert_eq!(super::Place::centered(7, 10.0, 20.0).below, 0.0);
+    }
+
+    #[test]
+    fn a_step_back_lands_at_its_height_inside_the_view() {
+        use super::Place;
+        let (view_h, row_h) = (600.0, 20.0);
+        assert_eq!(
+            Place::returned(5, 400.0, false, view_h, row_h, true).below,
+            400.0
+        );
+        assert_eq!(
+            Place::returned(5, 700.0, false, view_h, row_h, true).below,
+            580.0,
+            "a window that shrank keeps the caret's row inside"
+        );
+        assert_eq!(
+            Place::returned(5, -8.0, false, view_h, row_h, true).below,
+            0.0
+        );
+        assert_eq!(
+            Place::returned(5, -8.0, false, view_h, row_h, false).below,
+            -8.0,
+            "while reading, a line cut by the top edge keeps its cut"
+        );
+        assert_eq!(
+            Place::returned(5, 700.0, false, view_h, row_h, false).below,
+            580.0
+        );
+    }
+
+    #[test]
+    fn a_landing_that_waits_is_where_the_reader_stands() {
+        use super::{waiting_place, Place};
+        let row = Place {
+            offset: 900,
+            below: 290.0,
+            line: false,
+        };
+        let page = Place {
+            offset: 400,
+            below: 120.0,
+            line: true,
+        };
+        assert_eq!(
+            waiting_place(Some(row), None, Some(900)),
+            Some(row),
+            "the editor, a landing on the caret"
+        );
+        assert_eq!(
+            waiting_place(Some(row), None, Some(50)),
+            None,
+            "the caret moved since"
+        );
+        assert_eq!(
+            waiting_place(None, Some(page), Some(900)),
+            None,
+            "the editor has no landing of a page"
+        );
+        assert_eq!(waiting_place(None, None, Some(900)), None);
+        assert_eq!(
+            waiting_place(Some(row), None, None),
+            Some(row),
+            "a code file read"
+        );
+        assert_eq!(
+            waiting_place(None, Some(page), None),
+            Some(page),
+            "a rendered page"
+        );
+        assert_eq!(
+            waiting_place(Some(row), Some(page), None),
+            Some(page),
+            "the landing of a page is applied last"
+        );
+        assert_eq!(waiting_place(None, None, None), None);
+    }
+
+    #[test]
+    fn a_landing_that_waits_on_a_caret_out_of_view_is_filed_as_scrolled_away() {
+        use super::{waiting_height, Place};
+        let (view_h, row_h) = (600.0, 20.0);
+        let at = |below| Place {
+            offset: 900,
+            below,
+            line: false,
+        };
+        assert_eq!(
+            waiting_height(at(290.0), row_h, view_h),
+            (290.0, false),
+            "a jump to a line, in the middle of the view"
+        );
+        assert_eq!(
+            waiting_height(at(1600.0), row_h, view_h),
+            (1600.0, true),
+            "a step back to a caret that was below the view"
+        );
+        assert_eq!(
+            waiting_height(at(-1120.0), row_h, view_h),
+            (-1120.0, true),
+            "a step back to a caret that was above the view"
+        );
+    }
+
+    #[test]
+    fn a_new_layout_keeps_the_scroll_only_when_no_landing_waits() {
+        use super::keeps_scroll;
+        assert!(keeps_scroll(2400.0, false), "a zoom change keeps the view");
+        assert!(!keeps_scroll(0.0, false), "the top needs no keeping");
+        assert!(
+            !keeps_scroll(2400.0, true),
+            "a landing that waits replaces the scroll"
+        );
+    }
+
+    /// A place at the top of a view, taken from a real layout.
+    fn a_top_place() -> oryx::paint::scroll::TopPlace {
+        let source = "one\n\ntwo\n\nthree\n".repeat(40);
+        let doc = oryx::doc::markdown::parse(source.as_str());
+        let mut fonts = oryx::style::fonts::FontStore::new();
+        let mut media = oryx::doc::images::MediaCache::offline(std::path::PathBuf::from("."));
+        let lay = oryx::layout::layout(
+            &doc,
+            &oryx::style::theme::Theme::default_dark(),
+            &mut fonts,
+            &mut media,
+            &oryx::layout::ViewConfig::default(),
+            800.0,
+        );
+        oryx::paint::scroll::TopPlace::of(&lay, &doc, 900.0).expect("a block stands at the top")
+    }
+
+    #[test]
+    fn a_new_layout_keeps_the_caret_row_in_view_and_else_the_top_of_the_view() {
+        use super::Kept;
+        let top = a_top_place();
+        let (row_h, view_h) = (20.0, 600.0);
+        assert_eq!(
+            Kept::of(Some(2300.0), row_h, 2000.0, view_h, || Some(top)),
+            Some(Kept::Caret(300.0)),
+            "the caret in view: its row keeps its height on the screen"
+        );
+        assert_eq!(
+            Kept::of(Some(100.0), row_h, 2000.0, view_h, || Some(top)),
+            Some(Kept::Top(top)),
+            "the caret scrolled out of view: the view is kept, not the caret"
+        );
+        assert_eq!(
+            Kept::of(Some(1992.0), row_h, 2000.0, view_h, || Some(top)),
+            Some(Kept::Top(top)),
+            "a caret row that an edge cuts: the view is kept"
+        );
+        assert_eq!(
+            Kept::of(None, row_h, 2000.0, view_h, || Some(top)),
+            Some(Kept::Top(top)),
+            "the page has no caret"
+        );
+        assert_eq!(
+            Kept::of(None, row_h, 0.0, view_h, || None),
+            None,
+            "the top of the file names no place"
+        );
+    }
+
+    #[test]
+    fn a_zoom_step_on_a_view_that_waits_grows_a_distance_and_holds_a_place() {
+        use super::Kept;
+        let top = a_top_place();
+        assert_eq!(Kept::Distance(2000.0).zoomed(1.5), Kept::Distance(3000.0));
+        assert_eq!(Kept::Caret(300.0).zoomed(1.5), Kept::Caret(300.0));
+        assert_eq!(Kept::Top(top).zoomed(1.5), Kept::Top(top));
+    }
+
+    #[test]
+    fn a_kept_caret_row_stays_whole_in_the_view_when_its_rows_grow() {
+        use super::kept_caret_height;
+        assert_eq!(kept_caret_height(300.0, 600.0, 32.0), 300.0);
+        assert_eq!(
+            kept_caret_height(580.0, 600.0, 32.0),
+            568.0,
+            "a taller row on the last row of the view moves up to show whole"
+        );
+    }
+
+    #[test]
+    fn the_line_of_a_far_caret_comes_to_the_edge_it_was_beyond() {
+        use super::{caret_line_edge, caret_line_in_view};
+        let (row_h, view_h, scroll_y) = (20.0, 600.0, 5000.0);
+        assert_eq!(
+            caret_line_edge(44_000.0, row_h, scroll_y, view_h),
+            580.0,
+            "Ctrl+End: a line under the view comes to the bottom edge"
+        );
+        assert_eq!(
+            caret_line_edge(0.0, row_h, scroll_y, view_h),
+            0.0,
+            "Ctrl+Home: a line above the view comes to the top edge"
+        );
+        assert!(caret_line_in_view(5300.0, row_h, scroll_y, view_h));
+        assert!(
+            !caret_line_in_view(5590.0, row_h, scroll_y, view_h),
+            "a row that the bottom edge cuts is not in view"
+        );
+        assert!(
+            !caret_line_in_view(4990.0, row_h, scroll_y, view_h),
+            "a row that the top edge cuts is not in view"
+        );
+    }
+
+    #[test]
+    fn a_caret_key_keeps_the_snap_that_an_edit_owes() {
+        use super::snap_still_owed;
+        // Until the frame after an edit lays the rows out again, the
+        // box of the caret is the first row of its line.
+        assert!(
+            snap_still_owed(true, true),
+            "a letter typed, then a caret key before the frame: the frame still snaps"
+        );
+        assert!(
+            snap_still_owed(false, false),
+            "a far caret whose line waits owes its row"
+        );
+        assert!(
+            !snap_still_owed(false, true),
+            "a caret key alone on a row the layout holds owes nothing"
+        );
+    }
+
+    #[test]
+    fn a_seated_caret_line_leaves_the_view_to_the_wheel() {
+        use super::{caret_due, CaretDue, CaretSeat};
+        let seat = Some(CaretSeat {
+            offset: 40,
+            scroll: 5000.0,
+        });
+        // The row of the caret answers, the seat, the offset of the
+        // caret, the scroll, the pass still runs.
+        let rule = [
+            (
+                (false, None, 40, 5000.0, true),
+                CaretDue::Seat,
+                "a far caret with no seat yet is seated",
+            ),
+            (
+                (false, seat, 40, 5000.0, true),
+                CaretDue::Wait,
+                "while the pass runs, a seated line is not seated again",
+            ),
+            (
+                (false, seat, 40, 4700.0, true),
+                CaretDue::Drop,
+                "the wheel moved the view: nothing more is owed",
+            ),
+            (
+                (true, seat, 40, 4700.0, false),
+                CaretDue::Drop,
+                "at the end of the pass either",
+            ),
+            (
+                (true, seat, 40, 5000.0, false),
+                CaretDue::Snap,
+                "the view stayed: the row of the caret comes into it",
+            ),
+            (
+                (true, None, 40, 5000.0, false),
+                CaretDue::Snap,
+                "after an edit the frame snaps to the caret",
+            ),
+            (
+                (false, seat, 41, 5000.0, true),
+                CaretDue::Seat,
+                "a seat made for another place of the caret does not count",
+            ),
+            (
+                (false, seat, 40, 5000.0, false),
+                CaretDue::Drop,
+                "no row, and no pass left to bring one",
+            ),
+        ];
+        // The rows are judged together, so that a wrong row does not
+        // hide the rows after it.
+        let wrong: Vec<String> = rule
+            .iter()
+            .filter_map(|&((has_box, seat, offset, scroll_y, pending), due, what)| {
+                let got = caret_due(has_box, seat, offset, scroll_y, pending);
+                (got != due).then(|| format!("{what}: {got:?}, not {due:?}"))
+            })
+            .collect();
+        assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+    }
+
+    #[test]
+    fn the_editor_opens_on_the_line_of_a_landing_that_waits() {
+        use super::{waiting_caret, Place};
+        let source = "one\ntwo words\nthree\n";
+        // A jump on a page names the end of its line.
+        let place = Place {
+            offset: source.find("\nthree").unwrap(),
+            below: 290.0,
+            line: true,
+        };
+        let column = source.find("words").unwrap();
+        assert_eq!(
+            waiting_caret(source, place, Some(column)),
+            column,
+            "the remembered column of the jump, on the same line"
+        );
+        assert_eq!(
+            waiting_caret(source, place, Some(1)),
+            place.offset,
+            "a remembered place on another line is not the jump"
+        );
+        assert_eq!(waiting_caret(source, place, None), place.offset);
+        let last = Place {
+            offset: source.len() + 40,
+            below: 0.0,
+            line: false,
+        };
+        assert_eq!(
+            waiting_caret(source, last, Some(2)),
+            last.offset,
+            "a place past the text is left to the clamp of the caller"
+        );
+    }
+
+    #[test]
+    fn a_caret_out_of_view_is_filed_at_its_true_height() {
+        let (view_h, row_h) = (600.0, 20.0);
+        assert_eq!(
+            super::filed_height(1300.0, row_h, 1000.0, view_h),
+            (300.0, false),
+            "a row in view"
+        );
+        assert_eq!(
+            super::filed_height(200.0, row_h, 1320.0, view_h),
+            (-1120.0, true),
+            "a row above the view"
+        );
+        assert_eq!(
+            super::filed_height(40000.0, row_h, 38400.0, view_h),
+            (1600.0, true),
+            "a row below the view"
+        );
+        assert_eq!(
+            super::filed_height(992.0, row_h, 1000.0, view_h),
+            (-8.0, true),
+            "a row cut by the top edge"
+        );
+        assert_eq!(
+            super::filed_height(1580.0, row_h, 1000.0, view_h),
+            (580.0, false),
+            "the last whole row"
+        );
+    }
+
+    #[test]
+    fn a_step_back_to_a_caret_out_of_view_brings_the_view_back() {
+        use super::Place;
+        let (view_h, row_h) = (600.0, 20.0);
+        assert_eq!(
+            Place::returned(5, -1120.0, true, view_h, row_h, true).below,
+            -1120.0,
+            "the caret stays above the view"
+        );
+        assert_eq!(
+            Place::returned(5, 1600.0, true, view_h, row_h, true).below,
+            1600.0,
+            "the caret stays below the view"
+        );
+    }
+
+    #[test]
+    fn a_step_back_on_the_page_shows_the_line_of_a_caret_that_was_out_of_view() {
+        use super::Place;
+        let (view_h, row_h) = (600.0, 20.0);
+        assert_eq!(
+            Place::returned(5, -1120.0, true, view_h, row_h, false).below,
+            290.0,
+            "a caret that was above the view: its line in the middle"
+        );
+        assert_eq!(
+            Place::returned(5, 1600.0, true, view_h, row_h, false).below,
+            290.0,
+            "a caret that was below the view: its line in the middle"
+        );
+        assert_eq!(
+            Place::returned(5, -8.0, true, view_h, row_h, false).below,
+            0.0,
+            "a caret row that the top edge cut shows whole at that edge"
+        );
+        assert_eq!(
+            Place::returned(5, 592.0, true, view_h, row_h, false).below,
+            580.0,
+            "a caret row that the bottom edge cut shows whole at that edge"
+        );
+    }
+
+    #[test]
+    fn a_step_to_a_place_of_the_editor_is_where_the_editor_opens() {
+        let place = |editing| super::history::Entry {
+            file: Some(std::path::PathBuf::from("/notes/a.md")),
+            offset: 742,
+            below: 290.0,
+            editing,
+            away: false,
+        };
+        assert_eq!(
+            super::step_mark(&place(true)),
+            Some(742),
+            "the caret of the place, at its character"
+        );
+        assert_eq!(
+            super::step_mark(&place(false)),
+            None,
+            "a place taken while reading is a view, with no caret"
+        );
+    }
+
+    #[test]
+    fn a_dialog_starts_on_a_network_folder_in_the_form_the_system_reads() {
+        use std::path::PathBuf;
+        assert_eq!(
+            super::dialog_start(PathBuf::from(r"\\?\UNC\server\share\notes")),
+            PathBuf::from(r"\\server\share\notes"),
+            "the long form of a network folder"
+        );
+        for kept in [
+            r"\\?\C:\Work",
+            r"C:\Work",
+            r"\\server\share",
+            "/home/a/notes",
+        ] {
+            assert_eq!(
+                super::dialog_start(PathBuf::from(kept)),
+                PathBuf::from(kept),
+                "{kept}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_page_set_aside_is_measured_again_when_its_type_changes() {
+        use super::same_layout;
+        use oryx::layout::ViewConfig;
+        let kept = ViewConfig::default();
+        assert!(same_layout(&kept, &kept.clone()));
+        type Change = fn(&mut ViewConfig);
+        let changes: [(&str, Change); 5] = [
+            ("the body font", |cfg| cfg.body_family = "Other".into()),
+            ("the code font", |cfg| cfg.code_family = "Other".into()),
+            ("the body size", |cfg| cfg.body_size += 1.0),
+            ("the code size", |cfg| cfg.code_size += 1.0),
+            ("the zoom", |cfg| cfg.zoom *= 1.1),
+        ];
+        for (what, change) in changes {
+            let mut now = kept.clone();
+            change(&mut now);
+            assert!(!same_layout(&kept, &now), "{what}");
+        }
+        // The editor's room for line numbers is not the page's: a page
+        // parked behind the editor comes back as it was.
+        let mut now = kept.clone();
+        now.gutter = 40.0;
+        assert!(same_layout(&kept, &now));
+    }
+
+    #[test]
+    fn a_page_set_aside_is_laid_out_again_when_its_direction_or_justification_changes() {
+        use super::same_layout;
+        use oryx::layout::{DirectionMode, ViewConfig};
+        let kept = ViewConfig::default();
+        // `Ctrl+D` in the editor turns the file while its page is parked.
+        let mut now = kept.clone();
+        now.direction = DirectionMode::Rtl;
+        assert!(!same_layout(&kept, &now), "the direction");
+        // `Ctrl+J` on the help page justifies the markdown page behind it.
+        let mut now = kept.clone();
+        now.justify = true;
+        assert!(!same_layout(&kept, &now), "the justification");
+    }
+
     #[test]
     fn wheel_deltas_add_up_to_whole_notches() {
         let mut carry = 0.0;

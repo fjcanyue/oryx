@@ -937,7 +937,7 @@ fn book_paragraphs_justify_to_the_content_width() {
     let bytes = book().chapter("one.xhtml", &body).build();
     let doc = epub::open_book(bytes).unwrap().document;
     let mut fonts = FontStore::new();
-    let mut media = MediaCache::new(PathBuf::from("."));
+    let mut media = MediaCache::offline(PathBuf::from("."));
     let theme = Theme::default_dark();
     let plain_cfg = ViewConfig::default();
     let plain = layout(&doc, &theme, &mut fonts, &mut media, &plain_cfg, 700.0);

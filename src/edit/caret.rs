@@ -337,18 +337,192 @@ pub fn row_top(lay: &LayoutDoc, doc: &Document, offset: usize) -> Option<f32> {
     locate(&lines, offset).map(|i| lines[i].y)
 }
 
+/// The top of the first row the page draws for the source line holding
+/// `offset`, the row a line of a table, a list or a hard-wrapped
+/// paragraph starts on, whatever markup opens it. None for a line that
+/// draws no text, an image, a rule or a blank line, and for a row
+/// outside what the layout holds right now.
+pub fn line_top(lay: &LayoutDoc, doc: &Document, offset: usize) -> Option<f32> {
+    line_run(lay, doc, offset).map(|run| run.y)
+}
+
+/// The highest run the page draws for the source line holding `offset`.
+fn line_run<'l>(lay: &'l LayoutDoc, doc: &Document, offset: usize) -> Option<&'l TextRun> {
+    let source = &doc.source;
+    // A remembered offset may fall inside a character after an edit.
+    let mut offset = offset.min(source.len());
+    while !source.is_char_boundary(offset) {
+        offset -= 1;
+    }
+    let start = source[..offset].rfind('\n').map_or(0, |at| at + 1);
+    let end = source[offset..]
+        .find('\n')
+        .map_or(source.len(), |at| offset + at);
+    // A block's range starts after the markup opening its first line
+    // (`#`, `-`, `|`); the line's end lies inside the block it belongs to.
+    let block = doc.block_at_offset(end)?;
+    let spans = run_spans(&doc.blocks[block].kind);
+    let mut top: Option<&TextRun> = None;
+    for run in lay.runs.iter().filter(|run| run.block == block) {
+        let TextRef::Model { start: at, len } = run.text else {
+            continue;
+        };
+        let Some(span) = spans.get(run.span) else {
+            continue;
+        };
+        let shown = shown_source(span, source, at as usize, len as usize);
+        if shown.start < end && start < shown.end && top.is_none_or(|top| run.y < top.y) {
+            top = Some(run);
+        }
+    }
+    top
+}
+
+/// The row the page draws for the source line holding `offset`, as a
+/// top and a height, for a row whose bytes are not the source's own, so
+/// that `lines_of` does not hold it: a line of a code block that keeps a
+/// copy of its text, placed by the block table, or a row of a table.
+fn copied_row(lay: &LayoutDoc, doc: &Document, offset: usize) -> Option<(f32, f32)> {
+    let source = &doc.source;
+    let offset = clamp(doc, offset);
+    // The line's end lies inside the block the line belongs to, where
+    // its start may stand in the indent before the block.
+    let end = source[offset..]
+        .find('\n')
+        .map_or(source.len(), |at| offset + at);
+    let block = doc.block_at_offset(end)?;
+    if let BlockKind::CodeBlock { lines, .. } = &doc.blocks[block].kind {
+        if lines.is_verbatim() || lines.is_empty() {
+            return None;
+        }
+        let row = lines.row_at(source, offset)?.min(lines.len() - 1);
+        let seat = lay.code_line_seat(block, row)?;
+        return Some((seat.y, seat.height));
+    }
+    let run = line_run(lay, doc, offset)?;
+    Some((run.y, metrics::LINE_HEIGHT * run.size))
+}
+
+/// The first row whole in the view whose bytes are not the source's
+/// own, as its top and a source offset on its line: a row of a table,
+/// or a line of a code block that keeps a copy of its text. `lines_of`
+/// holds no such row, so a view inside one would land on the start of
+/// its block.
+fn first_copied_row(
+    lay: &LayoutDoc,
+    doc: &Document,
+    view_top: f32,
+    bottom: f32,
+) -> Option<(f32, usize)> {
+    let mut first: Option<(f32, f32, usize)> = None;
+    // The spans of the block of the last run looked at: a table's cells
+    // are collected once, not once per run.
+    let mut spans: Option<(usize, Vec<&Span>)> = None;
+    for run in &lay.runs {
+        let TextRef::Model { start: at, .. } = run.text else {
+            continue;
+        };
+        if run.y < view_top || run.y + metrics::LINE_HEIGHT * run.size > bottom {
+            continue;
+        }
+        if first.is_some_and(|(y, x, _)| (y, x) <= (run.y, run.x)) {
+            continue;
+        }
+        if run_source(doc, run).is_some() {
+            continue;
+        }
+        let Some(block) = doc.blocks.get(run.block) else {
+            continue;
+        };
+        let offset = match &block.kind {
+            BlockKind::CodeBlock { lines, .. } => lines.line_start(run.span),
+            kind => {
+                if spans.as_ref().is_none_or(|(index, _)| *index != run.block) {
+                    spans = Some((run.block, run_spans(kind)));
+                }
+                spans
+                    .as_ref()
+                    .and_then(|(_, spans)| spans.get(run.span))
+                    .filter(|span| !span.range.is_empty())
+                    .map(|span| shown_source(span, &doc.source, at as usize, 0).start)
+            }
+        };
+        if let Some(offset) = offset {
+            first = Some((run.y, run.x, offset));
+        }
+    }
+    first.map(|(y, _, offset)| (y, clamp(doc, offset)))
+}
+
+/// The source bytes a run of a span shows. A verbatim span slices the
+/// source. A span with text of its own maps by proportion: exact when
+/// soft line breaks turned into spaces kept its length, the common
+/// case, and within a row when an entity or a code mark shortened it.
+fn shown_source(span: &Span, source: &str, at: usize, len: usize) -> Range<usize> {
+    let range = span.range.start as usize..span.range.end as usize;
+    if span.is_verbatim() {
+        return range.start + at..range.start + at + len;
+    }
+    let text = span.text(source).len().max(1);
+    let scale = |byte: usize| range.start + byte * range.len() / text;
+    scale(at)..scale(at + len)
+}
+
+/// A block's spans in the order its runs index them: a table's header
+/// cells, then its rows' cells.
+fn run_spans(kind: &BlockKind) -> Vec<&Span> {
+    match kind {
+        BlockKind::Table { header, rows } => header
+            .iter()
+            .flatten()
+            .chain(rows.iter().flatten().flatten())
+            .collect(),
+        kind => block_spans(kind).map_or_else(Vec::new, |spans| spans.iter().collect()),
+    }
+}
+
+/// Where a line that follows its block stands, a blank line, when the
+/// block is taller than the view: the bottom of the block. Such a block
+/// cannot show whole, and its end is where the line is. None for a block
+/// that fits in the view, which shows whole, for a line of the block's
+/// own, and for a code block whose lines answer, which places its last
+/// line. Asked only for a line that draws no row.
+pub fn tall_block_end(lay: &LayoutDoc, doc: &Document, offset: usize, view_h: f32) -> Option<f32> {
+    let index = doc.block_at_offset(offset)?;
+    let block = &doc.blocks[index];
+    if offset < block.range.end {
+        return None;
+    }
+    if matches!(&block.kind, BlockKind::CodeBlock { lines, .. } if !lines.is_empty() && lines.has_rows())
+    {
+        return None;
+    }
+    let span = lay.block_span(index)?;
+    (span.end - span.start > view_h).then_some(span.end)
+}
+
 /// Where an offset stands on the page, as a top and a height: its row
 /// when the page shows one, else the top of its block with no height.
 /// An image line, a rule and a fence have a block and no row; a blank
-/// line belongs to the block above it.
-pub fn place_box(lay: &LayoutDoc, doc: &Document, offset: usize) -> Option<(f32, f32)> {
+/// line belongs to the block above it, and stands at the bottom of a
+/// block taller than the view.
+pub fn place_box(
+    lay: &LayoutDoc,
+    doc: &Document,
+    offset: usize,
+    view_h: f32,
+) -> Option<(f32, f32)> {
     let lines = lines_of(lay, doc);
     if let Some(i) = locate(&lines, offset) {
         return Some((lines[i].y, lines[i].h));
     }
-    match rowless(lay, doc, offset)? {
+    if let Some(row) = copied_row(lay, doc, offset) {
+        return Some(row);
+    }
+    match rowless(lay, doc, offset, view_h)? {
         Rowless::Line(span) => Some((span.start, span.end - span.start)),
         Rowless::Block(span) => Some((span.start, 0.0)),
+        Rowless::End(y) => Some((y, 0.0)),
     }
 }
 
@@ -358,6 +532,8 @@ enum Rowless {
     Line(Range<f32>),
     /// The whole block the offset belongs to.
     Block(Range<f32>),
+    /// The bottom of a block taller than the view, for a line after it.
+    End(f32),
 }
 
 impl Rowless {
@@ -367,11 +543,12 @@ impl Rowless {
         match self {
             Rowless::Line(span) => span.start >= view_top && span.end <= bottom,
             Rowless::Block(span) => span.end >= view_top && span.start < bottom,
+            Rowless::End(y) => *y >= view_top && *y <= bottom,
         }
     }
 }
 
-fn rowless(lay: &LayoutDoc, doc: &Document, offset: usize) -> Option<Rowless> {
+fn rowless(lay: &LayoutDoc, doc: &Document, offset: usize, view_h: f32) -> Option<Rowless> {
     let block = doc.block_at_offset(offset)?;
     if doc.code_file || doc.plain_file {
         // The line table answers by a binary search; a count of the
@@ -383,6 +560,9 @@ fn rowless(lay: &LayoutDoc, doc: &Document, offset: usize) -> Option<Rowless> {
         if let Some(seat) = line.and_then(|line| lay.code_line_seat(block, line)) {
             return Some(Rowless::Line(seat.y..seat.y + seat.height));
         }
+    }
+    if let Some(end) = tall_block_end(lay, doc, offset, view_h) {
+        return Some(Rowless::End(end));
     }
     lay.block_span(block).map(Rowless::Block)
 }
@@ -683,6 +863,10 @@ impl Caret {
     /// below the last line, the blank-row seat below, as every editor
     /// draws it; the selection's `model_pos` folds that offset onto
     /// the last line for its own reasons, and the caret does not.
+    /// None for a caret on a line the layout does not hold: a large
+    /// file is laid out around the view only, and a caret moved far
+    /// across it, as with Ctrl+End, has no row to read. The block table
+    /// answers for its line (`LayoutDoc::approx_top`).
     pub fn geometry(
         self,
         lay: &LayoutDoc,
@@ -710,7 +894,11 @@ impl Caret {
         // nearest text line, one advance per blank row between.
         if let Some(li) = lines.iter().rposition(|l| l.end < offset) {
             let line = &lines[li];
-            let gap = doc.source.get(line.end..offset)?.matches('\n').count();
+            let between = doc.source.get(line.end..offset)?;
+            if !one_row_a_line(lay, doc, between, offset) {
+                return None;
+            }
+            let gap = between.matches('\n').count();
             if gap == 0 {
                 return None;
             }
@@ -725,7 +913,11 @@ impl Caret {
         // Nothing above: blank rows at the top of the file anchor to
         // the first text line below instead.
         let below = lines.iter().find(|l| l.start > offset)?;
-        let gap = doc.source.get(offset..below.start)?.matches('\n').count();
+        let between = doc.source.get(offset..below.start)?;
+        if !one_row_a_line(lay, doc, between, offset) {
+            return None;
+        }
+        let gap = between.matches('\n').count();
         if gap == 0 {
             return None;
         }
@@ -737,6 +929,40 @@ impl Caret {
             h: below.h,
         })
     }
+}
+
+/// Whether one row stands for each line of `between`, the source from
+/// the caret to the nearest row the layout holds. Blank lines take a
+/// row each. Text there means lines the layout does not hold, and they
+/// may wrap: a large file is laid out around the view only, and the
+/// caret was moved far across it. The caret's own line is left to the
+/// count when the layout holds it and it draws no glyph for the caret.
+fn one_row_a_line(lay: &LayoutDoc, doc: &Document, between: &str, offset: usize) -> bool {
+    between.bytes().all(|byte| byte.is_ascii_whitespace()) || line_held(lay, doc, offset)
+}
+
+/// Whether the layout holds the source line an offset stands on. A file
+/// of lines is one block with a record for each line that is laid out
+/// and not empty. The row after the final newline goes with the last
+/// line. A document that is not a block of lines answers true: its
+/// blocks are held whole.
+fn line_held(lay: &LayoutDoc, doc: &Document, offset: usize) -> bool {
+    let Some(block) = doc.block_at_offset(offset) else {
+        return true;
+    };
+    let BlockKind::CodeBlock { lines, .. } = &doc.blocks[block].kind else {
+        return true;
+    };
+    let Some(row) = lines.row_at(&doc.source, offset) else {
+        return true;
+    };
+    let line = row.min(lines.len().saturating_sub(1));
+    let at = lay
+        .code_lines
+        .partition_point(|record| (record.block, record.line) < (block, line));
+    lay.code_lines
+        .get(at)
+        .is_some_and(|record| record.block == block && record.line == line)
 }
 
 /// The caret's seat on a page the layout holds no glyphs for, an empty
@@ -911,10 +1137,7 @@ fn blank_line_at(
         out
     };
     let seat = |anchor: &Line, start: usize, fonts: &mut FontStore| -> usize {
-        let end = start
-            + source[start..]
-                .find('\n')
-                .map_or(source.len() - start, |n| n);
+        let end = start + source[start..].find('\n').unwrap_or(source.len() - start);
         let x0 = anchor.runs.first().map_or(0.0, |r| r.x);
         if end > start && x > x0 + line_prefix_advance(fonts, lay, doc, anchor, end) {
             end
@@ -947,11 +1170,11 @@ fn blank_line_at(
 
 /// The landing offset on entering edit mode, in precedence order: the
 /// selection's start when one exists, else the remembered offset while
-/// its line is visible, else the first text position in the viewport.
-/// A remembered line the page shows no row for (an image, a rule, a
-/// blank line) counts as visible while its block is. The remembered
-/// offset is clamped first, since the file may have shrunk since it
-/// was taken.
+/// its line is visible, else the first text position in the viewport,
+/// a row of a table or of a copied code body included. A remembered
+/// line the page shows no row for (an image, a rule, a blank line)
+/// counts as visible while its block is. The remembered offset is
+/// clamped first, since the file may have shrunk since it was taken.
 pub fn landing(
     lay: &LayoutDoc,
     doc: &Document,
@@ -969,21 +1192,35 @@ pub fn landing(
     let lines = lines_of(lay, doc);
     let bottom = view_top + view_h;
     if let Some(offset) = remembered.map(|offset| clamp(doc, offset)) {
+        let whole = |y: f32, h: f32| y >= view_top && y + h <= bottom;
         let shows = match locate(&lines, offset) {
-            Some(li) => lines[li].y >= view_top && lines[li].y + lines[li].h <= bottom,
-            // An image line, a rule, a blank line: no row to test, so
-            // the place it belongs to answers.
-            None => rowless(lay, doc, offset).is_some_and(|place| place.shows(view_top, bottom)),
+            Some(li) => whole(lines[li].y, lines[li].h),
+            None => match copied_row(lay, doc, offset) {
+                Some((y, h)) => whole(y, h),
+                // An image line, a rule, a blank line: no row to test,
+                // so the place it belongs to answers.
+                None => rowless(lay, doc, offset, view_h)
+                    .is_some_and(|place| place.shows(view_top, bottom)),
+            },
         };
         if shows {
             return offset;
         }
     }
-    let in_view = lines
+    // The highest row whole in the view, among the rows that show the
+    // source's own bytes and the others.
+    let whole = lines
         .iter()
-        .find(|l| l.y >= view_top && l.y + l.h <= bottom)
-        .or_else(|| lines.iter().find(|l| l.y + l.h > view_top && l.y < bottom));
-    if let Some(line) = in_view {
+        .find(|l| l.y >= view_top && l.y + l.h <= bottom);
+    let copied = first_copied_row(lay, doc, view_top, bottom);
+    match (whole, copied) {
+        (Some(line), Some((y, offset))) => return if y < line.y { offset } else { line.start },
+        (Some(line), None) => return line.start,
+        (None, Some((_, offset))) => return offset,
+        (None, None) => {}
+    }
+    let cut = lines.iter().find(|l| l.y + l.h > view_top && l.y < bottom);
+    if let Some(line) = cut {
         return line.start;
     }
     // A view with no text in it, a tall image for one: the block that
@@ -1022,7 +1259,7 @@ mod tests {
 
     fn lay_of(doc: &Document) -> (LayoutDoc, FontStore) {
         let mut fonts = FontStore::new();
-        let mut media = MediaCache::new(PathBuf::from("."));
+        let mut media = MediaCache::offline(PathBuf::from("."));
         let l = layout(
             doc,
             &Theme::default_dark(),
@@ -1049,6 +1286,71 @@ mod tests {
             src.push_str(&format!("## Section {i}\n\nA paragraph of prose for section {i}, long enough to wrap once or twice across the width the tests lay out at.\n\n"));
         }
         md_doc(&src)
+    }
+
+    /// A file laid out as the app does it: a pass that keeps the rows
+    /// around a view at the top of the file, and drops the others.
+    fn lay_around_the_top(doc: &Document, width: f32, view_h: f32) -> (LayoutDoc, FontStore) {
+        use crate::layout::{layout_begin, layout_more};
+        let mut fonts = FontStore::new();
+        let mut media = MediaCache::offline(PathBuf::from("."));
+        let cfg = ViewConfig::default();
+        let (mut out, mut pass) = layout_begin(doc, &cfg, width);
+        pass.retain_around(0.0, view_h);
+        let done = layout_more(
+            doc,
+            &Theme::default_dark(),
+            &mut fonts,
+            &mut media,
+            &cfg,
+            &mut out,
+            &mut pass,
+            None,
+        );
+        assert!(done);
+        (out, fonts)
+    }
+
+    #[test]
+    fn a_caret_on_a_line_the_layout_does_not_hold_has_no_box() {
+        // Each paragraph is one line of the file and wraps to several
+        // rows, with a blank line after it.
+        let source: String = (1..=300)
+            .map(|i| {
+                format!(
+                    "Paragraph {i}: {}\n\n",
+                    "the reader follows this text across the page ".repeat(5)
+                )
+            })
+            .collect();
+        let doc = text_doc(&source);
+        let (l, mut fonts) = lay_around_the_top(&doc, 700.0, 600.0);
+        assert!(
+            Caret::at(3).geometry(&l, &doc, &mut fonts).is_some(),
+            "a caret in the laid out part has its box"
+        );
+        let blank = source.find("\n\n").unwrap() + 1;
+        assert!(
+            Caret::at(blank).geometry(&l, &doc, &mut fonts).is_some(),
+            "a blank row of the laid out part too"
+        );
+        // Ctrl+End: the caret stands far under the rows the layout
+        // holds. One row for each line between them would stop short
+        // of it, since the lines wrap.
+        let rows = source.matches('\n').count();
+        let seat = l.code_line_seat(0, rows).expect("the table has the row");
+        assert!(seat.y > 20.0 * 600.0, "the end is far under the view");
+        assert!(
+            Caret::at(source.len())
+                .geometry(&l, &doc, &mut fonts)
+                .is_none(),
+            "the row after the last line is not laid out"
+        );
+        let far = source.find("Paragraph 250:").unwrap() + 5;
+        assert!(
+            Caret::at(far).geometry(&l, &doc, &mut fonts).is_none(),
+            "a line of text far under the view is not laid out"
+        );
     }
 
     #[test]
@@ -1735,7 +2037,7 @@ mod tests {
         let text: String = (0..300_000).map(|i| format!("let v{i} = {i};\n")).collect();
         let doc = code_doc(&text);
         let mut fonts = FontStore::new();
-        let mut media = MediaCache::new(PathBuf::from("."));
+        let mut media = MediaCache::offline(PathBuf::from("."));
         let (mut l, mut pass) = crate::layout::layout_begin(&doc, &ViewConfig::default(), 2000.0);
         pass.retain_around(0.0, 600.0);
         crate::layout::layout_more(
@@ -2045,7 +2347,7 @@ mod tests {
         }
         let doc = md_doc(&src);
         let mut fonts = FontStore::new();
-        let mut media = MediaCache::new(PathBuf::from("examples"));
+        let mut media = MediaCache::offline(PathBuf::from("examples"));
         let l = layout(
             &doc,
             &Theme::default_dark(),
@@ -2055,6 +2357,199 @@ mod tests {
             2000.0,
         );
         (doc, l)
+    }
+
+    /// The top of the first run whose text starts with `text`.
+    fn run_top(l: &LayoutDoc, doc: &Document, text: &str) -> f32 {
+        l.runs
+            .iter()
+            .find(|run| l.run_text(doc, run).starts_with(text))
+            .unwrap_or_else(|| panic!("no run starts with {text:?}"))
+            .y
+    }
+
+    #[test]
+    fn a_table_line_answers_its_own_row() {
+        let mut src = String::from("Before.\n\n| n | name |\n|---|---|\n");
+        for i in 1..=80 {
+            src.push_str(&format!("| {i} | item {i} |\n"));
+        }
+        src.push_str("\nAfter.\n");
+        let doc = md_doc(&src);
+        let (l, _) = lay_of(&doc);
+        let row = at(&doc, "| 74 |");
+        assert_eq!(line_top(&l, &doc, row), Some(run_top(&l, &doc, "item 74")));
+        let header = at(&doc, "| n |");
+        assert_eq!(line_top(&l, &doc, header), Some(run_top(&l, &doc, "name")));
+        assert!(
+            line_top(&l, &doc, row + 8).is_some(),
+            "anywhere on the line"
+        );
+    }
+
+    #[test]
+    fn a_hard_wrapped_line_answers_the_row_it_starts_on() {
+        let mut src = String::from("Before.\n\n");
+        for i in 1..=40 {
+            src.push_str(&format!(
+                "Line {i} of the long paragraph, hard wrapped in the source.\n"
+            ));
+        }
+        let doc = md_doc(&src);
+        let (l, _) = lay_of(&doc);
+        let line = at(&doc, "Line 20 ");
+        let top = line_top(&l, &doc, line).expect("the line is drawn");
+        let holder = l
+            .runs
+            .iter()
+            .filter(|run| run.y == top)
+            .any(|run| l.run_text(&doc, run).contains("Line 20 "));
+        assert!(holder, "the row at {top} shows where line 20 starts");
+        assert!(top > line_top(&l, &doc, at(&doc, "Line 2 ")).unwrap());
+    }
+
+    #[test]
+    fn a_list_line_answers_from_its_marker() {
+        let doc = md_doc("Intro.\n\n- first\n- second\n- third\n");
+        let (l, _) = lay_of(&doc);
+        let marker = at(&doc, "- second");
+        assert_eq!(
+            line_top(&l, &doc, marker),
+            Some(run_top(&l, &doc, "second"))
+        );
+    }
+
+    #[test]
+    fn an_offset_inside_a_character_answers_the_row_of_its_line() {
+        let doc = md_doc("Before.\n\néé and words\n\nAfter.\n");
+        let (l, _) = lay_of(&doc);
+        let line = at(&doc, "éé");
+        let top = line_top(&l, &doc, line);
+        assert_eq!(top, Some(run_top(&l, &doc, "éé")));
+        assert_eq!(line_top(&l, &doc, line + 1), top, "inside the first é");
+        assert_eq!(line_top(&l, &doc, line + 3), top, "inside the second é");
+    }
+
+    /// The index of the source line holding `offset`.
+    fn line_of(doc: &Document, offset: usize) -> usize {
+        doc.source[..offset].matches('\n').count()
+    }
+
+    fn table_page() -> Document {
+        let mut src = String::from("Before.\n\n| n | name |\n|---|---|\n");
+        for i in 1..=80 {
+            src.push_str(&format!("| {i} | item {i} |\n"));
+        }
+        src.push_str("\nAfter.\n");
+        md_doc(&src)
+    }
+
+    #[test]
+    fn a_view_inside_a_table_lands_on_its_first_row_in_view() {
+        let doc = table_page();
+        let (l, _) = lay_of(&doc);
+        let row = run_top(&l, &doc, "item 40");
+        let got = landing(&l, &doc, None, None, row, 300.0);
+        assert_eq!(
+            line_of(&doc, got),
+            line_of(&doc, at(&doc, "| 40 |")),
+            "the row at the top of the view, not the start of the table"
+        );
+        let (y, h) = place_box(&l, &doc, got, 300.0).expect("the row has a place");
+        assert_eq!(y, row, "the row answers its own top on the page");
+        assert!(h > 0.0);
+    }
+
+    #[test]
+    fn a_view_inside_a_copied_code_body_lands_on_its_first_line_in_view() {
+        let mut src = String::from("Before.\n\n1. Run:\n\n   ```sh\n");
+        for i in 0..150 {
+            src.push_str(&format!("   echo step {i:03}\n"));
+        }
+        src.push_str("   ```\n\nAfter.\n");
+        let doc = md_doc(&src);
+        let (l, _) = lay_of(&doc);
+        let line = at(&doc, "echo step 100");
+        let block = doc.block_at_offset(line).unwrap();
+        let top = l.approx_top(block, 100).unwrap();
+        let got = landing(&l, &doc, None, None, top, 300.0);
+        assert_eq!(line_of(&doc, got), line_of(&doc, line));
+        let (y, h) = place_box(&l, &doc, got, 300.0).expect("the line has a place");
+        assert_eq!(y, top, "the line answers its own top on the page");
+        assert!(h > 0.0);
+    }
+
+    #[test]
+    fn a_remembered_table_row_is_kept_only_while_its_row_shows() {
+        let doc = table_page();
+        let (l, _) = lay_of(&doc);
+        let row = run_top(&l, &doc, "item 40");
+        let seen = at(&doc, "| 44 |");
+        assert_eq!(
+            landing(&l, &doc, None, Some(seen), row, 300.0),
+            seen,
+            "a row in view keeps the caret"
+        );
+        let away = at(&doc, "| 5 |");
+        let got = landing(&l, &doc, None, Some(away), row, 300.0);
+        assert_eq!(
+            line_of(&doc, got),
+            line_of(&doc, at(&doc, "| 40 |")),
+            "a row scrolled away falls to the view"
+        );
+    }
+
+    #[test]
+    fn a_blank_line_after_a_tall_table_stands_at_its_end() {
+        let doc = table_page();
+        let (l, _) = lay_of(&doc);
+        let blank = at(&doc, "\n\nAfter.") + 1;
+        let table = doc.block_at_offset(blank).unwrap();
+        assert!(matches!(doc.blocks[table].kind, BlockKind::Table { .. }));
+        let span = l.block_span(table).unwrap();
+        assert!(
+            span.end - span.start > 600.0,
+            "the table is taller than the view"
+        );
+        assert_eq!(tall_block_end(&l, &doc, blank, 600.0), Some(span.end));
+        assert_eq!(place_box(&l, &doc, blank, 600.0), Some((span.end, 0.0)));
+        assert_eq!(
+            tall_block_end(&l, &doc, blank, span.end - span.start + 1.0),
+            None,
+            "a table that fits in the view shows whole"
+        );
+        assert_eq!(
+            tall_block_end(&l, &doc, at(&doc, "| 40 |"), 600.0),
+            None,
+            "a line of the table is not after it"
+        );
+    }
+
+    #[test]
+    fn a_remembered_blank_line_after_a_tall_table_is_kept_only_at_its_end() {
+        let doc = table_page();
+        let (l, _) = lay_of(&doc);
+        let blank = at(&doc, "\n\nAfter.") + 1;
+        let table = doc.block_at_offset(blank).unwrap();
+        let span = l.block_span(table).unwrap();
+        assert_eq!(
+            landing(&l, &doc, None, Some(blank), span.end - 300.0, 600.0),
+            blank,
+            "the end of the table is in view"
+        );
+        let top = run_top(&l, &doc, "item 5");
+        let got = landing(&l, &doc, None, Some(blank), top, 600.0);
+        assert_eq!(
+            line_of(&doc, got),
+            line_of(&doc, at(&doc, "| 5 |")),
+            "the top of the table is in view and its end is not"
+        );
+    }
+
+    #[test]
+    fn an_image_line_answers_no_row() {
+        let (doc, l) = image_page();
+        assert_eq!(line_top(&l, &doc, at(&doc, "![oryx]")), None);
     }
 
     #[test]
@@ -2106,9 +2601,9 @@ mod tests {
         let (doc, l) = image_page();
         let place = l.images.first().expect("the image is placed");
         let image = at(&doc, "![oryx]");
-        assert_eq!(place_box(&l, &doc, image), Some((place.y, 0.0)));
+        assert_eq!(place_box(&l, &doc, image, 600.0), Some((place.y, 0.0)));
         let text = run(&l, &doc, "After 2.");
-        let (y, h) = place_box(&l, &doc, at(&doc, "After 2.") + 3).unwrap();
+        let (y, h) = place_box(&l, &doc, at(&doc, "After 2.") + 3, 600.0).unwrap();
         assert_eq!(y, text.y);
         assert!(h > 0.0, "a row answers with its own height");
     }

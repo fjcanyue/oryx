@@ -2,20 +2,45 @@
 //! way a browser's history is: a jump files the place it leaves and
 //! drops what lay ahead, a step back files the place it leaves ahead.
 //! A place is a file and a source offset, one currency for reading and
-//! for editing, so the walk crosses files and modes alike.
+//! for editing, so the walk crosses files and modes alike; the height
+//! its line stood at on the screen comes along, so a step brings back
+//! the view that was left.
 
 use std::path::PathBuf;
 
 /// How many places each direction keeps; the oldest goes first.
 const DEPTH: usize = 100;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct Entry {
     /// None for a page with no file behind it, the welcome page or the
     /// quick reference: a place to return to only while that page shows.
     pub file: Option<PathBuf>,
     pub offset: usize,
+    /// How far under the top of the view the place's line stood, so a
+    /// step brings the view back as it was left. Negative for a line cut
+    /// by the top edge.
+    pub below: f32,
+    /// Taken in the editor, where `below` is the caret's row. The page
+    /// has no row for most lines, and stands the line's block there.
+    pub editing: bool,
+    /// The caret's row stood outside the view, or cut by one of its
+    /// edges, after the reader scrolled away from it. `below` is then
+    /// its true distance from the top of the view, and a step in the
+    /// editor brings back the view with the caret where it was. On the
+    /// page, a step shows the caret's line in the middle of the view.
+    pub away: bool,
 }
+
+/// Two visits to one line are one place, whatever height it stood at
+/// and in whichever mode.
+impl PartialEq for Entry {
+    fn eq(&self, other: &Entry) -> bool {
+        self.file == other.file && self.offset == other.offset
+    }
+}
+
+impl Eq for Entry {}
 
 #[derive(Debug, Default)]
 pub struct History {
@@ -70,9 +95,11 @@ impl History {
     }
 }
 
-/// Files a place on a stack, once, inside the depth.
+/// Files a place on a stack, once, inside the depth. Filed again, the
+/// place keeps its later height.
 fn file(stack: &mut Vec<Entry>, place: Entry) {
-    if stack.last() == Some(&place) {
+    if let Some(last) = stack.last_mut().filter(|last| **last == place) {
+        *last = place;
         return;
     }
     stack.push(place);
@@ -86,9 +113,16 @@ mod tests {
     use super::*;
 
     fn at(offset: usize) -> Entry {
+        at_height(offset, 0.0)
+    }
+
+    fn at_height(offset: usize, below: f32) -> Entry {
         Entry {
             file: Some(PathBuf::from("/notes/a.md")),
             offset,
+            below,
+            editing: false,
+            away: false,
         }
     }
 
@@ -96,7 +130,45 @@ mod tests {
         Entry {
             file: Some(PathBuf::from("/notes/b.md")),
             offset,
+            below: 0.0,
+            editing: false,
+            away: false,
         }
+    }
+
+    #[test]
+    fn a_place_filed_again_keeps_the_later_mode() {
+        let mut h = History::default();
+        h.jump(at_height(10, 120.0));
+        h.jump(Entry {
+            editing: true,
+            ..at_height(10, 40.0)
+        });
+        let back = h.step(false, Some(at(900))).unwrap();
+        assert!(back.editing, "one place, taken last in the editor");
+        assert_eq!(back.below, 40.0);
+        assert!(h.step(false, Some(at(10))).is_none());
+    }
+
+    #[test]
+    fn a_place_comes_back_at_the_height_it_stood() {
+        let mut h = History::default();
+        h.jump(at_height(10, 120.0));
+        let back = h.step(false, Some(at_height(900, 290.0))).unwrap();
+        assert_eq!(back.below, 120.0);
+        let ahead = h.step(true, Some(back)).unwrap();
+        assert_eq!(ahead.below, 290.0, "forward returns the jump's own height");
+    }
+
+    #[test]
+    fn the_height_is_not_part_of_the_place() {
+        assert_eq!(at_height(10, 0.0), at_height(10, 50.0));
+        let mut h = History::default();
+        h.jump(at_height(10, 50.0));
+        h.jump(at_height(10, 80.0));
+        let back = h.step(false, Some(at(99))).unwrap();
+        assert_eq!(back.below, 80.0, "the later height");
+        assert_eq!(h.step(false, Some(back)), None, "one return");
     }
 
     #[test]

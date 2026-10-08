@@ -687,7 +687,7 @@ fn a_formula_paints_as_a_transparent_picture() {
     let theme = Theme::default_dark();
     let cfg = oryx::layout::ViewConfig::default();
     let mut fonts = oryx::style::fonts::FontStore::new();
-    let mut media = oryx::doc::images::MediaCache::new("tests/fixtures".into());
+    let mut media = oryx::doc::images::MediaCache::offline("tests/fixtures".into());
     let mut pictures = page_pictures(&theme, &cfg, &mut fonts, &mut media);
     let picture = pictures.math("x^2 + y^2", false).expect("a picture");
     assert_eq!(picture.mime, "image/png");
@@ -722,7 +722,7 @@ fn a_local_picture_travels_as_its_own_bytes() {
     let theme = Theme::default_dark();
     let cfg = oryx::layout::ViewConfig::default();
     let mut fonts = oryx::style::fonts::FontStore::new();
-    let mut media = oryx::doc::images::MediaCache::new("tests/fixtures".into());
+    let mut media = oryx::doc::images::MediaCache::offline("tests/fixtures".into());
     let mut pictures = page_pictures(&theme, &cfg, &mut fonts, &mut media);
     let picture = pictures
         .image("../../examples/oryx-test.png")
