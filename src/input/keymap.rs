@@ -636,6 +636,19 @@ pub const SHORTCUTS: &[Shortcut] = &[
         section: "Help",
         bindings: &[(Binding::Named(NamedKey::Escape), Command::Quit)],
     },
+    // Handled by the viewer overlay itself, so no command binding.
+    Shortcut {
+        keys: "0 / 1",
+        action: "The open picture or diagram: fit the window / natural size; the wheel and the + and - keys zoom it",
+        section: "Viewer",
+        bindings: &[],
+    },
+    Shortcut {
+        keys: "Arrow keys",
+        action: "Pan the open picture while it is larger than the window; a drag pans too",
+        section: "Viewer",
+        bindings: &[],
+    },
 ];
 
 /// Resolves a key event against the table. Chords that require a

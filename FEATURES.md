@@ -44,7 +44,7 @@ Math is included in the PDF export, and text copied from the PDF reads back as t
 
 ## Diagrams
 
-A fenced `mermaid` block renders as the diagram itself: flowcharts, sequence, class, state, ER, mindmap, pie, timeline, gantt and git graphs, drawn by [Merman](https://github.com/Latias94/merman), a parity-oriented native Rust renderer — no browser engine, no JavaScript, no network. Diagrams follow the active theme, render off the UI thread and cache per source, so scrolling back to one costs nothing. A diagram wider than the column shrinks to fit, keeping its proportions, and PDF export includes it. An invalid diagram shows an error panel in its place and the document reads on. The renderer tracks mermaid.js 11.15 as its compatibility baseline; as a separate implementation, the newest syntax forms may still differ. [SYNTAX.md](SYNTAX.md#diagrams) shows the syntax and [examples/sample-mermaid.md](examples/sample-mermaid.md) one of every kind.
+A fenced `mermaid` block renders as the diagram itself: flowcharts, sequence, class, state, ER, mindmap, pie, timeline, gantt and git graphs, drawn by [Merman](https://github.com/Latias94/merman), a parity-oriented native Rust renderer — no browser engine, no JavaScript, no network. Diagrams follow the active theme, render off the UI thread and cache per source, so scrolling back to one costs nothing. A diagram wider than the column shrinks to fit, keeping its proportions, and a click on one opens it full size in the [viewer](#the-image-viewer). PDF export includes it. An invalid diagram shows an error panel in its place and the document reads on. The renderer tracks mermaid.js 11.15 as its compatibility baseline; as a separate implementation, the newest syntax forms may still differ. [SYNTAX.md](SYNTAX.md#diagrams) shows the syntax and [examples/sample-mermaid.md](examples/sample-mermaid.md) one of every kind.
 
 ## Text and code
 
@@ -99,6 +99,12 @@ The search field works like a text box: `Ctrl+Left` and `Ctrl+Right` move by wor
 `Ctrl+C` copies the selection with its formatting. It pastes into an email or a Word document with its headings, lists, tables, quotes, links and code, and with its pictures and formulas as images. A terminal or a text editor gets plain text. `Ctrl+Shift+C` copies the markdown source of the selection.
 
 A double click selects a word and highlights every other place where the same word appears. A triple click selects the paragraph, the line of code or the table cell, and a click with `Shift` held extends the selection to that point. Select all is instant whatever the size of the file. A selection stays when you zoom, change the theme or resize the window, and both kinds of copy work before a big file has finished loading.
+
+### The image viewer
+
+A click on a picture, or on a diagram, opens it alone over the page, as large as the window allows and at natural size when it is smaller. The wheel zooms, from that fit up to eight times natural size; `0` goes back to the fit and `1` to natural size. While the picture is larger than the window, the arrow keys and a drag pan it, and a caption names the file, its size in pixels and the zoom. `Escape`, or a click away from the picture, closes the viewer.
+
+A picture wrapped in a link follows its link, and a picture still downloading stays a click away. A diagram shrunk to the width of the column shows its details in the viewer, and so do the pictures inside a book.
 
 ### Sidebar
 

@@ -71,7 +71,9 @@ const LONG_SIDE_CAP: u32 = 4096;
 
 /// The size an image of `w` by `h` is stored at: shrunk so its long
 /// side is at most the cap, aspect kept, or as it is within the cap.
-fn capped_size(w: u32, h: u32) -> (u32, u32) {
+/// Public for the viewer, which asks for pixels at the size the header
+/// promises and must not trust a book's header more than the decoder.
+pub fn capped_size(w: u32, h: u32) -> (u32, u32) {
     let long = w.max(h);
     if long <= LONG_SIDE_CAP {
         return (w, h);

@@ -565,6 +565,11 @@ pub const TIPS: &[Tip] = &[
     Tip {
         kind: TipKind::Tip,
         area: Area::Looks,
+        text: r#"A click on a picture, or on a diagram, opens it in the viewer: the wheel zooms, the arrows pan, and `Escape` comes back to the page."#,
+    },
+    Tip {
+        kind: TipKind::Tip,
+        area: Area::Looks,
         text: r#"Oryx comes with over thirty themes, and each is a plain TOML file with 51 color roles, one for every kind of element on the page."#,
     },
     Tip {
@@ -872,6 +877,7 @@ pub fn page() -> String {
         out,
         "A double click selects the word, a triple click the paragraph or the code line, \
          and a click with `Shift` held extends the selection to where you click. \
+         A click on a picture or a diagram opens it in the viewer, alone over the page. \
          The wheel scrolls, and with `{}` held it zooms; dragging the scrollbar or its \
          track jumps. A file dropped onto the window opens, and a dropped folder opens \
          the sidebar on it. On a touch screen, swiping scrolls with momentum, tapping \

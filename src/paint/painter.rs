@@ -166,6 +166,12 @@ impl<'a> Painter<'a> {
         self.pixmap.height() as f32 / self.scale
     }
 
+    /// Physical pixels per logical unit, the density a caller resizing
+    /// its own media needs to land exact pixels on the canvas.
+    pub fn scale(&self) -> f32 {
+        self.scale
+    }
+
     fn mark(&mut self, x: f32, y: f32, w: f32, h: f32) {
         let mut region = (x, y, x + w, y + h);
         if let Some((cx0, cy0, cx1, cy1)) = self.clip {
@@ -312,6 +318,56 @@ impl<'a> Painter<'a> {
                 data[i + 1] = c.g;
                 data[i + 2] = c.b;
                 data[i + 3] = 255;
+            }
+        }
+    }
+
+    /// Blits an RGBA buffer stretched over the logical rect `(x, y, w,
+    /// h)`. The buffer is `src_w` by `src_h` straight-alpha pixels;
+    /// sampling is nearest, exact when the rect's physical size matches
+    /// the buffer's, which the image viewer arranges by resizing its
+    /// own copy. Pixels already on the canvas show through a
+    /// translucent source, source-over.
+    #[allow(clippy::too_many_arguments)]
+    pub fn image(&mut self, rgba: &[u8], x: f32, y: f32, w: f32, h: f32, src_w: u32, src_h: u32) {
+        debug_assert_eq!(rgba.len(), src_w as usize * src_h as usize * 4);
+        let s = self.scale;
+        let (x, y, w, h) = (x * s, y * s, w * s, h * s);
+        if w <= 0.0 || h <= 0.0 || src_w == 0 || src_h == 0 {
+            return;
+        }
+        self.mark(x, y, w, h);
+        let width = self.pixmap.width() as i32;
+        let (bx0, by0, bx1, by1) = self.bounds();
+        let x0 = (x.floor() as i32).max(bx0);
+        let y0 = (y.floor() as i32).max(by0);
+        let x1 = ((x + w).ceil() as i32).min(bx1);
+        let y1 = ((y + h).ceil() as i32).min(by1);
+        let to_x = |px: i32| ((px as f32 - x) / w * src_w as f32) as u32;
+        let to_y = |py: i32| ((py as f32 - y) / h * src_h as f32) as u32;
+        let data = self.pixmap.data_mut();
+        for py in y0..y1 {
+            let sy = to_y(py).min(src_h - 1);
+            let row = (sy * src_w) as usize * 4;
+            for px in x0..x1 {
+                let sx = to_x(px).min(src_w - 1);
+                let si = row + sx as usize * 4;
+                let sa = rgba[si + 3] as u32;
+                let di = ((py * width + px) * 4) as usize;
+                if sa == 255 {
+                    data[di..di + 4].copy_from_slice(&rgba[si..si + 4]);
+                } else if sa > 0 {
+                    let da = data[di + 3] as u32;
+                    let out_a = sa + da * (255 - sa) / 255;
+                    let over = |sc: u8, dc: u8| {
+                        ((sc as u32 * sa * 255 + dc as u32 * da * (255 - sa))
+                            / (out_a * 255).max(1)) as u8
+                    };
+                    data[di] = over(rgba[si], data[di]);
+                    data[di + 1] = over(rgba[si + 1], data[di + 1]);
+                    data[di + 2] = over(rgba[si + 2], data[di + 2]);
+                    data[di + 3] = out_a as u8;
+                }
             }
         }
     }
@@ -559,6 +615,52 @@ mod tests {
         let painter = Painter::new(&mut pixmap, &mut fonts, None, 2.0);
         assert_eq!(painter.width(), 100.0);
         assert_eq!(painter.height(), 50.0);
+    }
+
+    #[test]
+    fn an_image_blits_opaque_and_blends_translucent() {
+        let mut pixmap = Pixmap::new(20, 10).unwrap();
+        let mut fonts = FontStore::new();
+        let mut painter = Painter::new(&mut pixmap, &mut fonts, None, 1.0);
+        // The left half of the source is opaque blue, the right half
+        // half-transparent red over nothing; drawn twice as wide, each
+        // source pixel covers two canvas pixels.
+        let src: Vec<u8> = [
+            (0, 0, 255, 255),
+            (255, 0, 0, 128),
+            (0, 0, 255, 255),
+            (255, 0, 0, 128),
+        ]
+        .into_iter()
+        .flat_map(|(r, g, b, a)| [r, g, b, a])
+        .collect();
+        painter.image(&src, 0.0, 0.0, 8.0, 4.0, 2, 2);
+        drop(painter);
+        let opaque = pixmap.pixel(0, 0).expect("blitted");
+        assert_eq!((opaque.red(), opaque.blue()), (0, 255));
+        assert_eq!(opaque.alpha(), 255);
+        // Half-transparent red over a transparent canvas: the color
+        // stays whole and the alpha half.
+        let blend = pixmap.pixel(4, 0).expect("blitted");
+        assert_eq!((blend.red(), blend.green()), (255, 0));
+        assert_eq!(blend.alpha(), 128);
+        // Outside the rect, nothing.
+        assert!(pixmap.pixel(9, 0).is_none_or(|p| p.alpha() == 0));
+    }
+
+    #[test]
+    fn an_image_clips_to_the_canvas_and_the_clip_rect() {
+        let mut pixmap = Pixmap::new(10, 10).unwrap();
+        let mut fonts = FontStore::new();
+        let mut painter = Painter::new(&mut pixmap, &mut fonts, None, 1.0);
+        painter.clip(Some((0.0, 0.0, 5.0, 10.0)));
+        let src = vec![255u8; 4 * 4 * 4];
+        painter.image(&src, -4.0, -4.0, 16.0, 16.0, 4, 4);
+        drop(painter);
+        assert!(painted(&pixmap, 4, 4), "inside the clip");
+        assert!(!painted(&pixmap, 6, 4), "the clip holds at 5");
+        assert!(painted(&pixmap, 4, 9), "down to the canvas corner");
+        assert!(!painted(&pixmap, 6, 9));
     }
 
     #[test]

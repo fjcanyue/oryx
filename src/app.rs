@@ -57,6 +57,7 @@ use oryx::ui::textfield::{Edit, TextField};
 use oryx::ui::theme_browser::ThemeBrowser;
 use oryx::ui::theme_editor::ThemeEditor;
 use oryx::ui::tooltip;
+use oryx::ui::viewer::Viewer;
 use oryx::ui::wordcount;
 use oryx::workspace_search::{self, SearchEvent};
 use winit::application::ApplicationHandler;
@@ -7894,7 +7895,9 @@ impl App {
     /// Applies what an overlay asked for after handling an event.
     fn overlay_result(&mut self, result: OverlayResult) {
         match result {
-            OverlayResult::Open => {}
+            // Open says the overlay may have changed and wants a
+            // redraw; the loop waits, so the frame must be asked for.
+            OverlayResult::Open => self.request_redraw(),
             // The apply moves the revert point forward, so the close
             // that follows restores nothing.
             OverlayResult::ApplyAndClose(action) => {
@@ -7923,6 +7926,9 @@ impl App {
                         self.set_live_theme(previous);
                     }
                 }
+                // The overlay left the screen: a frame has to paint the
+                // page back over it.
+                self.request_redraw();
             }
             OverlayResult::Apply(Action::SetTheme(path)) => {
                 self.apply_theme(&path);
@@ -8179,6 +8185,9 @@ impl App {
             if let Some(group) = lay.summary_at(&self.document, x, y) {
                 self.document.toggle_details(group);
                 self.restart_layout();
+            } else if let Some(place) = lay.image_at(x, y) {
+                let src = place.src.clone();
+                self.open_viewer(&src);
             }
             return;
         };
@@ -8243,6 +8252,26 @@ impl App {
         }
     }
 
+    /// Opens the image or the diagram under a click in the viewer: the
+    /// media's own pixels from the cache the page blits from. A picture
+    /// still on its way answers nothing and stays a click away.
+    fn open_viewer(&mut self, src: &str) {
+        let Some((w, h)) = self.media.dimensions(src) else {
+            return;
+        };
+        let (w, h) = images::capped_size(w, h);
+        let Some(pixels) = self.media.scaled(src, w, h).map(<[u8]>::to_vec) else {
+            return;
+        };
+        let name = if src.starts_with("mermaid://") {
+            String::from("diagram")
+        } else {
+            src.rsplit(['/', '\\']).next().unwrap_or(src).to_string()
+        };
+        self.overlay = Some(Box::new(Viewer::new(pixels, w, h, name)));
+        self.request_redraw();
+    }
+
     /// Track whether a link sits under the cursor and swap the pointer icon
     /// on transitions.
     fn update_hover(&mut self) {
@@ -8273,6 +8302,7 @@ impl App {
                     l.link_at(&self.document, x, y).is_some()
                         || l.summary_at(&self.document, x, y).is_some()
                         || (self.mode == edit::Mode::Read && l.checkbox_at(x, y).is_some())
+                        || (self.mode == edit::Mode::Read && l.image_at(x, y).is_some())
                 }));
         let tip = (!on_edge)
             .then(|| {

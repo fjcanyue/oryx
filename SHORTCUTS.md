@@ -105,6 +105,16 @@ With text selected, typing a bracket, a quote, `*`, `_` or a backtick wraps the 
 | `Ctrl+J` | Justify the text on or off (markdown and books) |
 | `Ctrl+D` | Reading direction: automatic, right to left, left to right; in a comic, the page order |
 
+## The image viewer
+
+| Key | What it does |
+|---|---|
+| Click on a picture or a diagram | Open it in the viewer, over the page |
+| `Escape`, or a click away | Close the viewer |
+| `+` / `-`, wheel | Zoom, from the fit up to eight times natural size |
+| `0` / `1` | Back to the fit / to natural size |
+| Arrow keys, drag | Pan while the picture is larger than the window |
+
 ## Export
 
 | Key | What it does |
@@ -130,6 +140,7 @@ With text selected, typing a bracket, a quote, `*`, `_` or a backtick wraps the 
 | Triple click | Select the paragraph, the line of code or the table cell |
 | `Shift` + click | Extend the selection to the click |
 | Click on a task box | Tick or untick it, without entering the editor |
+| Click on a picture or a diagram | Open it in the viewer |
 | Middle click on a file in the sidebar | Open it in a second window |
 | `Ctrl` + mouse wheel | Zoom |
 | Back and forward mouse buttons | Same as `Alt+Left` / `Alt+Right` |

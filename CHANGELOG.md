@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+### Image viewer
+
+- A click on a picture or a Mermaid diagram opens it alone over the page, as large as the window allows and at natural size when it is smaller. `Escape`, or a click away from it, closes the viewer; the pictures inside a book open the same way.
+- The wheel zooms, from that fit up to eight times natural size; `0` goes back to the fit and `1` to natural size. While the media is larger than the window, the arrow keys and a drag pan it. A caption names the file, its size in pixels and the zoom.
+
 Workspace search in the sidebar's Files tab, built on ripgrep's own search crates — no external tool, everything off the UI thread.
 
 ### Find files

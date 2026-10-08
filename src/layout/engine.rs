@@ -822,6 +822,17 @@ impl LayoutDoc {
         })
     }
 
+    /// The image under a point in document coordinates, if any: the
+    /// media a click can open in the viewer. Linked images answer here
+    /// too, but `link_at` finds them first, so a click follows the link.
+    pub fn image_at(&self, x: f32, y: f32) -> Option<&ImagePlace> {
+        let (head, tail) = self.images_in(y, y);
+        self.images[head]
+            .iter()
+            .chain(&self.images[tail])
+            .find(|i| x >= i.x && x <= i.x + i.width && y >= i.y && y <= i.y + i.height)
+    }
+
     /// The details group of the summary row under `y`, when `x` sits at
     /// or right of the content column's start. The whole row toggles,
     /// the disclosure convention, so only the vertical band is tested.
@@ -6961,6 +6972,65 @@ mod tests {
             .find(|r| l.run_text(doc, r) == text)
             .unwrap_or_else(|| panic!("no run shows {text:?}"))
             .y
+    }
+
+    #[test]
+    fn the_image_under_a_point_answers_for_the_viewer() {
+        // A block image places only when its pixels answer, so the
+        // folder holds a real one.
+        let dir = std::env::temp_dir().join(format!("oryx-lay-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        image::RgbaImage::from_pixel(60, 40, image::Rgba([90, 60, 30, 255]))
+            .save(dir.join("pic.png"))
+            .unwrap();
+        let doc = markdown::parse("text before\n\n![alt](pic.png)\n\ntext after\n");
+        let mut fonts = FontStore::new();
+        let mut media = MediaCache::offline(dir);
+        let l = layout(
+            &doc,
+            &Theme::default_dark(),
+            &mut fonts,
+            &mut media,
+            &ViewConfig::default(),
+            800.0,
+        );
+        let placed = l
+            .images
+            .iter()
+            .find(|i| i.src == "pic.png")
+            .expect("the image placed");
+        let hit = l
+            .image_at(
+                placed.x + placed.width / 2.0,
+                placed.y + placed.height / 2.0,
+            )
+            .expect("the click inside the image");
+        assert_eq!(hit.src, "pic.png");
+        assert!(
+            l.image_at(placed.x - 10.0, placed.y).is_none(),
+            "not outside"
+        );
+    }
+
+    #[test]
+    fn a_linked_image_still_places_but_the_link_outranks() {
+        let doc = markdown::parse("[![alt](pic.png)](https://oryx.example)\n");
+        let l = lay_of(&doc);
+        let placed = l
+            .images
+            .iter()
+            .find(|i| i.src == "pic.png")
+            .expect("the linked image placed");
+        let (x, y) = (
+            placed.x + placed.width / 2.0,
+            placed.y + placed.height / 2.0,
+        );
+        assert_eq!(
+            l.link_at(&doc, x, y),
+            Some("https://oryx.example"),
+            "the link wins the click"
+        );
+        assert!(l.image_at(x, y).is_some(), "the viewer finds it too");
     }
 
     #[test]
