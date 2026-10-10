@@ -247,11 +247,49 @@ pub trait Overlay {
     fn scroll(&mut self, _lines: f32) -> OverlayResult {
         OverlayResult::Open
     }
+    /// The wheel with the pointer at `(x, y)`, in logical units: an
+    /// overlay that zooms under the pointer overrides this, the rest
+    /// scroll without a place.
+    fn scroll_at(&mut self, lines: f32, _x: f32, _y: f32) -> OverlayResult {
+        self.scroll(lines)
+    }
+    /// When a deferred refinement is due, and the frame on screen is
+    /// its rough draft: the loop wakes at the instant and redraws, and
+    /// the overlay's own draw does the sharpening. None while nothing
+    /// waits.
+    fn refine_at(&self) -> Option<std::time::Instant> {
+        None
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_plain_scroll_delegates_to_the_placeless_one() {
+        /// An overlay that only counts the wheels it gets by the
+        /// placeless path, the way the panels do.
+        struct Panels(i32);
+        impl Overlay for Panels {
+            fn draw(&mut self, _painter: &mut Painter, _theme: &Theme) {}
+            fn key(&mut self, _key: &Key, _ctrl: bool, _shift: bool) -> OverlayResult {
+                OverlayResult::Open
+            }
+            fn click(&mut self, _x: f32, _y: f32) -> OverlayResult {
+                OverlayResult::Open
+            }
+            fn scroll(&mut self, lines: f32) -> OverlayResult {
+                self.0 += lines as i32;
+                OverlayResult::Open
+            }
+        }
+        let mut panels = Panels(0);
+        panels.scroll_at(3.0, 12.0, 34.0);
+        assert_eq!(panels.0, 3, "the pointer place reached the plain scroll");
+        // And nothing refines until an overlay says so.
+        assert_eq!(panels.refine_at(), None);
+    }
 
     #[test]
     fn derived_colors_keep_the_hue_and_scale_the_opacity() {

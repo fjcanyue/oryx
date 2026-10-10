@@ -1,7 +1,10 @@
 //! Image viewer: the overlay a click on a picture or a diagram opens.
 //! The media sits over a scrim at the largest size that fits, natural
-//! size when it is smaller than the window; the wheel zooms, a drag
-//! pans, and the caption names the file and its pixels.
+//! size when it is smaller than the window; the wheel zooms under the
+//! pointer, a drag pans, and the caption names the file and its pixels.
+
+use std::borrow::Cow;
+use std::time::{Duration, Instant};
 
 use image::RgbaImage;
 use winit::keyboard::{Key, NamedKey};
@@ -22,6 +25,42 @@ const ZOOM_STEP: f32 = 1.25;
 const ZOOM_MAX: f32 = 8.0;
 /// One arrow key pan, in logical units.
 const PAN: f32 = 60.0;
+/// How long after the last zoom or pan the sharp frame draws: the
+/// wheel turns faster than a resample can follow, so frames in motion
+/// blit the picture's own pixels and the sharp one lands once they
+/// stop.
+const REFINE_DELAY: Duration = Duration::from_millis(160);
+/// How many times the window's own pixels a whole-picture resample may
+/// cover. Deeper than that, the resample trims to what shows, so both
+/// its cost and its memory stay bounded by the window.
+const FULL_MARGIN: u64 = 2;
+
+/// A resampled buffer and the part of the picture it holds: the whole
+/// picture, or the natural-rect `spot` names for the trimmed kind.
+struct Sharp {
+    w: u32,
+    h: u32,
+    bytes: Vec<u8>,
+    /// The natural-rect the bytes cover; the whole picture for `None`.
+    spot: Option<(u32, u32, u32, u32)>,
+}
+
+/// What a frame at the current zoom owes. The picture's own pixels are
+/// the sharp frame wherever they cover the screen one to one or
+/// better; a shrinking view resamples, but only once motion stops.
+enum Frame {
+    /// Past natural size: blit the picture itself.
+    Upscale,
+    /// The cached whole-picture buffer already is this size.
+    Exact,
+    /// Motion: blit the picture, the cached trim over it when one
+    /// still lines up.
+    Rough,
+    /// Resample the whole picture to the rect's physical size.
+    Full,
+    /// Resample the visible trim, the rect having grown past the cap.
+    Crop,
+}
 
 /// The viewer over the page: the media's own pixels, where it sits on
 /// the screen, and the pan while it is zoomed past the window.
@@ -36,12 +75,20 @@ pub struct Viewer {
     offset: (f32, f32),
     /// The grab point while the button is held on the image.
     grab: Option<(f32, f32)>,
-    /// The resized copy at the last drawn physical size.
-    scaled: Option<(u32, u32, Vec<u8>)>,
+    /// The sharp buffer at the last refined view.
+    scaled: Option<Sharp>,
     /// The image's place at the last draw, for hit testing.
     placed: (f32, f32, f32, f32),
     /// The window size at the last draw, in logical units.
     window: (f32, f32),
+    /// Whether a draw has set the window and the opening fit.
+    sized: bool,
+    /// When motion ends and the sharp frame may draw.
+    motion_until: Instant,
+    /// Whether the frame on screen is the rough draft.
+    rough: bool,
+    /// The system clipboard, woken on the first copy.
+    clipboard: Option<arboard::Clipboard>,
 }
 
 impl Viewer {
@@ -55,6 +102,12 @@ impl Viewer {
             scaled: None,
             placed: (0.0, 0.0, 0.0, 0.0),
             window: (0.0, 0.0),
+            sized: false,
+            // Opening is motion: the first frame blits the picture and
+            // the sharp one follows the instant it opens.
+            motion_until: Instant::now() + REFINE_DELAY,
+            rough: false,
+            clipboard: None,
         }
     }
 
@@ -106,6 +159,32 @@ impl Viewer {
                 self.offset.1 * self.zoom / was,
             );
             self.offset = self.clamp(self.offset, self.window);
+            self.stir();
+        }
+    }
+
+    /// Zooms by `factor` keeping the point of the picture under the
+    /// anchor under it: the pointer is the anchor the wheel means. The
+    /// clamp still wins at the edges, where the picture cannot follow.
+    fn zoom_at(&mut self, factor: f32, anchor: (f32, f32)) {
+        if self.window.0 < 1.0 {
+            return;
+        }
+        let min = self.fit(self.window);
+        let was = self.zoom;
+        // The rect at the old zoom, read before the zoom moves: the
+        // anchor's natural point measures from where the picture sits.
+        let (x, y, _, _) = self.rect(self.window);
+        self.zoom = (self.zoom * factor).clamp(min, ZOOM_MAX);
+        if self.zoom != was {
+            let nx = (anchor.0 - x) / was;
+            let ny = (anchor.1 - y) / was;
+            let w = self.pixels.width() as f32 * self.zoom;
+            let h = self.pixels.height() as f32 * self.zoom;
+            self.offset.0 = anchor.0 - nx * self.zoom - (self.window.0 - w) / 2.0;
+            self.offset.1 = anchor.1 - ny * self.zoom - (self.window.1 - CAPTION_H - h) / 2.0;
+            self.offset = self.clamp(self.offset, self.window);
+            self.stir();
         }
     }
 
@@ -114,40 +193,186 @@ impl Viewer {
     fn reset(&mut self, natural: bool) {
         self.zoom = if natural { 1.0 } else { self.fit(self.window) };
         self.offset = (0.0, 0.0);
+        self.stir();
+    }
+
+    /// Notes motion: the sharp frame waits for it to end.
+    fn stir(&mut self) {
+        self.motion_until = Instant::now() + REFINE_DELAY;
+    }
+
+    /// What the frame at `(pw, ph)`, the rect's physical size, owes;
+    /// `ceil` is the whole-picture resample budget in pixels.
+    fn frame(&self, pw: u32, ph: u32, ceil: u64, now: Instant) -> Frame {
+        let nat = (self.pixels.width(), self.pixels.height());
+        if pw >= nat.0 && ph >= nat.1 {
+            return Frame::Upscale;
+        }
+        if matches!(&self.scaled, Some(s) if s.spot.is_none() && s.w == pw && s.h == ph) {
+            return Frame::Exact;
+        }
+        if now < self.motion_until {
+            return Frame::Rough;
+        }
+        if u64::from(pw) * u64::from(ph) <= ceil {
+            Frame::Full
+        } else {
+            Frame::Crop
+        }
+    }
+
+    /// The natural-rect the visible part shows, and the physical size
+    /// it deserves: trimmed by the crop, proportions kept.
+    fn trim(&self, scale: f32) -> ((u32, u32, u32, u32), (u32, u32), (f32, f32, f32, f32)) {
+        let (x, y, w, h) = self.rect(self.window);
+        let nat = (self.pixels.width(), self.pixels.height());
+        // The picture's part the window keeps, in logical units.
+        let left = x.max(0.0);
+        let top = y.max(0.0);
+        let right = (x + w).min(self.window.0);
+        let bottom = (y + h).min(self.window.1 - CAPTION_H).max(top);
+        // The same part in natural pixels, whole units, clamped in.
+        let nx = (((left - x) / self.zoom).floor().max(0.0) as u32).min(nat.0 - 1);
+        let ny = (((top - y) / self.zoom).floor().max(0.0) as u32).min(nat.1 - 1);
+        let ex = (((right - x) / self.zoom).ceil().min(nat.0 as f32) as u32).max(nx + 1);
+        let ey = (((bottom - y) / self.zoom).ceil().min(nat.1 as f32) as u32).max(ny + 1);
+        let spot = (nx, ny, ex - nx, ey - ny);
+        // Its size on screen: the trim's own pixels times the zoom,
+        // rounded the way the blit rounds.
+        let tw = (((ex - nx) as f32 * self.zoom * scale).round() as u32).max(1);
+        let th = (((ey - ny) as f32 * self.zoom * scale).round() as u32).max(1);
+        let sx = x + nx as f32 * self.zoom;
+        let sy = y + ny as f32 * self.zoom;
+        (
+            spot,
+            (tw, th),
+            (
+                sx,
+                sy,
+                (ex - nx) as f32 * self.zoom,
+                (ey - ny) as f32 * self.zoom,
+            ),
+        )
+    }
+
+    /// Copies the picture to the system clipboard. The clipboard is
+    /// commonly held by another party for a moment — a manager, a
+    /// poller — so a refused attempt tries again before it gives up.
+    fn copy(&mut self) {
+        if self.clipboard.is_none() {
+            self.clipboard = arboard::Clipboard::new().ok();
+        }
+        let Some(clipboard) = self.clipboard.as_mut() else {
+            return;
+        };
+        for attempt in 0..3 {
+            let data = arboard::ImageData {
+                width: self.pixels.width() as usize,
+                height: self.pixels.height() as usize,
+                bytes: Cow::Borrowed(self.pixels.as_raw()),
+            };
+            match clipboard.set_image(data) {
+                Ok(()) => return,
+                Err(_) if attempt < 2 => std::thread::sleep(Duration::from_millis(40)),
+                Err(err) => {
+                    eprintln!("oryx: image copy failed: {err}");
+                    return;
+                }
+            }
+        }
     }
 }
 
 impl Overlay for Viewer {
     fn draw(&mut self, painter: &mut Painter, theme: &Theme) {
         let window = (painter.width(), painter.height());
-        self.window = window;
-        if self.scaled.is_none() {
+        let scale = painter.scale();
+        if !self.sized {
             // The first draw opens at fit, not at natural size.
             self.zoom = self.fit(window);
+            self.sized = true;
+        }
+        let moved = window != self.window;
+        self.window = window;
+        if moved {
+            // A resized window re-seats the pan before it draws.
+            self.offset = self.clamp(self.offset, window);
+            self.stir();
         }
         painter.fill(0.0, 0.0, window.0, window.1, 0.0, overlay::SCRIM);
         let (x, y, w, h) = self.rect(window);
         self.placed = (x, y, w, h);
-
-        // The copy the canvas blits: resized only when its size moved,
-        // at the physical size the rect covers, so the blit is exact.
-        let pw = ((w * painter.scale()).round() as u32).max(1);
-        let ph = ((h * painter.scale()).round() as u32).max(1);
-        if self
-            .scaled
-            .as_ref()
-            .is_none_or(|(sw, sh, _)| *sw != pw || *sh != ph)
-        {
-            let resized = image::imageops::resize(
-                &self.pixels,
-                pw,
-                ph,
-                image::imageops::FilterType::Lanczos3,
-            );
-            self.scaled = Some((pw, ph, resized.into_raw()));
-        }
-        if let Some((sw, sh, rgba)) = self.scaled.as_ref() {
-            painter.image(rgba, x, y, w, h, *sw, *sh);
+        let nat = (self.pixels.width(), self.pixels.height());
+        let pw = ((w * scale).round() as u32).max(1);
+        let ph = ((h * scale).round() as u32).max(1);
+        let ceil =
+            FULL_MARGIN * ((window.0 * scale) as u64).max(1) * ((window.1 * scale) as u64).max(1);
+        let plan = self.frame(pw, ph, ceil, Instant::now());
+        match plan {
+            Frame::Upscale => {
+                // Every pixel of the picture covers one of the screen
+                // or more: the picture itself is the sharp frame.
+                self.scaled = None;
+                self.rough = false;
+                painter.image(self.pixels.as_raw(), x, y, w, h, nat.0, nat.1);
+            }
+            Frame::Exact => {
+                self.rough = false;
+                if let Some(s) = self.scaled.as_ref() {
+                    painter.image(&s.bytes, x, y, w, h, s.w, s.h);
+                }
+            }
+            Frame::Rough => {
+                // The picture as it is, the cached trim over the part
+                // it still lines up with, until motion ends.
+                self.rough = true;
+                painter.image(self.pixels.as_raw(), x, y, w, h, nat.0, nat.1);
+                if let Some(s) = self.scaled.as_ref() {
+                    if let Some(spot) = s.spot {
+                        let (sx, sy, sw, sh) = (
+                            x + spot.0 as f32 * self.zoom,
+                            y + spot.1 as f32 * self.zoom,
+                            spot.2 as f32 * self.zoom,
+                            spot.3 as f32 * self.zoom,
+                        );
+                        painter.image(&s.bytes, sx, sy, sw, sh, s.w, s.h);
+                    }
+                }
+            }
+            Frame::Full => {
+                let resized = image::imageops::resize(
+                    &self.pixels,
+                    pw,
+                    ph,
+                    image::imageops::FilterType::Lanczos3,
+                );
+                painter.image(&resized, x, y, w, h, pw, ph);
+                self.scaled = Some(Sharp {
+                    w: pw,
+                    h: ph,
+                    bytes: resized.into_raw(),
+                    spot: None,
+                });
+                self.rough = false;
+            }
+            Frame::Crop => {
+                let (spot, (tw, th), (sx, sy, sw, sh)) = self.trim(scale);
+                let crop = image::imageops::crop_imm(&self.pixels, spot.0, spot.1, spot.2, spot.3);
+                let resized = image::imageops::resize(
+                    crop.inner(),
+                    tw,
+                    th,
+                    image::imageops::FilterType::Lanczos3,
+                );
+                painter.image(&resized, sx, sy, sw, sh, tw, th);
+                self.scaled = Some(Sharp {
+                    w: tw,
+                    h: th,
+                    bytes: resized.into_raw(),
+                    spot: Some(spot),
+                });
+                self.rough = false;
+            }
         }
 
         // The caption names the file, its pixels and the zoom.
@@ -181,9 +406,13 @@ impl Overlay for Viewer {
         );
     }
 
-    fn key(&mut self, key: &Key, _ctrl: bool, _shift: bool) -> OverlayResult {
+    fn key(&mut self, key: &Key, ctrl: bool, _shift: bool) -> OverlayResult {
         match key {
             Key::Named(NamedKey::Escape) => OverlayResult::Close,
+            Key::Character(text) if ctrl && text.eq_ignore_ascii_case("c") => {
+                self.copy();
+                OverlayResult::Open
+            }
             Key::Character(text) if matches!(text.as_str(), "+" | "=") => {
                 self.zoom_by(ZOOM_STEP);
                 OverlayResult::Open
@@ -203,21 +432,25 @@ impl Overlay for Viewer {
             Key::Named(NamedKey::ArrowLeft) => {
                 self.offset.0 += PAN;
                 self.offset = self.clamp(self.offset, self.window);
+                self.stir();
                 OverlayResult::Open
             }
             Key::Named(NamedKey::ArrowRight) => {
                 self.offset.0 -= PAN;
                 self.offset = self.clamp(self.offset, self.window);
+                self.stir();
                 OverlayResult::Open
             }
             Key::Named(NamedKey::ArrowUp) => {
                 self.offset.1 += PAN;
                 self.offset = self.clamp(self.offset, self.window);
+                self.stir();
                 OverlayResult::Open
             }
             Key::Named(NamedKey::ArrowDown) => {
                 self.offset.1 -= PAN;
                 self.offset = self.clamp(self.offset, self.window);
+                self.stir();
                 OverlayResult::Open
             }
             _ => OverlayResult::Open,
@@ -243,6 +476,7 @@ impl Overlay for Viewer {
             self.offset.1 += y - from_y;
             self.grab = Some((x, y));
             self.offset = self.clamp(self.offset, self.window);
+            self.stir();
         }
         OverlayResult::Open
     }
@@ -251,10 +485,15 @@ impl Overlay for Viewer {
         self.grab = None;
     }
 
-    fn scroll(&mut self, lines: f32) -> OverlayResult {
+    fn scroll_at(&mut self, lines: f32, x: f32, y: f32) -> OverlayResult {
         let steps = ZOOM_STEP.powf(lines.abs());
-        self.zoom_by(if lines > 0.0 { 1.0 / steps } else { steps });
+        let factor = if lines > 0.0 { 1.0 / steps } else { steps };
+        self.zoom_at(factor, (x, y));
         OverlayResult::Open
+    }
+
+    fn refine_at(&self) -> Option<Instant> {
+        self.rough.then_some(self.motion_until)
     }
 }
 
@@ -270,8 +509,15 @@ mod tests {
     /// handlers the way a draw does.
     fn drawn(mut view: Viewer, window: (f32, f32)) -> Viewer {
         view.window = window;
+        view.sized = true;
         view.zoom = view.fit(window);
         view.placed = view.rect(window);
+        view
+    }
+
+    /// The viewer with motion over: the sharp frame is due.
+    fn settled(mut view: Viewer) -> Viewer {
+        view.motion_until = Instant::now() - REFINE_DELAY;
         view
     }
 
@@ -341,17 +587,47 @@ mod tests {
     }
 
     #[test]
+    fn the_wheel_zooms_where_the_pointer_is() {
+        let mut view = settled(drawn(viewer(4000, 3000), (1000.0, 600.0)));
+        view.zoom = 1.0;
+        view.offset = (100.0, 60.0);
+        let anchor = (700.0, 400.0);
+        // The natural point under the anchor, before and after.
+        let (x, y, _, _) = view.rect((1000.0, 600.0));
+        let nx = (anchor.0 - x) / view.zoom;
+        let ny = (anchor.1 - y) / view.zoom;
+        view.zoom_at(2.0, anchor);
+        assert!((view.zoom - 2.0).abs() < 1e-6);
+        let (x, y, _, _) = view.rect((1000.0, 600.0));
+        assert!((x + nx * view.zoom - anchor.0).abs() < 1e-3);
+        assert!((y + ny * view.zoom - anchor.1).abs() < 1e-3);
+    }
+
+    #[test]
+    fn an_anchored_zoom_yields_to_the_clamp_at_the_edges() {
+        let mut view = settled(drawn(viewer(4000, 3000), (1000.0, 600.0)));
+        view.zoom = 1.0;
+        // A far-off anchor over the scrim: the picture still cannot
+        // slide past the reach the clamp allows.
+        view.zoom_at(2.0, (9000.0, -4000.0));
+        assert!((view.zoom - 2.0).abs() < 1e-6);
+        assert_eq!(view.offset, view.clamp(view.offset, (1000.0, 600.0)));
+    }
+
+    #[test]
     fn zoom_before_the_first_draw_holds() {
         let mut view = viewer(4000, 3000);
         view.zoom_by(ZOOM_STEP);
         assert_eq!(view.zoom, 1.0, "no window yet, nothing to fit");
+        view.zoom_at(ZOOM_STEP, (10.0, 10.0));
+        assert_eq!(view.zoom, 1.0);
     }
 
     #[test]
     fn the_wheel_and_the_keys_agree_on_the_step() {
         let mut view = drawn(viewer(4000, 3000), (1000.0, 600.0));
         view.zoom = 1.0;
-        view.scroll(-3.0);
+        view.scroll_at(-3.0, 500.0, 300.0);
         let wheel = view.zoom;
         view.zoom = 1.0;
         for _ in 0..3 {
@@ -419,5 +695,123 @@ mod tests {
             view.key(&Key::Named(NamedKey::Escape), false, false),
             OverlayResult::Close
         ));
+    }
+
+    #[test]
+    fn control_c_copies_without_touching_the_zoom() {
+        let mut view = drawn(viewer(40, 30), (1000.0, 600.0));
+        view.zoom = 1.0;
+        view.key(&Key::Character("c".into()), true, false);
+        view.key(&Key::Character("C".into()), true, false);
+        assert_eq!(view.zoom, 1.0, "the copy leaves the view alone");
+    }
+
+    #[test]
+    fn the_clipboard_copy_carries_the_pixels() {
+        // The data the copy sends is the picture's own RGBA, the same
+        // buffer the frames blit.
+        let view = Viewer::new(vec![7; 80 * 30 * 4], 80, 30, "dot.png".into());
+        assert_eq!(view.pixels.width(), 80);
+        assert_eq!(view.pixels.height(), 30);
+        assert_eq!(view.pixels.as_raw().len(), 80 * 30 * 4);
+        assert!(view.pixels.as_raw().iter().all(|&b| b == 7));
+    }
+
+    #[test]
+    fn a_big_picture_blits_rough_while_moving_and_sharpens_after() {
+        let mut view = drawn(viewer(4000, 3000), (1000.0, 600.0));
+        view.zoom = view.fit((1000.0, 600.0));
+        let pw = (4000.0 * view.zoom) as u32;
+        let ph = (3000.0 * view.zoom) as u32;
+        let ceil = FULL_MARGIN * 1000 * 600;
+        // Motion holds the sharp frame back.
+        view.stir();
+        assert!(matches!(
+            view.frame(pw, ph, ceil, Instant::now()),
+            Frame::Rough
+        ));
+        assert!(view.refine_at().is_none(), "not rough yet");
+        // The rough frame marks itself; its deadline is the motion's
+        // end, and once passed the whole-picture resample is due.
+        view.rough = true;
+        assert_eq!(view.refine_at(), Some(view.motion_until));
+        let view = settled(view);
+        assert!(matches!(
+            view.frame(pw, ph, ceil, Instant::now()),
+            Frame::Full
+        ));
+        // The frame it lands on answers nothing further.
+        let mut view = view;
+        view.rough = false;
+        view.scaled = Some(Sharp {
+            w: pw,
+            h: ph,
+            bytes: vec![0; (pw * ph * 4) as usize],
+            spot: None,
+        });
+        assert!(matches!(
+            view.frame(pw, ph, ceil, Instant::now()),
+            Frame::Exact
+        ));
+        assert_eq!(view.refine_at(), None);
+    }
+
+    #[test]
+    fn past_natural_size_the_picture_is_its_own_sharp_frame() {
+        let mut view = drawn(viewer(300, 200), (1000.0, 600.0));
+        view.zoom = 1.0;
+        view.scaled = None;
+        assert!(matches!(
+            view.frame(300, 200, 1, Instant::now()),
+            Frame::Upscale
+        ));
+        assert_eq!(view.refine_at(), None);
+    }
+
+    #[test]
+    fn a_deep_zoom_trims_the_resample_to_the_window() {
+        let mut view = settled(drawn(viewer(4000, 3000), (1000.0, 600.0)));
+        view.zoom = 0.8;
+        // The rect's pixels are past a tiny budget, so the trim wins.
+        let pw = (4000.0 * 0.8) as u32;
+        let ph = (3000.0 * 0.8) as u32;
+        assert!(matches!(
+            view.frame(pw, ph, 1000, Instant::now()),
+            Frame::Crop
+        ));
+        let (spot, (tw, th), (sx, sy, sw, sh)) = view.trim(1.0);
+        // The trim covers the visible window's worth of natural pixels:
+        // the width whole, the height less the caption band.
+        assert_eq!(spot.2, 1250, "the window's width over the zoom");
+        assert_eq!(spot.3, 696, "the window's height less the caption");
+        assert_eq!(tw, (spot.2 as f32 * 0.8).round() as u32);
+        assert_eq!(th, (spot.3 as f32 * 0.8).round() as u32);
+        // And it blits at its own place on the picture.
+        let (x, y, _, _) = view.rect((1000.0, 600.0));
+        assert!((sx - (x + spot.0 as f32 * 0.8)).abs() < 1e-6);
+        assert!((sy - (y + spot.1 as f32 * 0.8)).abs() < 1e-6);
+        assert!((sw - spot.2 as f32 * 0.8).abs() < 1e-6);
+        assert!((sh - spot.3 as f32 * 0.8).abs() < 1e-6);
+    }
+
+    #[test]
+    fn the_trim_stays_inside_the_picture() {
+        let mut view = settled(drawn(viewer(1000, 800), (500.0, 400.0)));
+        // Zoomed past the window on every side, half off it.
+        view.zoom = 2.0;
+        view.offset = (-200.0, 100.0);
+        let ((nx, ny, nw, nh), _, _) = view.trim(1.0);
+        assert!(nw >= 1 && nh >= 1);
+        assert!(nx + nw <= 1000 && ny + nh <= 800, "clamped at the edges");
+        // The trim is the visible part: the window's worth of natural
+        // pixels, wherever the pan put it.
+        assert!(
+            (nw as f32 - 250.0).abs() <= 1.0,
+            "the window's width over the zoom"
+        );
+        assert!(
+            (nh as f32 - 178.0).abs() <= 1.0,
+            "its height less the caption"
+        );
     }
 }

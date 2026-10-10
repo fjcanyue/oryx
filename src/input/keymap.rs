@@ -639,13 +639,19 @@ pub const SHORTCUTS: &[Shortcut] = &[
     // Handled by the viewer overlay itself, so no command binding.
     Shortcut {
         keys: "0 / 1",
-        action: "The open picture or diagram: fit the window / natural size; the wheel and the + and - keys zoom it",
+        action: "The open picture or diagram: fit the window / natural size; the wheel and the + and - keys zoom it, the wheel where the pointer is",
         section: "Viewer",
         bindings: &[],
     },
     Shortcut {
         keys: "Arrow keys",
         action: "Pan the open picture while it is larger than the window; a drag pans too",
+        section: "Viewer",
+        bindings: &[],
+    },
+    Shortcut {
+        keys: "Escape / Ctrl+C",
+        action: "Close the viewer / copy the open picture or diagram to the clipboard",
         section: "Viewer",
         bindings: &[],
     },

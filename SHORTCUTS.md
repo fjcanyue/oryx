@@ -111,9 +111,10 @@ With text selected, typing a bracket, a quote, `*`, `_` or a backtick wraps the 
 |---|---|
 | Click on a picture or a diagram | Open it in the viewer, over the page |
 | `Escape`, or a click away | Close the viewer |
-| `+` / `-`, wheel | Zoom, from the fit up to eight times natural size |
+| `+` / `-`, wheel | Zoom, from the fit up to eight times natural size; the wheel zooms where the pointer is |
 | `0` / `1` | Back to the fit / to natural size |
 | Arrow keys, drag | Pan while the picture is larger than the window |
+| `Ctrl+C` | Copy the open picture or diagram to the clipboard |
 
 ## Export
 

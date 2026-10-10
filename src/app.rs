@@ -8253,14 +8253,11 @@ impl App {
     }
 
     /// Opens the image or the diagram under a click in the viewer: the
-    /// media's own pixels from the cache the page blits from. A picture
-    /// still on its way answers nothing and stays a click away.
+    /// media's own pixels as stored, no resample on the way in — the
+    /// viewer's first frame blits them and sharpens once it stands. A
+    /// picture still on its way answers nothing and stays a click away.
     fn open_viewer(&mut self, src: &str) {
-        let Some((w, h)) = self.media.dimensions(src) else {
-            return;
-        };
-        let (w, h) = images::capped_size(w, h);
-        let Some(pixels) = self.media.scaled(src, w, h).map(<[u8]>::to_vec) else {
+        let Some((pixels, w, h)) = self.media.natural(src) else {
             return;
         };
         let name = if src.starts_with("mermaid://") {
@@ -9245,6 +9242,16 @@ impl ApplicationHandler for App {
                 wake.by(at);
             }
         }
+        // An overlay showing its rough draft wakes the loop when the
+        // sharp frame is due: the viewer's resample lands once the
+        // zoom or the pan stops.
+        if let Some(at) = self.overlay.as_ref().and_then(|o| o.refine_at()) {
+            if Instant::now() >= at {
+                self.request_redraw();
+            } else {
+                wake.by(at);
+            }
+        }
         self.maybe_speculate();
         self.step_fling(&mut wake);
         event_loop.set_control_flow(wake.control_flow());
@@ -9568,7 +9575,11 @@ impl ApplicationHandler for App {
                 };
                 let over_sidebar = (self.cursor.x as f32) < self.inset();
                 if let Some(overlay) = self.overlay.as_mut() {
-                    let result = overlay.scroll(lines);
+                    let (ux, uy) = (
+                        self.cursor.x as f32 / self.scale,
+                        self.cursor.y as f32 / self.scale,
+                    );
+                    let result = overlay.scroll_at(lines, ux, uy);
                     self.overlay_result(result);
                 } else if let Some(side) = self.sidebar.as_mut().filter(|_| over_sidebar) {
                     side.wheel(lines * 3.0, &mut self.outline);

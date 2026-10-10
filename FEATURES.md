@@ -102,7 +102,9 @@ A double click selects a word and highlights every other place where the same wo
 
 ### The image viewer
 
-A click on a picture, or on a diagram, opens it alone over the page, as large as the window allows and at natural size when it is smaller. The wheel zooms, from that fit up to eight times natural size; `0` goes back to the fit and `1` to natural size. While the picture is larger than the window, the arrow keys and a drag pan it, and a caption names the file, its size in pixels and the zoom. `Escape`, or a click away from the picture, closes the viewer.
+A click on a picture, or on a diagram, opens it alone over the page, as large as the window allows and at natural size when it is smaller. The wheel zooms under the pointer — the point of the picture under the cursor stays under it — from that fit up to eight times natural size; `0` goes back to the fit and `1` to natural size. While the picture is larger than the window, the arrow keys and a drag pan it, and a caption names the file, its size in pixels and the zoom. `Ctrl+C` copies the picture to the clipboard, pixels and size as they are. `Escape`, or a click away from the picture, closes the viewer.
+
+The viewer opens at once, even on a camera photograph: the first frame shows the picture's own pixels, and the sharpened frame replaces it the moment the zoom or the pan stops. Zooming and panning never wait on a resample.
 
 A picture wrapped in a link follows its link, and a picture still downloading stays a click away. A diagram shrunk to the width of the column shows its details in the viewer, and so do the pictures inside a book.
 

@@ -71,9 +71,9 @@ const LONG_SIDE_CAP: u32 = 4096;
 
 /// The size an image of `w` by `h` is stored at: shrunk so its long
 /// side is at most the cap, aspect kept, or as it is within the cap.
-/// Public for the viewer, which asks for pixels at the size the header
-/// promises and must not trust a book's header more than the decoder.
-pub fn capped_size(w: u32, h: u32) -> (u32, u32) {
+/// A book's header is not trusted more than its decoder, so every
+/// promised size passes through here.
+fn capped_size(w: u32, h: u32) -> (u32, u32) {
     let long = w.max(h);
     if long <= LONG_SIDE_CAP {
         return (w, h);
@@ -893,6 +893,13 @@ impl MediaCache {
             self.sizes.insert(src.to_string(), size);
         }
         self.sizes[src]
+    }
+
+    /// The stored original's own RGBA pixels, size and all, with no
+    /// resample: the viewer's opening frame, which the blit scales.
+    pub fn natural(&mut self, src: &str) -> Option<(Vec<u8>, u32, u32)> {
+        let image = self.original(src)?;
+        Some((image.as_raw().clone(), image.width(), image.height()))
     }
 
     /// The encoded bytes of an image as they are stored, for a copy
