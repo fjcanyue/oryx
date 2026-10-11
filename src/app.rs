@@ -8887,7 +8887,14 @@ impl ApplicationHandler for App {
                 let claimed = resolved.is_some()
                     || (self.search.is_some()
                         && matches!(&latin, Key::Character(c) if c.eq_ignore_ascii_case("r")));
-                let alt = alt && !keymap::alt_typing(&logical_key, alt, claimed);
+                let alt = alt
+                    && !keymap::alt_typing(
+                        &logical_key,
+                        ctrl,
+                        alt,
+                        claimed,
+                        cfg!(target_os = "macos"),
+                    );
                 let key = if keymap::chord_held(ctrl, alt) {
                     &latin
                 } else {

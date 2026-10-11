@@ -716,15 +716,17 @@ pub fn latin_key(key: &Key, code: PhysicalKey) -> Key {
     }
 }
 
-/// Whether a press with these modifiers is a chord for a field or the
-/// A press with Alt held that types rather than chords: its character is
-/// not ASCII (Option on a Mac types one, the left Ctrl+Alt on Windows
-/// too) and no chord claims the key. The editor and the fields then
-/// take the character with Alt off.
-pub fn alt_typing(logical: &Key, alt: bool, claimed: bool) -> bool {
-    alt && !claimed && matches!(logical, Key::Character(c) if !c.is_ascii())
+/// A press with Option held that types rather than chords, on a Mac
+/// only: Option gives a character of its own there (a symbol, or an
+/// accented letter), and a key that no chord claims types it. Elsewhere
+/// Alt leaves the character as it is, and a press with Alt is a chord or
+/// nothing. Ctrl held beside Alt stands as typed (`chord_held`). The
+/// editor and the fields then take the character with Alt off.
+pub fn alt_typing(logical: &Key, ctrl: bool, alt: bool, claimed: bool, mac: bool) -> bool {
+    mac && alt && !ctrl && !claimed && matches!(logical, Key::Character(_))
 }
 
+/// Whether a press with these modifiers is a chord for a field or the
 /// editor, which then match it with `latin_key`: Ctrl or Alt alone.
 /// Both held is an AltGr character on Windows, which stands as typed.
 pub fn chord_held(ctrl: bool, alt: bool) -> bool {
@@ -796,22 +798,36 @@ mod tests {
     #[test]
     fn an_option_character_is_typing_unless_a_chord_claims_it() {
         let option_d = Key::Character("\u{2202}".into());
+        let at = Key::Character("@".into());
+        let mac = true;
         assert!(
-            alt_typing(&option_d, true, false),
+            alt_typing(&option_d, false, true, false, mac),
             "Option+D on a Mac types its character"
         );
         assert!(
-            !alt_typing(&option_d, false, false),
+            alt_typing(&at, false, true, false, mac),
+            "Option+L on a German Mac types @, ASCII"
+        );
+        assert!(
+            !alt_typing(&option_d, false, false, false, mac),
             "without Alt it is a plain character already"
         );
         assert!(
-            !alt_typing(&option_d, true, true),
+            !alt_typing(&option_d, false, true, true, mac),
             "a chord that claims the key wins, as Alt+X does"
         );
-        let alt_d = Key::Character("d".into());
         assert!(
-            !alt_typing(&alt_d, true, false),
-            "Alt with an ASCII letter is a chord"
+            !alt_typing(&option_d, true, true, false, mac),
+            "Cmd beside Option is a chord, not typing"
+        );
+        let cyrillic_d = Key::Character("\u{432}".into());
+        assert!(
+            !alt_typing(&cyrillic_d, false, true, false, !mac),
+            "elsewhere Alt leaves the character: a chord or nothing"
+        );
+        assert!(
+            !alt_typing(&cyrillic_d, true, true, false, !mac),
+            "Ctrl+Alt with a letter stands as typed, and types nothing"
         );
     }
 
