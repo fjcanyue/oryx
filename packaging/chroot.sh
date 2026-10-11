@@ -6,10 +6,12 @@
 # covers Debian 12, Ubuntu 22.04, Fedora 36, openSUSE Leap 15.4 and newer.
 #
 # Inside: build-essential, libssl-dev, pkg-config, curl, ca-certificates,
-# git, and a build user carrying the invoking user's uid with a rustup
-# stable toolchain, so build-linux.sh can enter the root through
-# bubblewrap without root and write as that user. Every step checks what
-# is already there, so an interrupted run resumes with the same command.
+# git, and a build user carrying the invoking user's uid with rustup and
+# a stable toolchain, so build-linux.sh can enter the root through
+# bubblewrap without root and write as that user. The build itself uses
+# the version named in rust-toolchain.toml, which rustup installs in the
+# root at the first build. Every step checks what is already there, so an
+# interrupted run resumes with the same command.
 set -e
 ROOT=/var/lib/oryx-jammy
 MIRROR=http://archive.ubuntu.com/ubuntu

@@ -67,7 +67,7 @@ Oryx uses OpenSSL to download remote images, such as the badges at the top of a 
 
 ## Building from source
 
-You need Rust 1.89 or later. On Linux, the build also needs a C compiler, `pkg-config` and the development files of OpenSSL:
+You need Rust 1.89 or later. If you use rustup, it installs the version named in `rust-toolchain.toml` by itself. On Linux, the build also needs a C compiler, `pkg-config` and the development files of OpenSSL:
 
 - Debian and Ubuntu: `sudo apt-get install pkg-config libssl-dev`
 - Fedora: `sudo dnf install pkgconf perl-FindBin perl-IPC-Cmd openssl-devel`
