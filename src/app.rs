@@ -956,17 +956,21 @@ fn kept_layout(
 
 /// What the guess asks for among the code lines near the view: the
 /// first block with a language whose exact mark has not reached the end
-/// of its lines in view, from that mark to that end. A range the
-/// standing request already covers asks for nothing, and neither does a
-/// range a landed guess colored (`guessed`, the line each block's guess
-/// reached): a guess is asked again only when a newer one dropped it,
-/// or two cold blocks near the view alternate without end (issue #9).
+/// of its lines in view, from that mark to that end. Nothing while a
+/// guess is in flight, or the new one would drop it before it lands. A
+/// band that a landed guess covers (`guessed`, the ranges each block's
+/// guesses colored) asks for nothing either, or two cold blocks near
+/// the view alternate without end (issue #9). A band covered in part is
+/// asked whole, as after a jump to the end and a scroll back up.
 fn speculation_target(
     doc: &Document,
     visible: &[(usize, std::ops::Range<usize>)],
-    standing: Option<&(usize, std::ops::Range<usize>)>,
-    guessed: &HashMap<usize, usize>,
+    in_flight: bool,
+    guessed: &HashMap<usize, Vec<std::ops::Range<usize>>>,
 ) -> Option<(usize, std::ops::Range<usize>)> {
+    if in_flight {
+        return None;
+    }
     for (block, lines) in visible {
         let Some(BlockKind::CodeBlock {
             language, exact, ..
@@ -978,18 +982,31 @@ fn speculation_target(
             continue;
         }
         let band = (*exact).max(lines.start)..lines.end;
-        if standing.is_some_and(|(b, r)| b == block && r.start <= band.start && r.end >= band.end) {
-            continue;
-        }
-        if guessed
-            .get(block)
-            .is_some_and(|&reached| reached >= band.end)
-        {
+        if guessed.get(block).is_some_and(|ranges| {
+            ranges
+                .iter()
+                .any(|r| r.start <= band.start && r.end >= band.end)
+        }) {
             continue;
         }
         return Some((*block, band));
     }
     None
+}
+
+/// Records a landed guess among a block's ranges, merged with the ones
+/// it touches, so a scroll ahead of the sweep keeps one range per block.
+fn note_guess(ranges: &mut Vec<std::ops::Range<usize>>, landed: std::ops::Range<usize>) {
+    let mut merged = landed;
+    ranges.retain(|r| {
+        if r.start <= merged.end && merged.start <= r.end {
+            merged = merged.start.min(r.start)..merged.end.max(r.end);
+            false
+        } else {
+            true
+        }
+    });
+    ranges.push(merged);
 }
 
 /// The rendered page set aside while its source is edited. A return
@@ -1572,13 +1589,13 @@ struct App {
     /// sweep's arrivals: the (line, state) pairs a later sweep can
     /// resume from and converge against.
     seams: HashMap<usize, Vec<(usize, highlight::Seam)>>,
-    /// The band the standing speculation covers, so a resting view
-    /// asks once.
+    /// The guess in flight, cleared when its arrival lands; nothing
+    /// else is asked meanwhile, or the new guess would drop it.
     spec_band: Option<(usize, std::ops::Range<usize>)>,
-    /// Per block, the line a landed guess colored up to, in the live
-    /// generation. A guess that landed is not asked again, or two cold
-    /// blocks near the view alternate without end (issue #9).
-    guessed: HashMap<usize, usize>,
+    /// Per block, the line ranges the landed guesses colored, kept until
+    /// the text changes. A band they cover is not asked again, or two
+    /// cold blocks near the view alternate without end (issue #9).
+    guessed: HashMap<usize, Vec<std::ops::Range<usize>>>,
     /// A jump to the bottom of a document the pass had not finished
     /// placing, waiting for the whole document to seat it.
     bottom_hold: scroll::BottomHold,
@@ -5671,8 +5688,8 @@ impl App {
     /// Colors the visible band ahead of the exact sweep when the view
     /// rests on lines the sweep has not reached, so a jump into a huge
     /// file does not sit on plain text for the length of the wash. The
-    /// band is padded a screen each way; a band the standing request
-    /// or a landed guess already covers asks for nothing
+    /// band is padded a screen each way; one guess is in flight at a
+    /// time, and a band a landed guess covers asks for nothing
     /// (`speculation_target`).
     fn maybe_speculate(&mut self) {
         if self.document.plain_file || self.drag.is_some() || self.sel_anchor.is_some() {
@@ -5690,7 +5707,7 @@ impl App {
         let Some((block, band)) = speculation_target(
             &self.document,
             &visible,
-            self.spec_band.as_ref(),
+            self.spec_band.is_some(),
             &self.guessed,
         ) else {
             return;
@@ -5877,8 +5894,13 @@ impl App {
                     highlight::record_seam(table, line, seam);
                 }
                 (_, true) => {
-                    let reached = self.guessed.entry(arrival.block).or_insert(0);
-                    *reached = (*reached).max(line);
+                    // The guess in flight landed: the next cold block
+                    // may be asked.
+                    self.spec_band = None;
+                    note_guess(
+                        self.guessed.entry(arrival.block).or_default(),
+                        arrival.start_line..line,
+                    );
                 }
                 (None, false) => {}
             }
@@ -7105,6 +7127,9 @@ impl App {
         self.band = None;
         self.pending_band_for = None;
         self.close_search();
+        // Recolors still owed name the help page's blocks, not this
+        // document's; its own sweep starts from scratch below.
+        self.pending_recolor.clear();
         self.start_highlight(load::pending(&self.document));
         if self.mode == edit::Mode::Edit {
             self.wake_caret();
@@ -9174,18 +9199,54 @@ mod tests {
         doc
     }
 
+    /// One code block of ten lines, cold: a code file, windowed by lines.
+    fn one_cold_block() -> super::Document {
+        let body: String = (0..10).map(|i| format!("let x{i} = {i};\n")).collect();
+        let doc = oryx::doc::markdown::parse(format!("```rust\n{body}```\n"));
+        assert_eq!(doc.blocks.len(), 1);
+        doc
+    }
+
+    type Guessed = std::collections::HashMap<usize, Vec<std::ops::Range<usize>>>;
+
+    /// The map of landed guesses, from pairs of a block and a range.
+    fn landed(entries: &[(usize, std::ops::Range<usize>)]) -> Guessed {
+        let mut map = Guessed::new();
+        for (block, range) in entries {
+            map.entry(*block).or_default().push(range.clone());
+        }
+        map
+    }
+
     #[test]
     fn the_guess_takes_the_first_cold_block_near_the_view() {
         let doc = two_cold_blocks();
         let visible = [(0, 0..1), (1, 0..1)];
-        let none = std::collections::HashMap::new();
         assert_eq!(
-            super::speculation_target(&doc, &visible, None, &none),
+            super::speculation_target(&doc, &visible, false, &Guessed::new()),
             Some((0, 0..1))
         );
-        // The first block is asked and standing: the second is next.
+    }
+
+    #[test]
+    fn nothing_is_asked_while_a_guess_is_in_flight() {
+        let doc = two_cold_blocks();
+        let visible = [(0, 0..1), (1, 0..1)];
+        // The first block's guess is out: the second waits for it, or
+        // the second would drop the first before it lands.
         assert_eq!(
-            super::speculation_target(&doc, &visible, Some(&(0, 0..1)), &none),
+            super::speculation_target(&doc, &visible, true, &Guessed::new()),
+            None
+        );
+    }
+
+    #[test]
+    fn the_next_cold_block_is_asked_once_a_guess_landed() {
+        let doc = two_cold_blocks();
+        let visible = [(0, 0..1), (1, 0..1)];
+        let landed = landed(&[(0, 0..1)]);
+        assert_eq!(
+            super::speculation_target(&doc, &visible, false, &landed),
             Some((1, 0..1))
         );
     }
@@ -9194,33 +9255,45 @@ mod tests {
     fn a_guess_that_landed_is_not_asked_again() {
         let doc = two_cold_blocks();
         let visible = [(0, 0..1), (1, 0..1)];
-        let mut landed = std::collections::HashMap::new();
-        landed.insert(0, 1);
-        // The first guess landed and the second is standing: nothing to
-        // ask. Issue #9 asked for the first again, without end.
+        let landed = landed(&[(0, 0..1), (1, 0..1)]);
+        // Both landed: nothing to ask. Issue #9 asked for the first
+        // again, without end.
         assert_eq!(
-            super::speculation_target(&doc, &visible, Some(&(1, 0..1)), &landed),
-            None
-        );
-        landed.insert(1, 1);
-        assert_eq!(
-            super::speculation_target(&doc, &visible, None, &landed),
+            super::speculation_target(&doc, &visible, false, &landed),
             None
         );
     }
 
     #[test]
-    fn a_guess_that_was_dropped_is_asked_again() {
-        let doc = two_cold_blocks();
-        let visible = [(0, 0..1), (1, 0..1)];
-        let mut landed = std::collections::HashMap::new();
-        // The second guess superseded the first before it landed, so
-        // the first block is still plain.
-        landed.insert(1, 1);
+    fn a_band_above_a_landed_guess_is_asked() {
+        let doc = one_cold_block();
+        // The bottom of the block was guessed after a jump to the end.
+        let landed = landed(&[(0, 6..10)]);
+        // A scroll back up shows lines the guess never colored.
         assert_eq!(
-            super::speculation_target(&doc, &visible, Some(&(1, 0..1)), &landed),
-            Some((0, 0..1))
+            super::speculation_target(&doc, &[(0, 0..4)], false, &landed),
+            Some((0, 0..4))
         );
+        // A band inside the landed guess asks for nothing.
+        assert_eq!(
+            super::speculation_target(&doc, &[(0, 7..10)], false, &landed),
+            None
+        );
+        // A band the guess covers in part is asked whole.
+        assert_eq!(
+            super::speculation_target(&doc, &[(0, 3..8)], false, &landed),
+            Some((0, 3..8))
+        );
+    }
+
+    #[test]
+    fn landed_guesses_merge_when_they_touch() {
+        let mut ranges: Vec<std::ops::Range<usize>> = std::iter::once(6..10).collect();
+        super::note_guess(&mut ranges, 0..3);
+        assert_eq!(ranges, [6..10, 0..3], "apart, both kept");
+        super::note_guess(&mut ranges, 3..7);
+        assert_eq!(ranges.len(), 1, "the one that joins them");
+        assert_eq!(ranges[0], 0..10);
     }
 
     #[test]
@@ -9242,8 +9315,10 @@ mod tests {
             *exact = 1;
         }
         let visible = [(0, 0..1), (1, 0..1)];
-        let none = std::collections::HashMap::new();
-        assert_eq!(super::speculation_target(&doc, &visible, None, &none), None);
+        assert_eq!(
+            super::speculation_target(&doc, &visible, false, &Guessed::new()),
+            None
+        );
     }
 
     #[test]
