@@ -362,6 +362,7 @@ pub fn run(
         rehighlight_at: None,
         seams: HashMap::new(),
         spec_band: None,
+        guessed: HashMap::new(),
         bottom_hold: scroll::BottomHold::default(),
         confirm: None,
         help_stash: None,
@@ -953,6 +954,44 @@ fn kept_layout(
     }
 }
 
+/// What the guess asks for among the code lines near the view: the
+/// first block with a language whose exact mark has not reached the end
+/// of its lines in view, from that mark to that end. A range the
+/// standing request already covers asks for nothing, and neither does a
+/// range a landed guess colored (`guessed`, the line each block's guess
+/// reached): a guess is asked again only when a newer one dropped it,
+/// or two cold blocks near the view alternate without end (issue #9).
+fn speculation_target(
+    doc: &Document,
+    visible: &[(usize, std::ops::Range<usize>)],
+    standing: Option<&(usize, std::ops::Range<usize>)>,
+    guessed: &HashMap<usize, usize>,
+) -> Option<(usize, std::ops::Range<usize>)> {
+    for (block, lines) in visible {
+        let Some(BlockKind::CodeBlock {
+            language, exact, ..
+        }) = doc.blocks.get(*block).map(|b| &b.kind)
+        else {
+            continue;
+        };
+        if language.is_none() || *exact >= lines.end {
+            continue;
+        }
+        let band = (*exact).max(lines.start)..lines.end;
+        if standing.is_some_and(|(b, r)| b == block && r.start <= band.start && r.end >= band.end) {
+            continue;
+        }
+        if guessed
+            .get(block)
+            .is_some_and(|&reached| reached >= band.end)
+        {
+            continue;
+        }
+        return Some((*block, band));
+    }
+    None
+}
+
 /// The rendered page set aside while its source is edited. A return
 /// that changed no byte puts it back whole, so looking at the source
 /// and coming out costs nothing at any file size.
@@ -1536,6 +1575,10 @@ struct App {
     /// The band the standing speculation covers, so a resting view
     /// asks once.
     spec_band: Option<(usize, std::ops::Range<usize>)>,
+    /// Per block, the line a landed guess colored up to, in the live
+    /// generation. A guess that landed is not asked again, or two cold
+    /// blocks near the view alternate without end (issue #9).
+    guessed: HashMap<usize, usize>,
     /// A jump to the bottom of a document the pass had not finished
     /// placing, waiting for the whole document to seat it.
     bottom_hold: scroll::BottomHold,
@@ -5608,6 +5651,7 @@ impl App {
     fn start_highlight(&mut self, pending: Vec<PendingBlock>) {
         self.seams.clear();
         self.spec_band = None;
+        self.guessed.clear();
         let waker = self.waker.clone();
         self.highlighter.start(pending, move || waker());
     }
@@ -5619,6 +5663,7 @@ impl App {
     /// table only ever learns from the live generation.
     fn cancel_highlight(&mut self) {
         self.spec_band = None;
+        self.guessed.clear();
         let waker = self.waker.clone();
         self.highlighter.start(Vec::new(), move || waker());
     }
@@ -5627,7 +5672,8 @@ impl App {
     /// rests on lines the sweep has not reached, so a jump into a huge
     /// file does not sit on plain text for the length of the wash. The
     /// band is padded a screen each way; a band the standing request
-    /// already covers asks for nothing.
+    /// or a landed guess already covers asks for nothing
+    /// (`speculation_target`).
     fn maybe_speculate(&mut self) {
         if self.document.plain_file || self.drag.is_some() || self.sel_anchor.is_some() {
             return;
@@ -5641,39 +5687,32 @@ impl App {
             &self.document,
             self.scroll_y - view_h..self.scroll_y + 2.0 * view_h,
         );
-        for (block, lines) in visible {
-            let Some(BlockKind::CodeBlock {
-                language,
-                lines: body,
-                exact,
-                ..
-            }) = self.document.blocks.get(block).map(|b| &b.kind)
-            else {
-                continue;
-            };
-            if language.is_none() || *exact >= lines.end {
-                continue;
-            }
-            let band = (*exact).max(lines.start)..lines.end;
-            if self
-                .spec_band
-                .as_ref()
-                .is_some_and(|(b, r)| *b == block && r.start <= band.start && r.end >= band.end)
-            {
-                continue;
-            }
-            let job = highlight::SpecJob {
-                block,
-                language: language.clone(),
-                source: Arc::clone(&self.document.source),
-                lines: body.clone(),
-                range: band.clone(),
-            };
-            self.spec_band = Some((block, band));
-            let waker = self.waker.clone();
-            self.highlighter.speculate(job, move || waker());
+        let Some((block, band)) = speculation_target(
+            &self.document,
+            &visible,
+            self.spec_band.as_ref(),
+            &self.guessed,
+        ) else {
             return;
-        }
+        };
+        let Some(BlockKind::CodeBlock {
+            language,
+            lines: body,
+            ..
+        }) = self.document.blocks.get(block).map(|b| &b.kind)
+        else {
+            return;
+        };
+        let job = highlight::SpecJob {
+            block,
+            language: language.clone(),
+            source: Arc::clone(&self.document.source),
+            lines: body.clone(),
+            range: band.clone(),
+        };
+        self.spec_band = Some((block, band));
+        let waker = self.waker.clone();
+        self.highlighter.speculate(job, move || waker());
     }
 
     /// Hands the full source to the parse worker; the prefix on screen
@@ -5828,12 +5867,20 @@ impl App {
         }
         for arrival in &arrivals {
             load::fold(&mut self.document, arrival);
+            let line = arrival.start_line + arrival.spans.len();
             // The exact sweep's seams feed the table a later sweep
-            // resumes from; speculative arrivals never do.
-            if let (Some(seam), false) = (&arrival.seam, arrival.speculative) {
-                let line = arrival.start_line + arrival.spans.len();
-                let table = self.seams.entry(arrival.block).or_default();
-                highlight::record_seam(table, line, seam);
+            // resumes from; speculative arrivals never do. A landed
+            // guess is remembered instead, so it is not asked again.
+            match (&arrival.seam, arrival.speculative) {
+                (Some(seam), false) => {
+                    let table = self.seams.entry(arrival.block).or_default();
+                    highlight::record_seam(table, line, seam);
+                }
+                (_, true) => {
+                    let reached = self.guessed.entry(arrival.block).or_insert(0);
+                    *reached = (*reached).max(line);
+                }
+                (None, false) => {}
             }
         }
         if let Some((anchor, ends)) = carried {
@@ -6961,6 +7008,11 @@ impl App {
             reopen,
         }));
         self.document = markdown_help();
+        // The page's code blocks get the exact sweep a file gets at
+        // open. Left cold, they are colored by the guess of the band in
+        // view alone, and two of them near the view keep the guess
+        // running without end (issue #9).
+        self.start_highlight(load::pending(&self.document));
         self.outline = OutlineTree::build(&self.document);
         self.cfg.justify = justify_pref(&self.config, &self.document);
         // The help page opens in automatic direction. The direction of
@@ -9107,6 +9159,93 @@ impl ApplicationHandler for App {
 
 #[cfg(test)]
 mod tests {
+    /// Two code blocks with a language, one line each, both cold: the
+    /// shape of the help page's syntax section near the view.
+    fn two_cold_blocks() -> super::Document {
+        let doc =
+            oryx::doc::markdown::parse("```rust\nlet a = 1;\n```\n\n```rust\nlet b = 2;\n```\n");
+        assert_eq!(doc.blocks.len(), 2, "two blocks, both code");
+        for block in &doc.blocks {
+            assert!(matches!(
+                block.kind,
+                super::BlockKind::CodeBlock { exact: 0, .. }
+            ));
+        }
+        doc
+    }
+
+    #[test]
+    fn the_guess_takes_the_first_cold_block_near_the_view() {
+        let doc = two_cold_blocks();
+        let visible = [(0, 0..1), (1, 0..1)];
+        let none = std::collections::HashMap::new();
+        assert_eq!(
+            super::speculation_target(&doc, &visible, None, &none),
+            Some((0, 0..1))
+        );
+        // The first block is asked and standing: the second is next.
+        assert_eq!(
+            super::speculation_target(&doc, &visible, Some(&(0, 0..1)), &none),
+            Some((1, 0..1))
+        );
+    }
+
+    #[test]
+    fn a_guess_that_landed_is_not_asked_again() {
+        let doc = two_cold_blocks();
+        let visible = [(0, 0..1), (1, 0..1)];
+        let mut landed = std::collections::HashMap::new();
+        landed.insert(0, 1);
+        // The first guess landed and the second is standing: nothing to
+        // ask. Issue #9 asked for the first again, without end.
+        assert_eq!(
+            super::speculation_target(&doc, &visible, Some(&(1, 0..1)), &landed),
+            None
+        );
+        landed.insert(1, 1);
+        assert_eq!(
+            super::speculation_target(&doc, &visible, None, &landed),
+            None
+        );
+    }
+
+    #[test]
+    fn a_guess_that_was_dropped_is_asked_again() {
+        let doc = two_cold_blocks();
+        let visible = [(0, 0..1), (1, 0..1)];
+        let mut landed = std::collections::HashMap::new();
+        // The second guess superseded the first before it landed, so
+        // the first block is still plain.
+        landed.insert(1, 1);
+        assert_eq!(
+            super::speculation_target(&doc, &visible, Some(&(1, 0..1)), &landed),
+            Some((0, 0..1))
+        );
+    }
+
+    #[test]
+    fn the_help_page_has_code_blocks_for_the_exact_sweep() {
+        // F1 starts the sweep with them, as a file is swept at open;
+        // a page with none would leave its blocks to the guess alone.
+        let pending = oryx::doc::load::pending(&super::markdown_help());
+        let with_language = pending
+            .iter()
+            .filter(|block| block.language.is_some())
+            .count();
+        assert!(with_language >= 2, "the syntax section has many");
+    }
+
+    #[test]
+    fn the_guess_leaves_an_exact_block_and_a_block_without_language_alone() {
+        let mut doc = oryx::doc::markdown::parse("```rust\nlet a = 1;\n```\n\n```\nplain\n```\n");
+        if let super::BlockKind::CodeBlock { exact, .. } = &mut doc.blocks[0].kind {
+            *exact = 1;
+        }
+        let visible = [(0, 0..1), (1, 0..1)];
+        let none = std::collections::HashMap::new();
+        assert_eq!(super::speculation_target(&doc, &visible, None, &none), None);
+    }
+
     #[test]
     fn a_jump_to_a_line_stands_it_in_the_middle() {
         let place = super::Place::centered(7, 600.0, 20.0);
