@@ -1214,10 +1214,11 @@ fn settle_retention(
         }
         return;
     }
-    // The bound jumped past the window while the pass ran: the blocks
-    // between were placed outside it and dropped, so the window's own
-    // blocks are above the bound too. A new window opens on this block;
-    // extending the old one would hand its marks to the wrong positions.
+    // The bound moved past the window while the pass ran: the blocks
+    // between were placed outside the bound of their slice and dropped.
+    // A new window opens on this block; extending the old one would hand
+    // its marks to the wrong positions. The old window's blocks may still
+    // lie inside the bound of this slice, and the slide re-shapes them.
     let follows = out
         .window
         .as_ref()

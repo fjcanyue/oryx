@@ -4902,4 +4902,13 @@ fn the_window_follows_a_jump_of_the_bound_during_the_pass() {
         span.start < far && span.end > far,
         "the window holds the blocks around the jump: {span:?}"
     );
+    // The vectors hold the new window's own blocks: the first run
+    // belongs to the block at the window's start.
+    let first = out
+        .block_at(span.start + 1.0)
+        .expect("a block at the window's start");
+    assert_eq!(
+        out.runs[0].block, first,
+        "the runs are in step with the marks"
+    );
 }
