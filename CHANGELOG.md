@@ -1,5 +1,7 @@
 # Changelog
 
+## v1.2.2
+
 ## v1.2.1
 
 This is a maintenance release focused on stability and fixes, including several on very large files. Most fixes are about keeping the reading position stable, whatever action you perform. The active location and line now stay stable when you zoom, resize the window, open the sidebar, change a font, or switch between reading and editing. Display bugs were also addressed, and Oryx now performs better on large files: a theme change is immediate, and jumps to a line in the editor are a little faster. On Windows, the sidebar issue where it could not reach the other drives was fixed.
