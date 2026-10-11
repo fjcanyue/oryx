@@ -503,12 +503,15 @@ fn outline_current(
     side: &Sidebar,
     lay: &LayoutDoc,
     scroll_y: f32,
+    view_h: f32,
 ) -> Option<usize> {
     if side.tab() != sidebar::Tab::Outline {
         return None;
     }
+    // The scroll stops where the page's end meets the view's bottom.
+    let at_end = scroll_y + view_h >= lay.height - 1.0;
     let entry = outline
-        .current_of(scroll_y, |b| {
+        .current_of(scroll_y, view_h, at_end, |b| {
             (b != usize::MAX).then(|| lay.approx_top(b, 0)).flatten()
         })
         .map(|e| outline.visible_entry(e));
@@ -8387,7 +8390,13 @@ impl App {
             // source is on screen it holds the mark it had rather than
             // tracking a layout of a different model.
             let current = if self.mode == edit::Mode::Read {
-                outline_current(&mut self.outline, side, lay, self.scroll_y)
+                outline_current(
+                    &mut self.outline,
+                    side,
+                    lay,
+                    self.scroll_y,
+                    size.height as f32,
+                )
             } else {
                 self.outline.last_current()
             };

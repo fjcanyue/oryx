@@ -1558,6 +1558,22 @@ mod tests {
     }
 
     #[test]
+    fn a_long_right_to_left_title_is_cut_at_its_end() {
+        let title = "الباب الثاني في العمران البدوي و الأمم الوحشية و القبائل و ما يعرض في ذلك من الأحوال و فيه فصول و تمهيدات";
+        let mut pixmap = Pixmap::new(300, 40).unwrap();
+        let mut fonts = FontStore::new();
+        let mut painter = Painter::new(&mut pixmap, &mut fonts, None, 1.0);
+        let cut = truncated(&mut painter, title, 200.0, 400);
+        assert!(cut.ends_with('\u{2026}'), "the title is cut: {cut}");
+        assert!(
+            title.starts_with(cut.trim_end_matches('\u{2026}')),
+            "cut at its end in reading order, so the beginning shows: {cut}"
+        );
+        let width = painter.measure(&cut, BODY_FAMILY, TEXT_SIZE, 400);
+        assert!(width <= 200.0, "the cut title fits the row: {width}");
+    }
+
+    #[test]
     fn each_file_kind_takes_its_own_icon() {
         for (name, icon) in [
             ("notes.md", Icon::Document),

@@ -318,12 +318,7 @@ impl<'a> Painter<'a> {
 
     pub fn measure(&mut self, text: &str, family: &str, size: f32, weight: u16) -> f32 {
         let buffer = self.shape(text, family, size * self.scale, weight);
-        buffer
-            .layout_runs()
-            .next()
-            .and_then(|run| run.glyphs.last().map(|g| g.x + g.w))
-            .unwrap_or(0.0)
-            / self.scale
+        line_width(&buffer) / self.scale
     }
 
     /// Where a capital's ink lands below the top of a drawn line, as
@@ -367,12 +362,7 @@ impl<'a> Painter<'a> {
         let buffer = self.shape(text, family, size, weight);
         let width = self.pixmap.width() as i32;
         let (bx0, by0, bx1, by1) = self.bounds();
-        let mut advance = 0.0f32;
-        if let Some(run) = buffer.layout_runs().next() {
-            if let Some(last) = run.glyphs.last() {
-                advance = last.x + last.w;
-            }
-        }
+        let advance = line_width(&buffer);
         if matches!(self.reach(x, y, advance, size * 1.4), Reach::None) {
             return advance / s;
         }
@@ -456,6 +446,18 @@ impl<'a> Painter<'a> {
         buffer.shape_until_scroll(&mut self.fonts.font_system, false);
         buffer
     }
+}
+
+/// The width of a buffer's first line: the farthest right edge of its
+/// glyphs. The glyphs of a right-to-left line come in reading order and
+/// are placed from the right, so the last one is the leftmost, and its
+/// edge is the width of one letter.
+fn line_width(buffer: &Buffer) -> f32 {
+    buffer
+        .layout_runs()
+        .next()
+        .map(|run| run.glyphs.iter().map(|g| g.x + g.w).fold(0.0, f32::max))
+        .unwrap_or(0.0)
 }
 
 /// The clip as a coverage mask the size of the pixmap, built once per
@@ -550,6 +552,24 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// The glyphs of a right-to-left line come in reading order, placed
+    /// from the right: the last one is the leftmost. The measure is the
+    /// width of the whole line, not of that letter.
+    #[test]
+    fn a_right_to_left_line_measures_its_whole_width() {
+        let mut pixmap = Pixmap::new(400, 50).unwrap();
+        let mut fonts = FontStore::new();
+        let mut painter = Painter::new(&mut pixmap, &mut fonts, None, 1.0);
+        let word = painter.measure("مقدمة", BODY_FAMILY, 15.0, 400);
+        let line = painter.measure("مقدمة ابن خلدون", BODY_FAMILY, 15.0, 400);
+        assert!(
+            line > 2.0 * word,
+            "three words measure more than twice the first: {line} against {word}"
+        );
+        let drawn = painter.text(0.0, 0.0, "مقدمة ابن خلدون", BODY_FAMILY, 15.0, 400, RED);
+        assert_eq!(drawn, line, "the advance of the drawn line is its measure");
     }
 
     #[test]

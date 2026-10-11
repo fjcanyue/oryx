@@ -8,6 +8,8 @@
 - On a keyboard layout that types another script, such as Cyrillic or Greek, or an accented letter on a letter key, such as BÉPO, a letter shortcut now holds by the place of its key: `Ctrl` with the key of C is `Ctrl+C`. Before, no letter shortcut matched on such a layout, in the dialogs and the search bar too (issue #8).
 - The help page no longer keeps a processor core busy once its syntax section is on screen. Before, the coloring of its code blocks was started again and again, and the load stayed until the page was left (issue #9).
 - On a big file, a jump to the end while the file is still being laid out no longer puts the blocks kept in memory out of step with the page. Before, the first block kept after the jump was filed as the next of the last one kept before it, and the view could read the wrong geometry until it moved again.
+- In the Outline tab, a long title written from right to left now shows its beginning, cut at its end with an ellipsis. Before, the title was drawn whole and the edge of the sidebar cut its beginning, so the rows of several chapters read the same.
+- The Outline tab now highlights a chapter once its heading is in the top half of the window, and the last chapter in view once the page is at its end. Before, the chapter above the window stayed highlighted while the next heading showed near the top, and a click on a short last chapter left the chapter before it highlighted.
 
 ## v1.2.1
 
