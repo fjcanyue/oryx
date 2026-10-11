@@ -4,6 +4,8 @@ Oryx has no menus: you use it with the keys of this page, and with the mouse. Th
 
 On macOS, use `Cmd` where this page says `Ctrl`, and `Cmd+[` / `Cmd+]` in place of `Alt+Left` / `Alt+Right`. The `Alt` key is the Option key.
 
+The letter shortcuts work on any keyboard layout. On a Cyrillic layout, `Ctrl` with the key of C is `Ctrl+C`, as in a browser.
+
 ## Files
 
 | Key | What it does |

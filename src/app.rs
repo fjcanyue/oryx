@@ -8779,6 +8779,10 @@ impl ApplicationHandler for App {
                 if is_synthetic {
                     return;
                 }
+                // On a layout that types another script, a chord is
+                // matched with the Latin letter of the key's place. A
+                // bare press keeps its character, which a field types.
+                let latin = keymap::latin_key(&logical_key, physical_key);
                 // The confirm modal owns the keyboard outright until a
                 // decision lands.
                 if self.confirm.is_some() {
@@ -8786,13 +8790,14 @@ impl ApplicationHandler for App {
                     // the Enter that opened it from the sidebar must not
                     // answer it too.
                     if !repeat {
-                        self.confirm_key(&logical_key, event_loop);
+                        self.confirm_key(&latin, event_loop);
                     }
                     return;
                 }
                 let ctrl = chord_key(self.modifiers);
                 let shift = self.modifiers.shift_key();
                 let alt = self.modifiers.alt_key();
+                let key = if ctrl || alt { &latin } else { &logical_key };
                 // A held Escape repeats, and the ladder must not climb by
                 // itself: each rung, the quit included, takes its own
                 // press. The same held key kept repeating into the window
@@ -8817,10 +8822,10 @@ impl ApplicationHandler for App {
                     }
                     _ if self.overlay.is_some() => {
                         let overlay = self.overlay.as_mut().expect("overlay open");
-                        let result = overlay.key(&logical_key, ctrl, shift);
+                        let result = overlay.key(key, ctrl, shift);
                         self.overlay_result(result);
                     }
-                    _ if self.goto_key(&logical_key, ctrl, shift) => {}
+                    _ if self.goto_key(key, ctrl, shift) => {}
                     // The go to line field has the keyboard, under the
                     // search fields' own rule: what it did not claim
                     // acts only when it is app-wide.
@@ -8829,7 +8834,7 @@ impl ApplicationHandler for App {
                             self.run_command(cmd, event_loop);
                         }
                     }
-                    _ if self.search_key(&logical_key, ctrl, shift) => {}
+                    _ if self.search_key(key, ctrl, shift) => {}
                     // A search field has the keyboard: what the bar did
                     // not claim acts only when it is app-wide. Nothing
                     // reaches the editor's own keys or the document's
@@ -8839,8 +8844,7 @@ impl ApplicationHandler for App {
                             self.run_command(cmd, event_loop);
                         }
                     }
-                    _ if self.mode == edit::Mode::Edit
-                        && self.edit_key(&logical_key, ctrl, shift) => {}
+                    _ if self.mode == edit::Mode::Edit && self.edit_key(key, ctrl, shift) => {}
                     Some(Command::LineUp) if self.sidebar_owns_keys() => {
                         self.sidebar_move(-1);
                     }

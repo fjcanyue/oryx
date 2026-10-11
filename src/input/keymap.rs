@@ -633,7 +633,8 @@ pub const SHORTCUTS: &[Shortcut] = &[
 /// modifier are tried first, so Ctrl+Shift+C never falls through to
 /// Ctrl+C and Ctrl+Left never falls through to plain Left; the key's
 /// place on the keyboard is tried last, once no character chord has
-/// claimed the press.
+/// claimed the press. A letter chord is matched with `latin_key`, so
+/// a layout that types another script keeps its letter chords.
 pub fn command(
     key: &Key,
     code: PhysicalKey,
@@ -654,6 +655,8 @@ fn command_on(
     alt: bool,
     macos: bool,
 ) -> Option<Command> {
+    let latin = latin_key(key, code);
+    let key = &latin;
     let bindings = || {
         SHORTCUTS
             .iter()
@@ -683,6 +686,60 @@ fn command_on(
         })
     };
     shifted.or_else(plain).or_else(physical).map(|(_, cmd)| cmd)
+}
+
+/// The key a chord is matched with. The character the press types
+/// stands, unless it is not a Latin letter and the key sits on a letter
+/// of the US layout: then that letter, so that `Ctrl+C` holds on a
+/// Cyrillic, Greek or Hebrew layout, as in the browsers. A Latin layout
+/// that moves its letters (AZERTY, Dvorak) keeps the character.
+pub fn latin_key(key: &Key, code: PhysicalKey) -> Key {
+    let Key::Character(typed) = key else {
+        return key.clone();
+    };
+    if typed.len() == 1 && typed.as_bytes()[0].is_ascii_alphabetic() {
+        return key.clone();
+    }
+    match code {
+        PhysicalKey::Code(code) => match us_letter(code) {
+            Some(letter) => Key::Character(letter.into()),
+            None => key.clone(),
+        },
+        PhysicalKey::Unidentified(_) => key.clone(),
+    }
+}
+
+/// The letter printed on a key of the US layout.
+fn us_letter(code: KeyCode) -> Option<&'static str> {
+    Some(match code {
+        KeyCode::KeyA => "a",
+        KeyCode::KeyB => "b",
+        KeyCode::KeyC => "c",
+        KeyCode::KeyD => "d",
+        KeyCode::KeyE => "e",
+        KeyCode::KeyF => "f",
+        KeyCode::KeyG => "g",
+        KeyCode::KeyH => "h",
+        KeyCode::KeyI => "i",
+        KeyCode::KeyJ => "j",
+        KeyCode::KeyK => "k",
+        KeyCode::KeyL => "l",
+        KeyCode::KeyM => "m",
+        KeyCode::KeyN => "n",
+        KeyCode::KeyO => "o",
+        KeyCode::KeyP => "p",
+        KeyCode::KeyQ => "q",
+        KeyCode::KeyR => "r",
+        KeyCode::KeyS => "s",
+        KeyCode::KeyT => "t",
+        KeyCode::KeyU => "u",
+        KeyCode::KeyV => "v",
+        KeyCode::KeyW => "w",
+        KeyCode::KeyX => "x",
+        KeyCode::KeyY => "y",
+        KeyCode::KeyZ => "z",
+        _ => return None,
+    })
 }
 
 fn is_char(key: &Key, c: &str) -> bool {
@@ -754,6 +811,61 @@ mod tests {
             "no chord without Ctrl"
         );
         assert_eq!(on(")", KeyCode::Minus, false), None);
+    }
+
+    /// On a layout that types another script, a letter chord holds by
+    /// the key's place: Ctrl with the key of C types "с" on a Cyrillic
+    /// layout and still copies. A Latin layout that moves its letters
+    /// keeps the character, as before.
+    #[test]
+    fn the_letter_chords_hold_on_a_cyrillic_layout_by_the_key() {
+        let on = |c: &str, code: KeyCode, ctrl: bool, shift: bool| {
+            super::command(&chr(c), PhysicalKey::Code(code), ctrl, shift, false)
+        };
+        assert_eq!(on("с", KeyCode::KeyC, true, false), Some(Command::CopyText));
+        assert_eq!(on("м", KeyCode::KeyV, true, false), Some(Command::Paste));
+        assert_eq!(
+            on("ф", KeyCode::KeyA, true, false),
+            Some(Command::SelectAll)
+        );
+        assert_eq!(on("Ы", KeyCode::KeyS, true, true), Some(Command::SaveAs));
+        assert_eq!(
+            on("a", KeyCode::KeyQ, true, false),
+            Some(Command::SelectAll),
+            "AZERTY keeps the character"
+        );
+        assert_eq!(
+            on("с", KeyCode::KeyC, false, false),
+            None,
+            "no chord without Ctrl"
+        );
+    }
+
+    /// The key a chord is matched with: the character typed, unless it
+    /// is not a Latin letter and the key sits on a letter of the US
+    /// layout.
+    #[test]
+    fn the_latin_key_of_a_press() {
+        let latin = |c: &str, code: KeyCode| latin_key(&chr(c), PhysicalKey::Code(code));
+        assert_eq!(latin("с", KeyCode::KeyC), chr("c"));
+        assert_eq!(latin("Ж", KeyCode::Semicolon), chr("Ж"), "not a letter key");
+        assert_eq!(latin("a", KeyCode::KeyQ), chr("a"), "a Latin letter stands");
+        assert_eq!(latin("é", KeyCode::Digit2), chr("é"));
+        assert_eq!(
+            latin_key(
+                &Key::Named(NamedKey::Enter),
+                PhysicalKey::Code(KeyCode::KeyA)
+            ),
+            Key::Named(NamedKey::Enter)
+        );
+        assert_eq!(
+            latin_key(
+                &chr("с"),
+                PhysicalKey::Unidentified(NativeKeyCode::Unidentified)
+            ),
+            chr("с"),
+            "no place known"
+        );
     }
 
     /// Every physical row names the same command as the character
