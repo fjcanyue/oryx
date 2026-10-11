@@ -24,8 +24,15 @@ fn attach_parent_console() {
 /// Whether winit will open an X11 window: no Wayland display is named
 /// and an X11 one is.
 #[cfg(target_os = "linux")]
-fn x11_session(wayland: Option<&std::ffi::OsStr>, display: Option<&std::ffi::OsStr>) -> bool {
-    wayland.is_none_or(|name| name.is_empty()) && display.is_some_and(|name| !name.is_empty())
+fn x11_session(
+    wayland: Option<&std::ffi::OsStr>,
+    socket: Option<&std::ffi::OsStr>,
+    display: Option<&std::ffi::OsStr>,
+) -> bool {
+    // winit picks Wayland on WAYLAND_DISPLAY, else on WAYLAND_SOCKET (a
+    // launcher passes one), and X11 on DISPLAY after both.
+    let empty = |name: Option<&std::ffi::OsStr>| name.is_none_or(|name| name.is_empty());
+    empty(wayland) && empty(socket) && display.is_some_and(|name| !name.is_empty())
 }
 
 /// On X11 winit loads libxkbcommon and libxkbcommon-x11 at run time and
@@ -34,8 +41,9 @@ fn x11_session(wayland: Option<&std::ffi::OsStr>, display: Option<&std::ffi::OsS
 #[cfg(target_os = "linux")]
 fn missing_keyboard_library() -> Option<String> {
     let wayland = std::env::var_os("WAYLAND_DISPLAY");
+    let socket = std::env::var_os("WAYLAND_SOCKET");
     let display = std::env::var_os("DISPLAY");
-    if !x11_session(wayland.as_deref(), display.as_deref()) {
+    if !x11_session(wayland.as_deref(), socket.as_deref(), display.as_deref()) {
         return None;
     }
     ["libxkbcommon.so.0", "libxkbcommon-x11.so.0"]
@@ -340,11 +348,17 @@ mod tests {
         let wayland = Some(std::ffi::OsStr::new("wayland-0"));
         let display = Some(std::ffi::OsStr::new(":0"));
         let empty = Some(std::ffi::OsStr::new(""));
-        assert!(x11_session(None, display));
-        assert!(x11_session(empty, display));
-        assert!(!x11_session(wayland, display));
-        assert!(!x11_session(None, None));
-        assert!(!x11_session(None, empty));
+        let socket = Some(std::ffi::OsStr::new("3"));
+        assert!(x11_session(None, None, display));
+        assert!(x11_session(empty, None, display));
+        assert!(x11_session(None, empty, display));
+        assert!(!x11_session(wayland, None, display));
+        assert!(
+            !x11_session(None, socket, display),
+            "a socket passed by a launcher is Wayland too"
+        );
+        assert!(!x11_session(None, None, None));
+        assert!(!x11_session(None, None, empty));
     }
 
     #[test]

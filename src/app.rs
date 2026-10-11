@@ -2451,9 +2451,10 @@ impl App {
     /// keep their app-wide meaning; the typing keys are consumed and
     /// inert until the splice ledger arrives. Escape stays a command so
     /// the ladder handles it, and the function keys keep their rows.
-    fn edit_key(&mut self, key: &Key, ctrl: bool, shift: bool) -> bool {
-        // Alt chords belong to the desktop, never to typing.
-        if self.modifiers.alt_key() {
+    fn edit_key(&mut self, key: &Key, ctrl: bool, shift: bool, alt: bool) -> bool {
+        // Alt chords belong to the desktop, never to typing; a character
+        // typed with Option comes with Alt off (`alt_typing`).
+        if alt {
             return false;
         }
         if ctrl {
@@ -3813,7 +3814,9 @@ impl App {
         };
         // The resumed sweep converges against the stored table, which
         // therefore survives the start; its arrivals upsert their own
-        // lines.
+        // lines. A guess still in flight is dropped by the start, and
+        // the gate it holds opens again.
+        self.spec_band = None;
         let waker = self.waker.clone();
         self.highlighter.start(pending, move || waker());
     }
@@ -4633,8 +4636,8 @@ impl App {
     /// Escape closes, digits and the colon type, and the field's own
     /// editing keys act on it. Everything else falls through to the
     /// app-wide commands, never to the document.
-    fn goto_key(&mut self, key: &Key, ctrl: bool, shift: bool) -> bool {
-        if self.goto.is_none() || self.modifiers.alt_key() {
+    fn goto_key(&mut self, key: &Key, ctrl: bool, shift: bool, alt: bool) -> bool {
+        if self.goto.is_none() || alt {
             return false;
         }
         match key {
@@ -4952,12 +4955,12 @@ impl App {
     /// Keys the open search bar consumes: query edits, Enter stepping,
     /// Escape closing. Everything else falls through to the document, so
     /// scrolling and shortcuts stay live under the bar.
-    fn search_key(&mut self, key: &Key, ctrl: bool, shift: bool) -> bool {
+    fn search_key(&mut self, key: &Key, ctrl: bool, shift: bool, alt: bool) -> bool {
         if self.search.is_none() {
             return false;
         }
         // Alt chords belong to the desktop, except the bar's own toggle.
-        if self.modifiers.alt_key() {
+        if alt {
             if matches!(key, Key::Character(s) if s.eq_ignore_ascii_case("r")) {
                 self.toggle_search_regex();
                 return true;
@@ -8857,10 +8860,11 @@ impl ApplicationHandler for App {
                     return;
                 }
                 // On a layout that types another script, a chord is
-                // matched with the Latin letter of the key's place. A
-                // bare press keeps its character, which a field types,
-                // and so does a press with Ctrl and Alt both held, an
-                // AltGr character on Windows.
+                // matched with the Latin letter of the key's place, and
+                // so is a dialog's answer. A bare press keeps its
+                // character, which a field types, and so does a press
+                // with Ctrl and Alt both held, an AltGr character on
+                // Windows.
                 let latin = keymap::latin_key(&logical_key, physical_key);
                 // The confirm modal owns the keyboard outright until a
                 // decision lands.
@@ -8876,6 +8880,14 @@ impl ApplicationHandler for App {
                 let ctrl = chord_key(self.modifiers);
                 let shift = self.modifiers.shift_key();
                 let alt = self.modifiers.alt_key();
+                let resolved = keymap::command(&logical_key, physical_key, ctrl, shift, alt);
+                // A character typed with Alt held (Option on a Mac) is
+                // typing when no chord claims the key: the keymap's, or
+                // the search bar's own Alt+R.
+                let claimed = resolved.is_some()
+                    || (self.search.is_some()
+                        && matches!(&latin, Key::Character(c) if c.eq_ignore_ascii_case("r")));
+                let alt = alt && !keymap::alt_typing(&logical_key, alt, claimed);
                 let key = if keymap::chord_held(ctrl, alt) {
                     &latin
                 } else {
@@ -8889,15 +8901,11 @@ impl ApplicationHandler for App {
                 // itself: each rung, the quit included, takes its own
                 // press. The same held key kept repeating into the window
                 // after a dialog closed on it.
-                if repeat
-                    && keymap::command(&logical_key, physical_key, ctrl, shift, alt)
-                        == Some(Command::Quit)
-                {
+                if repeat && resolved == Some(Command::Quit) {
                     return;
                 }
                 // The overlay toggles stay global so their chord closes the
                 // overlay it opened; everything else feeds an open overlay.
-                let resolved = keymap::command(&logical_key, physical_key, ctrl, shift, alt);
                 match resolved {
                     Some(
                         cmd @ (Command::ThemeBrowser
@@ -8912,7 +8920,7 @@ impl ApplicationHandler for App {
                         let result = overlay.key(panel_key, ctrl, shift);
                         self.overlay_result(result);
                     }
-                    _ if self.goto_key(key, ctrl, shift) => {}
+                    _ if self.goto_key(key, ctrl, shift, alt) => {}
                     // The go to line field has the keyboard, under the
                     // search fields' own rule: what it did not claim
                     // acts only when it is app-wide.
@@ -8921,7 +8929,7 @@ impl ApplicationHandler for App {
                             self.run_command(cmd, event_loop);
                         }
                     }
-                    _ if self.search_key(key, ctrl, shift) => {}
+                    _ if self.search_key(key, ctrl, shift, alt) => {}
                     // A search field has the keyboard: what the bar did
                     // not claim acts only when it is app-wide. Nothing
                     // reaches the editor's own keys or the document's
@@ -8931,7 +8939,7 @@ impl ApplicationHandler for App {
                             self.run_command(cmd, event_loop);
                         }
                     }
-                    _ if self.mode == edit::Mode::Edit && self.edit_key(key, ctrl, shift) => {}
+                    _ if self.mode == edit::Mode::Edit && self.edit_key(key, ctrl, shift, alt) => {}
                     Some(Command::LineUp) if self.sidebar_owns_keys() => {
                         self.sidebar_move(-1);
                     }

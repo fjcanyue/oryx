@@ -717,6 +717,14 @@ pub fn latin_key(key: &Key, code: PhysicalKey) -> Key {
 }
 
 /// Whether a press with these modifiers is a chord for a field or the
+/// A press with Alt held that types rather than chords: its character is
+/// not ASCII (Option on a Mac types one, the left Ctrl+Alt on Windows
+/// too) and no chord claims the key. The editor and the fields then
+/// take the character with Alt off.
+pub fn alt_typing(logical: &Key, alt: bool, claimed: bool) -> bool {
+    alt && !claimed && matches!(logical, Key::Character(c) if !c.is_ascii())
+}
+
 /// editor, which then match it with `latin_key`: Ctrl or Alt alone.
 /// Both held is an AltGr character on Windows, which stands as typed.
 pub fn chord_held(ctrl: bool, alt: bool) -> bool {
@@ -784,6 +792,28 @@ fn platform_label(keys: &str, macos: bool) -> String {
 mod tests {
     use super::*;
     use winit::keyboard::NativeKeyCode;
+
+    #[test]
+    fn an_option_character_is_typing_unless_a_chord_claims_it() {
+        let option_d = Key::Character("\u{2202}".into());
+        assert!(
+            alt_typing(&option_d, true, false),
+            "Option+D on a Mac types its character"
+        );
+        assert!(
+            !alt_typing(&option_d, false, false),
+            "without Alt it is a plain character already"
+        );
+        assert!(
+            !alt_typing(&option_d, true, true),
+            "a chord that claims the key wins, as Alt+X does"
+        );
+        let alt_d = Key::Character("d".into());
+        assert!(
+            !alt_typing(&alt_d, true, false),
+            "Alt with an ASCII letter is a chord"
+        );
+    }
 
     fn chr(s: &str) -> Key {
         Key::Character(s.into())
@@ -855,9 +885,9 @@ mod tests {
         );
     }
 
-    /// The key a chord is matched with: the character typed, unless it
-    /// is not a Latin letter and the key sits on a letter of the US
-    /// layout.
+    /// The key a chord is matched with: the character typed when it is
+    /// ASCII, else the letter of the key's place on the US layout when
+    /// it sits on one.
     #[test]
     fn the_latin_key_of_a_press() {
         let latin = |c: &str, code: KeyCode| latin_key(&chr(c), PhysicalKey::Code(code));

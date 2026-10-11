@@ -485,9 +485,12 @@ pub fn fold(doc: &mut Document, arrival: &Arrival) {
     if highlights.len() < end {
         highlights.resize(end, Vec::new());
     }
+    // A guess that lands after the exact sweep colored a line, with
+    // colors from a cold start, leaves that line alone.
+    let first = if arrival.speculative { *exact } else { 0 };
     for (offset, spans) in arrival.spans.iter().enumerate() {
         let line = arrival.start_line + offset;
-        if line < end {
+        if first <= line && line < end {
             highlights[line] = spans.clone();
         }
     }
@@ -1488,6 +1491,36 @@ mod tests {
             "a converged stop restores the frontier to the end"
         );
         assert!(pending(&doc).is_empty(), "the wash is complete");
+    }
+
+    #[test]
+    fn a_late_guess_leaves_the_exact_lines_alone() {
+        use crate::style::highlight::SyntaxRole;
+        let text: String = (0..1200).map(|i| format!("let v{i} = {i};\n")).collect();
+        let mut doc = code_document(Some("rs"), &text);
+        let colors = |doc: &Document, line: usize| match &doc.blocks[0].kind {
+            BlockKind::CodeBlock { highlights, .. } => highlights[line].clone(),
+            _ => unreachable!(),
+        };
+        let exact = vec![(0..3, SyntaxRole::Keyword)];
+        let guessed = vec![(0..3, SyntaxRole::Comment)];
+        let arrival = |start: usize,
+                       n: usize,
+                       spans: &Vec<(std::ops::Range<usize>, SyntaxRole)>,
+                       speculative: bool| Arrival {
+            block: 0,
+            start_line: start,
+            spans: vec![spans.clone(); n],
+            seam: None,
+            converged: false,
+            speculative,
+        };
+        // The exact sweep colored the first 512 lines; a guess asked
+        // before it reached them lands after it, for lines 500 to 600.
+        fold(&mut doc, &arrival(0, 512, &exact, false));
+        fold(&mut doc, &arrival(500, 100, &guessed, true));
+        assert_eq!(colors(&doc, 505), exact, "an exact line keeps its colors");
+        assert_eq!(colors(&doc, 550), guessed, "a cold line takes the guess");
     }
 
     #[test]
