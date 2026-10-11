@@ -655,7 +655,13 @@ fn command_on(
     alt: bool,
     macos: bool,
 ) -> Option<Command> {
-    let latin = latin_key(key, code);
+    // Ctrl and Alt both held is how Windows reports an AltGr character
+    // typed with the left keys: the character stands and no chord runs.
+    let latin = if ctrl && alt {
+        key.clone()
+    } else {
+        latin_key(key, code)
+    };
     let key = &latin;
     let bindings = || {
         SHORTCUTS
@@ -689,15 +695,16 @@ fn command_on(
 }
 
 /// The key a chord is matched with. The character the press types
-/// stands, unless it is not a Latin letter and the key sits on a letter
-/// of the US layout: then that letter, so that `Ctrl+C` holds on a
-/// Cyrillic, Greek or Hebrew layout, as in the browsers. A Latin layout
-/// that moves its letters (AZERTY, Dvorak) keeps the character.
+/// stands when it is ASCII: a Latin letter wherever a layout puts it,
+/// or the punctuation that AZERTY, Dvorak and BÉPO put on letter keys.
+/// Otherwise, when the key sits on a letter of the US layout, that
+/// letter serves, so that `Ctrl+C` holds on a Cyrillic, Greek or
+/// Hebrew layout. The rule is the one Zed applies on Linux.
 pub fn latin_key(key: &Key, code: PhysicalKey) -> Key {
     let Key::Character(typed) = key else {
         return key.clone();
     };
-    if typed.len() == 1 && typed.as_bytes()[0].is_ascii_alphabetic() {
+    if typed.is_ascii() {
         return key.clone();
     }
     match code {
@@ -707,6 +714,13 @@ pub fn latin_key(key: &Key, code: PhysicalKey) -> Key {
         },
         PhysicalKey::Unidentified(_) => key.clone(),
     }
+}
+
+/// Whether a press with these modifiers is a chord for a field or the
+/// editor, which then match it with `latin_key`: Ctrl or Alt alone.
+/// Both held is an AltGr character on Windows, which stands as typed.
+pub fn chord_held(ctrl: bool, alt: bool) -> bool {
+    ctrl != alt
 }
 
 /// The letter printed on a key of the US layout.
@@ -865,6 +879,88 @@ mod tests {
             ),
             chr("с"),
             "no place known"
+        );
+    }
+
+    /// An ASCII character on a letter key stands: the punctuation that
+    /// AZERTY, Dvorak and BÉPO put on letter keys keeps its chord. A
+    /// non-ASCII letter there goes by the key's place, as Zed does on
+    /// Linux.
+    #[test]
+    fn ascii_characters_on_letter_keys_keep_their_chords() {
+        let on = |c: &str, code: KeyCode, ctrl: bool, alt: bool| {
+            super::command(&chr(c), PhysicalKey::Code(code), ctrl, false, alt)
+        };
+        assert_eq!(
+            on(",", KeyCode::KeyM, true, false),
+            Some(Command::Settings),
+            "AZERTY Ctrl+,"
+        );
+        assert_eq!(
+            on(".", KeyCode::KeyE, false, true),
+            Some(Command::Quote),
+            "Dvorak Alt+."
+        );
+        assert_eq!(
+            on("/", KeyCode::KeyQ, true, false),
+            Some(Command::Comment),
+            "Hebrew Ctrl+/"
+        );
+        assert_eq!(
+            on("à", KeyCode::KeyZ, true, false),
+            Some(Command::Undo),
+            "BÉPO Ctrl+à, by the key"
+        );
+    }
+
+    /// Ctrl and Alt both held is how Windows reports an AltGr character
+    /// typed with the left keys: the character stands and no chord runs.
+    #[test]
+    fn an_altgr_character_under_ctrl_and_alt_is_no_chord() {
+        let on = |c: &str, code: KeyCode| {
+            super::command(&chr(c), PhysicalKey::Code(code), true, false, true)
+        };
+        assert_eq!(on("€", KeyCode::KeyE), None, "German Ctrl+Alt+E");
+        assert_eq!(on("ś", KeyCode::KeyS), None, "Polish Ctrl+Alt+S");
+    }
+
+    #[test]
+    fn ascii_strings_and_the_empty_string_stand() {
+        assert_eq!(
+            latin_key(&chr("^q"), PhysicalKey::Code(KeyCode::KeyQ)),
+            chr("^q")
+        );
+        assert_eq!(
+            latin_key(&chr(""), PhysicalKey::Code(KeyCode::KeyA)),
+            chr("")
+        );
+        assert_eq!(
+            latin_key(&chr(","), PhysicalKey::Code(KeyCode::KeyM)),
+            chr(",")
+        );
+    }
+
+    #[test]
+    fn a_field_takes_the_latin_key_with_one_modifier_held() {
+        assert!(chord_held(true, false));
+        assert!(chord_held(false, true));
+        assert!(!chord_held(true, true), "an AltGr character on Windows");
+        assert!(!chord_held(false, false), "a bare press types");
+    }
+
+    /// The Mac's table takes the same fallback with Cmd.
+    #[test]
+    fn on_the_mac_cmd_with_a_cyrillic_letter_copies() {
+        assert_eq!(
+            command_on(
+                &chr("с"),
+                PhysicalKey::Code(KeyCode::KeyC),
+                true,
+                false,
+                false,
+                true
+            ),
+            Some(Command::CopyText)
         );
     }
 

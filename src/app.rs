@@ -8781,7 +8781,9 @@ impl ApplicationHandler for App {
                 }
                 // On a layout that types another script, a chord is
                 // matched with the Latin letter of the key's place. A
-                // bare press keeps its character, which a field types.
+                // bare press keeps its character, which a field types,
+                // and so does a press with Ctrl and Alt both held, an
+                // AltGr character on Windows.
                 let latin = keymap::latin_key(&logical_key, physical_key);
                 // The confirm modal owns the keyboard outright until a
                 // decision lands.
@@ -8797,7 +8799,15 @@ impl ApplicationHandler for App {
                 let ctrl = chord_key(self.modifiers);
                 let shift = self.modifiers.shift_key();
                 let alt = self.modifiers.alt_key();
-                let key = if ctrl || alt { &latin } else { &logical_key };
+                let key = if keymap::chord_held(ctrl, alt) {
+                    &latin
+                } else {
+                    &logical_key
+                };
+                // The text fields of the panels insert a character with
+                // Alt held (Option types one on a Mac), so the panels take
+                // the Latin key with Ctrl alone.
+                let panel_key = if ctrl && !alt { &latin } else { &logical_key };
                 // A held Escape repeats, and the ladder must not climb by
                 // itself: each rung, the quit included, takes its own
                 // press. The same held key kept repeating into the window
@@ -8822,7 +8832,7 @@ impl ApplicationHandler for App {
                     }
                     _ if self.overlay.is_some() => {
                         let overlay = self.overlay.as_mut().expect("overlay open");
-                        let result = overlay.key(key, ctrl, shift);
+                        let result = overlay.key(panel_key, ctrl, shift);
                         self.overlay_result(result);
                     }
                     _ if self.goto_key(key, ctrl, shift) => {}
