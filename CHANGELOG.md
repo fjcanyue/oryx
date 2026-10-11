@@ -7,6 +7,7 @@
 - The AppImage now carries the keyboard libraries of X11, and the deb and the rpm declare them. Before, on a system without `libxkbcommon-x11`, Oryx stopped at once with an error trace. On such a system, Oryx now says which package to install.
 - On a keyboard layout that types another script, such as Cyrillic or Greek, or an accented letter on a letter key, such as BÉPO, a letter shortcut now holds by the place of its key: `Ctrl` with the key of C is `Ctrl+C`. Before, no letter shortcut matched on such a layout, in the dialogs and the search bar too (issue #8).
 - The help page no longer keeps a processor core busy once its syntax section is on screen. Before, the coloring of its code blocks was started again and again, and the load stayed until the page was left (issue #9).
+- On a big file, a jump to the end while the file is still being laid out no longer puts the blocks kept in memory out of step with the page. Before, the first block kept after the jump was filed as the next of the last one kept before it, and the view could read the wrong geometry until it moved again.
 
 ## v1.2.1
 

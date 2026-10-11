@@ -4842,3 +4842,64 @@ fn a_page_that_got_much_shorter_under_the_view_shows_its_end() {
         );
     }
 }
+
+// Task 276: the window follows the retention bound when it jumps during
+// the pass. A jump to the bottom while the file is still being placed
+// moves the bound far past the window; the blocks between are placed
+// outside it and dropped, and the first block inside it opens a new
+// window in place of extending the old one, whose marks it would be
+// read by otherwise.
+#[test]
+fn the_window_follows_a_jump_of_the_bound_during_the_pass() {
+    let text: String = (0..800)
+        .map(|i| format!("Paragraph {i} of a page long enough to jump in while it is placed.\n\n"))
+        .collect();
+    let doc = markdown::parse(text);
+    let mut fonts = fonts();
+    let mut media = MediaCache::offline(PathBuf::from("."));
+    let vh = 600.0;
+    let (mut out, mut pass) = layout_begin(&doc, &cfg(), 800.0);
+    pass.retain_around(0.0, vh);
+    for _ in 0..40 {
+        layout_step(
+            &doc,
+            &theme(),
+            &mut fonts,
+            &mut media,
+            &cfg(),
+            &mut out,
+            &mut pass,
+        );
+    }
+    let near_top = out.window_span().expect("a windowed layout");
+    assert!(near_top.end > 0.0, "the first blocks are materialized");
+    // The jump: the bound moves far below what is placed so far.
+    let far = 15_000.0;
+    pass.retain_around(far, vh);
+    layout_more(
+        &doc,
+        &theme(),
+        &mut fonts,
+        &mut media,
+        &cfg(),
+        &mut out,
+        &mut pass,
+        None,
+    );
+    assert!(
+        out.height > far + 6.0 * vh,
+        "the page reaches past the bound: {}",
+        out.height
+    );
+    out.records_consistent()
+        .expect("the marks and the vectors agree after the jump");
+    let span = out.window_span().expect("a windowed layout");
+    assert!(
+        span.start > near_top.end,
+        "the blocks of the old window are gone: {span:?}"
+    );
+    assert!(
+        span.start < far && span.end > far,
+        "the window holds the blocks around the jump: {span:?}"
+    );
+}

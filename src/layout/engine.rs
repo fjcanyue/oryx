@@ -1214,6 +1214,19 @@ fn settle_retention(
         }
         return;
     }
+    // The bound jumped past the window while the pass ran: the blocks
+    // between were placed outside it and dropped, so the window's own
+    // blocks are above the bound too. A new window opens on this block;
+    // extending the old one would hand its marks to the wrong positions.
+    let follows = out
+        .window
+        .as_ref()
+        .is_none_or(|window| window.start + window.marks.len() == position);
+    if !follows {
+        let held = out.window.as_ref().map_or(0, |window| window.marks.len());
+        out.window_drop_front(held);
+        out.window.as_mut().expect("windowed layout").start = position;
+    }
     let marks = PosMarks::of(out, lines);
     match out.window.as_mut() {
         Some(window) => {
