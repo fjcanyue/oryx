@@ -21,6 +21,37 @@ fn attach_parent_console() {
     }
 }
 
+/// Whether winit will open an X11 window: no Wayland display is named
+/// and an X11 one is.
+#[cfg(target_os = "linux")]
+fn x11_session(wayland: Option<&std::ffi::OsStr>, display: Option<&std::ffi::OsStr>) -> bool {
+    wayland.is_none_or(|name| name.is_empty()) && display.is_some_and(|name| !name.is_empty())
+}
+
+/// On X11 winit loads libxkbcommon and libxkbcommon-x11 at run time and
+/// panics when one is missing, as on the test machine of the AppImage
+/// catalog. Loading them here first gives a plain line in its place.
+#[cfg(target_os = "linux")]
+fn missing_keyboard_library() -> Option<String> {
+    let wayland = std::env::var_os("WAYLAND_DISPLAY");
+    let display = std::env::var_os("DISPLAY");
+    if !x11_session(wayland.as_deref(), display.as_deref()) {
+        return None;
+    }
+    ["libxkbcommon.so.0", "libxkbcommon-x11.so.0"]
+        .into_iter()
+        // SAFETY: the system's own libraries, which winit loads with the
+        // same call a moment later.
+        .find(|name| unsafe { libloading::Library::new(name) }.is_err())
+        .map(|name| {
+            format!(
+                "the keyboard library {name} is not installed, and X11 needs it. \
+                 Install the package libxkbcommon-x11-0 (Debian, Ubuntu) \
+                 or libxkbcommon-x11 (Fedora, Arch)."
+            )
+        })
+}
+
 /// What the positional argument asks for: a folder opens the sidebar
 /// there over the welcome page; anything else, existing or not, goes
 /// to the loader as a file, whose error names a missing one.
@@ -261,6 +292,11 @@ fn main() -> ExitCode {
                 eprintln!("oryx: {message}");
                 return ExitCode::FAILURE;
             }
+            #[cfg(target_os = "linux")]
+            if let Some(message) = missing_keyboard_library() {
+                eprintln!("oryx: {message}");
+                return ExitCode::FAILURE;
+            }
             use std::io::IsTerminal;
             let second_window = second || recover.is_some();
             let terminal = std::io::stdin().is_terminal();
@@ -297,6 +333,19 @@ fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_keyboard_check_runs_when_winit_would_pick_x11() {
+        let wayland = Some(std::ffi::OsStr::new("wayland-0"));
+        let display = Some(std::ffi::OsStr::new(":0"));
+        let empty = Some(std::ffi::OsStr::new(""));
+        assert!(x11_session(None, display));
+        assert!(x11_session(empty, display));
+        assert!(!x11_session(wayland, display));
+        assert!(!x11_session(None, None));
+        assert!(!x11_session(None, empty));
+    }
 
     #[test]
     fn the_argument_decides_between_nothing_a_file_and_a_folder() {

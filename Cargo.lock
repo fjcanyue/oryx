@@ -2341,6 +2341,7 @@ dependencies = [
  "html5ever",
  "ico",
  "image",
+ "libloading",
  "lopdf",
  "markup5ever_rcdom",
  "miniz_oxide",

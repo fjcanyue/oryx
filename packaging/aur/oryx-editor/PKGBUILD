@@ -8,7 +8,7 @@ url='https://github.com/wmahfoudh/oryx'
 license=('GPL-3.0-only')
 # gcc-libs ships the libgcc_s.so.1 the binary links; namcap calls it
 # implicitly satisfied, it is listed all the same.
-depends=('openssl' 'gcc-libs' 'glibc' 'hicolor-icon-theme')
+depends=('openssl' 'gcc-libs' 'glibc' 'hicolor-icon-theme' 'libxkbcommon-x11')
 makedepends=('cargo' 'librsvg')
 # The command is oryx. The extra repository ships an unrelated oryx (a
 # network sniffer) that installs the same /usr/bin/oryx.

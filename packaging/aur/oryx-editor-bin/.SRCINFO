@@ -10,6 +10,7 @@ pkgbase = oryx-editor-bin
 	depends = gcc-libs
 	depends = glibc
 	depends = hicolor-icon-theme
+	depends = libxkbcommon-x11
 	provides = oryx-editor
 	conflicts = oryx
 	conflicts = oryx-editor

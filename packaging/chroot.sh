@@ -6,7 +6,8 @@
 # covers Debian 12, Ubuntu 22.04, Fedora 36, openSUSE Leap 15.4 and newer.
 #
 # Inside: build-essential, libssl-dev, pkg-config, curl, ca-certificates,
-# git, and a build user carrying the invoking user's uid with rustup and
+# git, the two keyboard libraries the AppImage bundles (libxkbcommon0,
+# libxkbcommon-x11-0), and a build user carrying the invoking user's uid with rustup and
 # a stable toolchain, so build-linux.sh can enter the root through
 # bubblewrap without root and write as that user. The build itself uses
 # the version named in rust-toolchain.toml, which rustup installs in the
@@ -45,7 +46,7 @@ chroot "$ROOT" /bin/sh -c '
 set -e
 export DEBIAN_FRONTEND=noninteractive LC_ALL=C.UTF-8
 apt-get update
-apt-get install -y --no-install-recommends build-essential libssl-dev pkg-config curl ca-certificates git passwd
+apt-get install -y --no-install-recommends build-essential libssl-dev pkg-config curl ca-certificates git passwd libxkbcommon0 libxkbcommon-x11-0
 apt-get clean
 rm -rf /var/lib/apt/lists/*
 '

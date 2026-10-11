@@ -11,6 +11,7 @@ pkgbase = oryx-editor
 	depends = gcc-libs
 	depends = glibc
 	depends = hicolor-icon-theme
+	depends = libxkbcommon-x11
 	conflicts = oryx
 	source = oryx-editor-1.2.1.tar.gz::https://github.com/wmahfoudh/oryx/archive/refs/tags/v1.2.1.tar.gz
 	sha256sums = 79ab55fb380f4b1aa4961a72d4336cb27af313f6f72211dd471bfbd64aa84750
