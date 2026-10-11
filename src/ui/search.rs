@@ -361,12 +361,16 @@ pub(crate) fn draw_field(
         painter.line(caret_x, top + 1.0, caret_x, top + 19.0, 1.0, ui.overlay_fg);
     }
     // Every boundary from the drawn window's start, the cut ones
-    // before it at negative x: a click at the box's left edge reaches
-    // them one at a time, and the window follows the caret.
+    // before it at negative x and the ones beyond it past the window's
+    // end: a click at the box's edge reaches them one at a time, and
+    // the window follows the caret.
     let offsets = field
         .boundaries()
         .map(|at| {
-            if at >= window.start {
+            if at > window.end {
+                x_of(window.end)
+                    + painter.measure(&text[window.end..at], CODE_FAMILY, QUERY_SIZE, 400)
+            } else if at >= window.start {
                 x_of(at)
             } else {
                 lead - painter.measure(&text[at..window.start], CODE_FAMILY, QUERY_SIZE, 400)
@@ -777,7 +781,31 @@ pub fn step(current: usize, len: usize, forward: bool) -> usize {
 mod tests {
     use super::*;
     use crate::doc::markdown;
+    use crate::style::fonts::FontStore;
+    use crate::style::theme::Theme;
     use crate::ui::selection::ModelPos;
+    use tiny_skia::Pixmap;
+
+    /// A query longer than the pill, the caret at its start: the drawn
+    /// window stops short of the text's end, and the boundaries beyond
+    /// it keep growing, so a click right of the pill reaches them.
+    #[test]
+    fn the_offsets_beyond_the_drawn_window_keep_growing() {
+        let query: String = "abcdefghij".repeat(6);
+        let mut field = TextField::new(query);
+        field.set_caret(0);
+        let mut pixmap = Pixmap::new(400, 60).unwrap();
+        let mut fonts = FontStore::new();
+        let mut painter = Painter::new(&mut pixmap, &mut fonts, None, 1.0);
+        let theme = Theme::default_dark();
+        let view = draw_field(&mut painter, &theme, &field, 0.0, 0.0, 120.0, "", true);
+        assert_eq!(view.offsets.len(), 61);
+        assert!(
+            view.offsets.windows(2).all(|w| w[0] < w[1]),
+            "every boundary stands right of the one before: {:?}",
+            view.offsets
+        );
+    }
 
     #[test]
     fn matches_reach_inside_closed_details() {

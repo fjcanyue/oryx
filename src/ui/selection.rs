@@ -1343,14 +1343,31 @@ fn run_rtl(
     buffer.layout_runs().next().is_some_and(|line| line.rtl)
 }
 
-/// X offset of a byte boundary among shaped glyphs, which arrive in
-/// logical order. An LTR glyph's boundary sits at its left edge; an RTL
-/// glyph's at its right, since the character before it draws to its
-/// right. A boundary inside a glyph's cluster (a ligature such as fi is
-/// one glyph over two characters) splits the glyph's width evenly per
-/// character, mirrored for RTL, so carets and highlights land between
-/// the characters and always agree.
+/// X offset of a byte boundary among shaped glyphs. An LTR glyph's
+/// boundary sits at its left edge; an RTL glyph's at its right, since
+/// the character before it draws to its right. The glyph that starts at
+/// the byte answers first, wherever the line puts it: a line of mixed
+/// directions (a field's whole text) comes in visual order, where the
+/// first glyph past the byte can belong to another word. A cluster drawn
+/// as several glyphs (a letter and its mark) takes the outermost edge. A
+/// boundary inside a glyph's cluster (a ligature such as fi is one glyph
+/// over two characters) splits the glyph's width evenly per character,
+/// mirrored for RTL, so carets and highlights land between the
+/// characters and always agree.
 pub(crate) fn boundary_x(glyphs: &[LayoutGlyph], text: &str, byte: usize) -> Option<f32> {
+    let mut starting: Option<f32> = None;
+    for glyph in glyphs.iter().filter(|g| g.start == byte) {
+        let rtl = glyph.level.is_rtl();
+        let edge = if rtl { glyph.x + glyph.w } else { glyph.x };
+        starting = Some(match starting {
+            Some(seen) if rtl => seen.max(edge),
+            Some(seen) => seen.min(edge),
+            None => edge,
+        });
+    }
+    if starting.is_some() {
+        return starting;
+    }
     for glyph in glyphs {
         let rtl = glyph.level.is_rtl();
         if glyph.start >= byte {

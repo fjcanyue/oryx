@@ -291,7 +291,12 @@ impl TextField {
     }
 
     fn insert_text(&mut self, text: &str) -> Edit {
-        let clean: String = text.chars().filter(|c| !c.is_control()).collect();
+        // A field is one line: a line or paragraph separator, which is
+        // not a control character, leaves with them.
+        let clean: String = text
+            .chars()
+            .filter(|c| !c.is_control() && !matches!(c, '\u{2028}' | '\u{2029}'))
+            .collect();
         if clean.is_empty() {
             return Edit::Handled;
         }
@@ -871,6 +876,17 @@ mod tests {
     fn insert_strips_control_characters() {
         let mut f = TextField::new("");
         f.insert("a\tb\nc");
+        assert_eq!(f.text(), "abc");
+        assert_eq!(f.caret(), 3);
+    }
+
+    /// A line or paragraph separator is not a control character, and a
+    /// field is one line: the text library asserts the direction of
+    /// each paragraph against the first, so a pasted one would panic.
+    #[test]
+    fn insert_strips_line_and_paragraph_separators() {
+        let mut f = TextField::new("");
+        f.insert("a\u{2028}b\u{2029}c");
         assert_eq!(f.text(), "abc");
         assert_eq!(f.caret(), 3);
     }

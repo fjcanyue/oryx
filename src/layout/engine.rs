@@ -6734,6 +6734,16 @@ mod tests {
         assert_eq!(runs[0].width, line);
     }
 
+    /// A paragraph separator inside a paragraph's text splits the
+    /// shaped line into two bidi paragraphs, whose directions the text
+    /// library asserts equal: the page shapes through `shapable`.
+    #[test]
+    fn a_paragraph_separator_in_the_text_lays_out() {
+        let doc = markdown::parse("abc\u{2029}مق and on\n");
+        let lay = lay_of(&doc);
+        assert!(lay.height > 0.0);
+    }
+
     fn lay_of(doc: &Document) -> LayoutDoc {
         let mut fonts = FontStore::new();
         let mut media = MediaCache::offline(PathBuf::from("."));

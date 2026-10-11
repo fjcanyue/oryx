@@ -124,9 +124,12 @@ fn family_for(class: ScriptClass) -> Option<&'static str> {
 /// offset still maps. No font has a glyph for one, and the shaper's
 /// search for it walks every font on the system, loading each: a log
 /// full of escape codes froze the window for seconds and a random
-/// file for longer.
+/// file for longer. A line or paragraph separator (U+2028, U+2029)
+/// becomes an em space, three bytes like itself: the shaper splits a
+/// line at one into bidi paragraphs and asserts that they share a
+/// direction, which a pasted query mixing scripts fails.
 pub fn shapable(text: &str) -> std::borrow::Cow<'_, str> {
-    if !text.bytes().any(is_control_byte) {
+    if !text.bytes().any(is_control_byte) && !text.contains(['\u{2028}', '\u{2029}']) {
         return std::borrow::Cow::Borrowed(text);
     }
     std::borrow::Cow::Owned(
@@ -134,6 +137,8 @@ pub fn shapable(text: &str) -> std::borrow::Cow<'_, str> {
             .map(|c| {
                 if c.is_ascii() && is_control_byte(c as u8) {
                     ' '
+                } else if matches!(c, '\u{2028}' | '\u{2029}') {
+                    '\u{2003}'
                 } else {
                     c
                 }
@@ -307,6 +312,14 @@ mod tests {
             "a\x1b[31mb\x01c\x7fd\u{e9}".len(),
             "every offset still maps"
         );
+    }
+
+    #[test]
+    fn line_and_paragraph_separators_shape_as_an_em_space_of_the_same_length() {
+        let text = "a\u{2028}b\u{2029}مق";
+        let shaped = shapable(text);
+        assert_eq!(&*shaped, "a\u{2003}b\u{2003}مق");
+        assert_eq!(shaped.len(), text.len(), "every offset still maps");
     }
 
     #[test]

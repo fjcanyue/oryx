@@ -8,7 +8,7 @@
 
 use cosmic_text::{Attrs, Buffer, Family, Metrics, Shaping, Weight};
 
-use crate::style::fonts::line_width;
+use crate::style::fonts::{line_width, shapable};
 use crate::ui::selection::boundary_x;
 use tiny_skia::{FillRule, Mask, Path, PathBuilder, Pixmap, Transform};
 
@@ -462,9 +462,12 @@ impl<'a> Painter<'a> {
         let attrs = Attrs::new()
             .family(Family::Name(family))
             .weight(Weight(weight));
+        // A control character or a paragraph separator in a file name or
+        // a pasted query would walk every font or split the line.
+        let text = shapable(text);
         buffer.set_text(
             &mut self.fonts.font_system,
-            text,
+            &text,
             &attrs,
             Shaping::Advanced,
             None,
@@ -624,6 +627,49 @@ mod tests {
             "rising from left to right: {latin:?}"
         );
         assert_eq!(latin[5], painter.measure("hello", BODY_FAMILY, 15.0, 400));
+    }
+
+    /// A right-to-left word inside a left-to-right line: the text
+    /// library keeps the glyphs of such a line in visual order, and each
+    /// boundary must still find its own glyph. The letters of the word
+    /// fall from right to left between the rising Latin parts.
+    #[test]
+    fn the_boundaries_of_a_mixed_line_are_distinct() {
+        let mut pixmap = Pixmap::new(400, 50).unwrap();
+        let mut fonts = FontStore::new();
+        let mut painter = Painter::new(&mut pixmap, &mut fonts, None, 1.0);
+        let text = "abc مقدمة def";
+        let at = painter.boundaries(text, BODY_FAMILY, 15.0, 400);
+        assert_eq!(at.len(), 14, "thirteen characters, fourteen boundaries");
+        assert!(
+            at[0..=4].windows(2).all(|w| w[0] < w[1]),
+            "abc and the space rise: {at:?}"
+        );
+        assert!(
+            at[4..=8].windows(2).all(|w| w[0] > w[1]),
+            "the five Arabic letters fall from the right: {at:?}"
+        );
+        assert!(
+            at[8] < at[9],
+            "the space after the word stands right of it: {at:?}"
+        );
+        assert!(
+            at[9..=13].windows(2).all(|w| w[0] < w[1]),
+            "def rises: {at:?}"
+        );
+    }
+
+    /// A pasted paragraph separator splits the line into two bidi
+    /// paragraphs, whose directions the text library asserts equal.
+    #[test]
+    fn a_paragraph_separator_does_not_break_the_shaping() {
+        let mut pixmap = Pixmap::new(400, 50).unwrap();
+        let mut fonts = FontStore::new();
+        let mut painter = Painter::new(&mut pixmap, &mut fonts, None, 1.0);
+        let width = painter.measure("abc\u{2029}مق", BODY_FAMILY, 15.0, 400);
+        assert!(width > 0.0);
+        let at = painter.boundaries("abc\u{2028}مق", BODY_FAMILY, 15.0, 400);
+        assert_eq!(at.len(), 7, "the separator keeps its boundary");
     }
 
     #[test]

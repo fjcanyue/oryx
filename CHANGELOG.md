@@ -10,8 +10,9 @@
 - On a big file, a jump to the end while the file is still being laid out no longer puts the blocks kept in memory out of step with the page. Before, the first block kept after the jump was filed as the next of the last one kept before it, and the view could read the wrong geometry until it moved again.
 - In the Outline tab, a long title written from right to left now shows its beginning, cut at its end with an ellipsis. Before, the title was drawn whole and the edge of the sidebar cut its beginning, so the rows of several chapters read the same.
 - The Outline tab now highlights a chapter once its heading is in the top half of the window, and the last chapter in view once the page is at its end. Before, the chapter above the window stayed highlighted while the next heading showed near the top, and a click on a short last chapter left the chapter before it highlighted.
-- An image shown without its picture now sizes its box to a label written from right to left. Before, the box took the smallest width.
+- An image inside a paragraph, shown without its picture, now sizes its box to a label written from right to left. Before, the box took the smallest width and the label ran over the words before it.
 - In the search bar and in the fields of the theme dialogs, the caret, the selection and a click now stand at their place in text written from right to left. Before, they stood at the mirror of it.
+- A line or paragraph separator pasted into the search bar or a field is now dropped, like a control character. Before, it closed Oryx at once.
 
 ## v1.2.1
 
