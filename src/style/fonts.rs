@@ -7,7 +7,7 @@
 
 use std::collections::HashMap;
 
-use cosmic_text::{FontSystem, SwashCache, Weight};
+use cosmic_text::{FontSystem, LayoutGlyph, SwashCache, Weight};
 
 pub const BODY_FAMILY: &str = "DejaVu Sans";
 pub const CODE_FAMILY: &str = "Courier Prime";
@@ -90,6 +90,14 @@ fn script_class(c: char) -> ScriptClass {
         _ if c.is_alphabetic() => ScriptClass::Other,
         _ => ScriptClass::Neutral,
     }
+}
+
+/// The width of a shaped line: the farthest right edge of its glyphs.
+/// The glyphs of a right-to-left line come in reading order and are
+/// placed from the right, so the last one is the leftmost, and its edge
+/// is the width of one letter.
+pub(crate) fn line_width(glyphs: &[LayoutGlyph]) -> f32 {
+    glyphs.iter().map(|g| g.x + g.w).fold(0.0, f32::max)
 }
 
 /// The bidi strength of one character: `Some(true)` for Arabic and

@@ -504,12 +504,12 @@ fn outline_current(
     lay: &LayoutDoc,
     scroll_y: f32,
     view_h: f32,
+    pending: bool,
 ) -> Option<usize> {
     if side.tab() != sidebar::Tab::Outline {
         return None;
     }
-    // The scroll stops where the page's end meets the view's bottom.
-    let at_end = scroll_y + view_h >= lay.height - 1.0;
+    let at_end = page_end_reached(scroll_y, view_h, lay.height, pending);
     let entry = outline
         .current_of(scroll_y, view_h, at_end, |b| {
             (b != usize::MAX).then(|| lay.approx_top(b, 0)).flatten()
@@ -517,6 +517,13 @@ fn outline_current(
         .map(|e| outline.visible_entry(e));
     outline.track_current(entry, sidebar::ROW_H, side.list_h());
     entry
+}
+
+/// Whether the view shows the end of the page: the scroll stops where
+/// the page's end meets the view's bottom. While the layout is pending,
+/// the height is the part placed so far, and its edge is not the end.
+fn page_end_reached(scroll_y: f32, view_h: f32, height: f32, pending: bool) -> bool {
+    !pending && scroll_y + view_h >= height - 1.0
 }
 
 /// A link target naming a file on disk: resolved against the document's
@@ -8271,6 +8278,9 @@ impl App {
                 .view(frame_y, size.height),
         };
 
+        // Read before the frame borrows the graphics: the outline's end
+        // of the page waits for a layout still pending.
+        let pending = self.layout_pending();
         let Some(gfx) = self.gfx.as_mut() else {
             return;
         };
@@ -8396,6 +8406,7 @@ impl App {
                     lay,
                     self.scroll_y,
                     size.height as f32,
+                    pending,
                 )
             } else {
                 self.outline.last_current()
@@ -9342,6 +9353,26 @@ mod tests {
         assert_eq!(
             super::speculation_target(&doc, &visible, false, &Guessed::new()),
             None
+        );
+    }
+
+    /// While a long document loads, the layout's height is the part
+    /// placed so far, and a view at that edge is not at the page's end.
+    #[test]
+    fn the_end_of_the_page_waits_for_the_layout() {
+        assert!(super::page_end_reached(600.0, 400.0, 1000.0, false));
+        assert!(
+            !super::page_end_reached(600.0, 400.0, 1000.0, true),
+            "still loading"
+        );
+        assert!(!super::page_end_reached(0.0, 400.0, 1000.0, false));
+        assert!(
+            super::page_end_reached(0.0, 400.0, 300.0, false),
+            "shorter than the view"
+        );
+        assert!(
+            !super::page_end_reached(0.0, 400.0, 300.0, true),
+            "shorter so far"
         );
     }
 

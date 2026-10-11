@@ -7,6 +7,9 @@
 //! at the physical size, never upscaled from a smaller raster.
 
 use cosmic_text::{Attrs, Buffer, Family, Metrics, Shaping, Weight};
+
+use crate::style::fonts::line_width;
+use crate::ui::selection::boundary_x;
 use tiny_skia::{FillRule, Mask, Path, PathBuilder, Pixmap, Transform};
 
 use crate::style::fonts::FontStore;
@@ -318,7 +321,30 @@ impl<'a> Painter<'a> {
 
     pub fn measure(&mut self, text: &str, family: &str, size: f32, weight: u16) -> f32 {
         let buffer = self.shape(text, family, size * self.scale, weight);
-        line_width(&buffer) / self.scale
+        first_line_width(&buffer) / self.scale
+    }
+
+    /// The x of each character boundary of one line, in logical units,
+    /// in the order of the text and ending past the last character: a
+    /// field's caret, selection and click stand on these.
+    pub fn boundaries(&mut self, text: &str, family: &str, size: f32, weight: u16) -> Vec<f32> {
+        let buffer = self.shape(text, family, size * self.scale, weight);
+        let run = buffer.layout_runs().next();
+        let glyphs = run.as_ref().map_or(&[][..], |r| r.glyphs);
+        // The boundary after the last character is the line's logical
+        // end: its left edge on a right-to-left line, its right edge
+        // otherwise.
+        let end = if run.as_ref().is_some_and(|r| r.rtl) {
+            glyphs.iter().map(|g| g.x).fold(f32::INFINITY, f32::min)
+        } else {
+            line_width(glyphs)
+        };
+        let end = if end.is_finite() { end } else { 0.0 };
+        text.char_indices()
+            .map(|(at, _)| boundary_x(glyphs, text, at).unwrap_or(end))
+            .chain(std::iter::once(end))
+            .map(|x| x / self.scale)
+            .collect()
     }
 
     /// Where a capital's ink lands below the top of a drawn line, as
@@ -362,7 +388,7 @@ impl<'a> Painter<'a> {
         let buffer = self.shape(text, family, size, weight);
         let width = self.pixmap.width() as i32;
         let (bx0, by0, bx1, by1) = self.bounds();
-        let advance = line_width(&buffer);
+        let advance = first_line_width(&buffer);
         if matches!(self.reach(x, y, advance, size * 1.4), Reach::None) {
             return advance / s;
         }
@@ -448,16 +474,13 @@ impl<'a> Painter<'a> {
     }
 }
 
-/// The width of a buffer's first line: the farthest right edge of its
-/// glyphs. The glyphs of a right-to-left line come in reading order and
-/// are placed from the right, so the last one is the leftmost, and its
-/// edge is the width of one letter.
-fn line_width(buffer: &Buffer) -> f32 {
+/// The width of a buffer's first line, which is the whole text: the
+/// painter shapes with no width, so nothing wraps.
+fn first_line_width(buffer: &Buffer) -> f32 {
     buffer
         .layout_runs()
         .next()
-        .map(|run| run.glyphs.iter().map(|g| g.x + g.w).fold(0.0, f32::max))
-        .unwrap_or(0.0)
+        .map_or(0.0, |run| line_width(run.glyphs))
 }
 
 /// The clip as a coverage mask the size of the pixmap, built once per
@@ -570,6 +593,37 @@ mod tests {
         );
         let drawn = painter.text(0.0, 0.0, "مقدمة ابن خلدون", BODY_FAMILY, 15.0, 400, RED);
         assert_eq!(drawn, line, "the advance of the drawn line is its measure");
+    }
+
+    /// On a right-to-left line the first character stands at the right
+    /// end, so its boundaries run from the line's width down to zero; a
+    /// left-to-right line runs from zero up to its width.
+    #[test]
+    fn the_boundaries_of_a_right_to_left_line_run_from_the_right() {
+        let mut pixmap = Pixmap::new(400, 50).unwrap();
+        let mut fonts = FontStore::new();
+        let mut painter = Painter::new(&mut pixmap, &mut fonts, None, 1.0);
+        let text = "مقدمة";
+        let width = painter.measure(text, BODY_FAMILY, 15.0, 400);
+        let at = painter.boundaries(text, BODY_FAMILY, 15.0, 400);
+        assert_eq!(at.len(), 6, "five letters, six boundaries");
+        assert!(
+            (at[0] - width).abs() < 1.0,
+            "the start at the right end: {} against {width}",
+            at[0]
+        );
+        assert!(at[5].abs() < 1.0, "the end at the left end: {}", at[5]);
+        assert!(
+            at.windows(2).all(|w| w[0] > w[1]),
+            "falling from right to left: {at:?}"
+        );
+        let latin = painter.boundaries("hello", BODY_FAMILY, 15.0, 400);
+        assert_eq!(latin[0], 0.0);
+        assert!(
+            latin.windows(2).all(|w| w[0] < w[1]),
+            "rising from left to right: {latin:?}"
+        );
+        assert_eq!(latin[5], painter.measure("hello", BODY_FAMILY, 15.0, 400));
     }
 
     #[test]

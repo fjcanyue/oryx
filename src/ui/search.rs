@@ -311,16 +311,20 @@ pub(crate) fn draw_field(
     } else {
         0.0
     };
-    // Offsets are taken inside the drawn window, so a caret in the middle
-    // of a text too long for the pill still lands under its character.
-    let x_of = |painter: &mut Painter, at: usize| {
+    // The boundaries are read on the drawn window's shaped line, so a
+    // caret in the middle of a text too long for the pill still lands
+    // under its character, and one in right-to-left text at its place.
+    let positions = painter.boundaries(&shown, CODE_FAMILY, QUERY_SIZE, 400);
+    let x_of = |at: usize| {
         let at = at.clamp(window.start, window.end);
-        lead + painter.measure(&text[window.start..at], CODE_FAMILY, QUERY_SIZE, 400)
+        let index = usize::from(cut) + text[window.start..at].chars().count();
+        positions.get(index).copied().unwrap_or(0.0)
     };
     if focused {
         if let Some(range) = field.selection() {
-            let from = x_of(painter, range.start);
-            let to = x_of(painter, range.end);
+            let (from, to) = (x_of(range.start), x_of(range.end));
+            // On right-to-left text the end stands left of the start.
+            let (from, to) = (from.min(to), from.max(to));
             painter.fill(
                 left + from - 2.0,
                 top - 1.0,
@@ -353,7 +357,7 @@ pub(crate) fn draw_field(
         );
     }
     if focused {
-        let caret_x = left + x_of(painter, field.caret()) + 1.0;
+        let caret_x = left + x_of(field.caret()) + 1.0;
         painter.line(caret_x, top + 1.0, caret_x, top + 19.0, 1.0, ui.overlay_fg);
     }
     // Every boundary from the drawn window's start, the cut ones
@@ -363,7 +367,7 @@ pub(crate) fn draw_field(
         .boundaries()
         .map(|at| {
             if at >= window.start {
-                lead + painter.measure(&text[window.start..at], CODE_FAMILY, QUERY_SIZE, 400)
+                x_of(at)
             } else {
                 lead - painter.measure(&text[at..window.start], CODE_FAMILY, QUERY_SIZE, 400)
             }

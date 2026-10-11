@@ -7,6 +7,8 @@ use std::time::{Duration, Instant};
 
 use cosmic_text::{Align, Attrs, Buffer, Family, Metrics, Shaping, Style, Weight};
 
+use crate::style::fonts::line_width;
+
 use super::metrics;
 use crate::doc::images::MediaCache;
 use crate::doc::model::{
@@ -5937,7 +5939,7 @@ fn side_text_width(fonts: &mut FontStore, cfg: &ViewConfig, text: &str, size: f3
     buffer.shape_until_scroll(&mut fonts.font_system, false);
     buffer
         .layout_runs()
-        .filter_map(|run| run.glyphs.last().map(|g| g.x + g.w))
+        .map(|run| line_width(run.glyphs))
         .fold(0.0, f32::max)
 }
 
@@ -5967,10 +5969,11 @@ fn shape_side_text(
     let mut runs = Vec::new();
     let mut width = 0.0f32;
     for run in buffer.layout_runs() {
-        let Some(last) = run.glyphs.last() else {
+        if run.glyphs.is_empty() {
             continue;
-        };
-        width = width.max(last.x + last.w);
+        }
+        let run_width = line_width(run.glyphs);
+        width = width.max(run_width);
         let text = out.side_ref(text);
         let family = out.family_id(family_name);
         runs.push(TextRun {
@@ -5978,7 +5981,7 @@ fn shape_side_text(
             x: 0.0,
             y: run.line_top,
             baseline: run.line_y,
-            width: last.x + last.w,
+            width: run_width,
             size,
             family,
             weight: Weight::NORMAL.0,
@@ -6695,6 +6698,40 @@ mod tests {
 
     fn seg(text: &str, script: Script) -> (String, Script) {
         (text.to_string(), script)
+    }
+
+    /// The glyphs of a right-to-left line come in reading order, placed
+    /// from the right: the width of a label is its whole line, not its
+    /// last letter.
+    #[test]
+    fn a_right_to_left_label_measures_its_whole_width() {
+        let mut fonts = FontStore::new();
+        let cfg = ViewConfig::default();
+        let word = side_text_width(&mut fonts, &cfg, "مقدمة", 16.0);
+        let line = side_text_width(&mut fonts, &cfg, "مقدمة ابن خلدون", 16.0);
+        assert!(
+            line > 2.0 * word,
+            "three words measure more than twice the first: {line} against {word}"
+        );
+        let mut out = LayoutDoc::default();
+        let family = cfg.body_family.clone();
+        let white = Rgba {
+            r: 255,
+            g: 255,
+            b: 255,
+            a: 255,
+        };
+        let (runs, shaped) = shape_side_text(
+            &mut fonts,
+            &cfg,
+            &family,
+            "مقدمة ابن خلدون",
+            16.0,
+            white,
+            &mut out,
+        );
+        assert_eq!(shaped, line, "the shaped runs give the same width");
+        assert_eq!(runs[0].width, line);
     }
 
     fn lay_of(doc: &Document) -> LayoutDoc {
