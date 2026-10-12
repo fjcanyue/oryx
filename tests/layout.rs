@@ -4991,3 +4991,104 @@ fn the_words_that_fit_after_an_inline_formula_stay_on_its_line() {
         l.run_text(&doc, second)
     );
 }
+
+/// The runs of one baseline, each pair checked for an overlap in x.
+fn overlapping_runs<'a>(l: &'a LayoutDoc, doc: &'a Document) -> Vec<(&'a str, &'a str)> {
+    let mut found = Vec::new();
+    for (i, a) in l.runs.iter().enumerate() {
+        for b in &l.runs[i + 1..] {
+            let same_line = (a.baseline - b.baseline).abs() < 1.0;
+            let overlap = a.x < b.x + b.width - 1.0 && b.x < a.x + a.width - 1.0;
+            if same_line && overlap {
+                found.push((l.run_text(doc, a), l.run_text(doc, b)));
+            }
+        }
+    }
+    found
+}
+
+#[test]
+fn arabic_words_after_an_inline_formula_overlap_nothing() {
+    // The words after the formula read right to left, so they are not
+    // split onto the formula's line: shaped alone they would be laid
+    // out as a right-to-left line and placed over the text before it.
+    let src = "The period of the swing $T$ يعتمد على الطول والجاذبية and on gravity and on nothing else at all here today.\n";
+    for w in 540..=600 {
+        let (doc, l) = lay2(src, w as f32);
+        let found = overlapping_runs(&l, &doc);
+        assert!(found.is_empty(), "at {w} wide: {found:?}");
+    }
+}
+
+#[test]
+fn a_right_to_left_paragraph_keeps_the_words_after_a_formula_below_its_row() {
+    // The formula opens a row of its own; the words after it went below
+    // the row before Task 281, and read after the formula there.
+    let src =
+        "يعتمد زمن الدورة $T$ على طول الخيط وعلى الجاذبية الأرضية فقط ولا شيء آخر على الإطلاق هنا.\n";
+    let (doc, l) = lay2(src, 400.0);
+    let row = l.math_glyphs.iter().map(|g| g.y).fold(0.0, f32::max);
+    let after = l
+        .runs
+        .iter()
+        .find(|r| l.run_text(&doc, r).contains("على طول"))
+        .expect("the words after the formula");
+    assert!(
+        after.baseline > row + 2.0,
+        "the words after the formula sit at baseline {} with the row at {row}",
+        after.baseline
+    );
+}
+
+#[test]
+fn a_footnote_reference_alone_after_a_formula_keeps_its_raise() {
+    // The reference is the only run that fits on the formula's line,
+    // and the line's baseline is the box's, not the raised run's.
+    let src = "The period of the swing $T$[^1] depends strongly on the length and on gravity and on nothing else at all here.\n\n[^1]: A note.\n";
+    let (doc, l) = lay2(src, 400.0);
+    let text = find_text(&l, &doc, "The period of the swing");
+    let reference = l
+        .runs
+        .iter()
+        .find(|r| l.run_text(&doc, r) == "1" && (r.y - text.y).abs() < 12.0)
+        .expect("the reference on the formula's line");
+    assert!(
+        reference.baseline < text.baseline - 3.0,
+        "reference baseline {} against the text's {}",
+        reference.baseline,
+        text.baseline
+    );
+}
+
+#[test]
+fn a_word_glued_to_a_formula_is_not_cut_inside() {
+    // A word wider than the room left breaks between glyphs when
+    // shaped alone; such a cut is refused and the word goes whole to
+    // the next line.
+    let src = "The number of the steps in the walk is $n$thousandfoldnesses keeps going on and on for quite a while.\n";
+    for w in [380.0, 400.0] {
+        let (doc, l) = lay2(src, w);
+        assert!(
+            l.runs
+                .iter()
+                .any(|r| l.run_text(&doc, r).contains("thousandfoldnesses")),
+            "at {w} wide the word is cut: {:?}",
+            l.runs
+                .iter()
+                .map(|r| l.run_text(&doc, r))
+                .collect::<Vec<_>>()
+        );
+    }
+}
+
+#[test]
+fn a_raised_pill_on_the_line_below_the_kept_one_is_not_kept() {
+    // The shaping in the room left emits the first visual line only,
+    // so no rectangle of the second line is carried onto the formula's
+    // line.
+    let src = "The number of the steps in the walk $x$ alphabetical numerically <sup><mark>beta</mark></sup> gamma delta epsilon zeta eta theta iota kappa lambda.\n";
+    for w in [360.0, 400.0, 440.0] {
+        let l = lay(src, w);
+        assert_eq!(l.rects.len(), 1, "at {w} wide: {:?}", l.rects);
+    }
+}

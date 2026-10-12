@@ -3753,6 +3753,40 @@ fn shape_block(
     content_width: f32,
     out: &mut LayoutDoc,
 ) -> f32 {
+    shape_block_lines(
+        fonts,
+        theme,
+        cfg,
+        source,
+        spans,
+        model_spans,
+        base,
+        x0,
+        y0,
+        content_width,
+        false,
+        out,
+    )
+}
+
+/// As `shape_block`; with `first_line_only`, the first visual line is
+/// shaped and emitted and the rest of the block is left, for a chunk
+/// whose first line joins an open line of the flow.
+#[allow(clippy::too_many_arguments)]
+fn shape_block_lines(
+    fonts: &mut FontStore,
+    theme: &Theme,
+    cfg: &ViewConfig,
+    source: &str,
+    spans: &[Span],
+    model_spans: bool,
+    base: &BlockStyle,
+    x0: f32,
+    y0: f32,
+    content_width: f32,
+    first_line_only: bool,
+    out: &mut LayoutDoc,
+) -> f32 {
     let line_height = metrics::LINE_HEIGHT * base.size;
     // Spans expand into pieces at this point only. Math literals expand
     // into sup/sub script segments with synthesized text (the model
@@ -3840,9 +3874,13 @@ fn shape_block(
                     y0 + height,
                     content_width,
                     line_height,
+                    first_line_only,
                     out,
                 );
                 segment.clear();
+                if first_line_only && height > 0.0 {
+                    break;
+                }
             } else if i < shaped.len() {
                 height += line_height;
             }
@@ -3881,6 +3919,7 @@ fn shape_segment(
     y0: f32,
     content_width: f32,
     line_height: f32,
+    first_line_only: bool,
     out: &mut LayoutDoc,
 ) -> f32 {
     // Almost every segment is small and shapes whole; it pays one
@@ -3904,6 +3943,7 @@ fn shape_segment(
             y0,
             content_width,
             line_height,
+            first_line_only,
             out,
         );
     }
@@ -3948,9 +3988,13 @@ fn shape_segment(
             y0 + height,
             content_width,
             line_height,
+            first_line_only,
             out,
         );
         start = end;
+        if first_line_only && height > 0.0 {
+            break;
+        }
     }
     height
 }
@@ -3978,6 +4022,7 @@ fn shape_segment_chunk(
     y0: f32,
     content_width: f32,
     line_height: f32,
+    first_line_only: bool,
     out: &mut LayoutDoc,
 ) -> f32 {
     let mut buffer = Buffer::new(&mut fonts.font_system, Metrics::new(base.size, line_height));
@@ -4076,7 +4121,10 @@ fn shape_segment_chunk(
     }
 
     let mut height = 0.0_f32;
-    for run in buffer.layout_runs() {
+    for (visual_line, run) in buffer.layout_runs().enumerate() {
+        if first_line_only && visual_line > 0 {
+            break;
+        }
         height = height.max(run.line_top + line_height);
         let line_text = buffer.lines[run.line_i].text();
         let line_base = line_offsets[run.line_i];
@@ -5255,15 +5303,18 @@ fn chunk_metrics(runs: &[TextRun], x0: f32, y: f32) -> (f32, f32, f32) {
     (last_top, end_x, last_base)
 }
 
-/// Reshapes a chunk that could not merge whole after an equation: the
-/// words that fit in the room left on the line join it, and the rest
-/// flows alone below, from its first word. The chunk is shaped once in
-/// the room left, and its first visual line is the prefix, kept as
-/// shaped, so a justified paragraph stretches it to the margin. The
-/// prefix keeps its natural model offsets; the remainder's shift by
-/// the bytes skipped, so selection and copy stay exact. Answers the
-/// remainder's marks and height, or None when the chunk is reshaped in
-/// place as it was: no word fits, and the chunk starts with one.
+/// Lays out the text chunk after an equation on an open line. The chunk
+/// is shaped in the room left, first visual line only, and that line
+/// joins the open line as shaped, so a justified paragraph stretches it
+/// to the margin. The remainder is shaped again at the full width, from
+/// the first word after the cut, the model offsets of the cut span
+/// shifted by the bytes skipped, so selection and copy stay exact. The
+/// chunk starts a new line whole, from its first word, when no word
+/// fits, when the first line would end inside a word, or when the chunk
+/// reads right to left: shaped alone, such a line is laid out right to
+/// left and lands over the text before the equation. Answers the
+/// remainder's marks and height; marks at the end of the runs mean the
+/// whole chunk joined the line.
 #[allow(clippy::too_many_arguments)]
 fn split_after_equation(
     fonts: &mut FontStore,
@@ -5281,31 +5332,34 @@ fn split_after_equation(
     runs_mark: usize,
     rects_mark: usize,
     out: &mut LayoutDoc,
-) -> Option<(usize, usize, f32)> {
-    let lb = line.baseline?;
-    let line_height = metrics::LINE_HEIGHT * base.size;
+) -> (usize, usize, f32) {
+    let lb = line.baseline.expect("an open line with a baseline");
     let room = x0 + avail - line.end_x;
     out.runs.truncate(runs_mark);
     out.rects.truncate(rects_mark);
-    let on_first = |r: &TextRun| r.y < y + 0.5 * line_height;
+    let rtl = match cfg.direction {
+        DirectionMode::Rtl => true,
+        DirectionMode::Ltr => false,
+        DirectionMode::Auto => masked[start..end]
+            .iter()
+            .flat_map(|s| s.text(source).chars())
+            .find_map(crate::style::fonts::strong_rtl)
+            .unwrap_or(false),
+    };
     // The cut: where the first visual line of the chunk, shaped in the
-    // room left, ends. A first line with no run (a blank alone, which
-    // shaping trims) or wider than the room (a word that cannot break)
-    // gives none.
+    // room left, ends. No cut when nothing fits (a first line of a blank
+    // alone, which shaping trims, or wider than the room, a word that
+    // cannot break) or when the line would end inside a word.
     let mut cut: Option<(usize, usize)> = None;
-    if room > 0.0 {
-        shape_block(
-            fonts, theme, cfg, source, masked, true, base, x0, y, room, out,
+    if room > 0.0 && !rtl {
+        shape_block_lines(
+            fonts, theme, cfg, source, masked, true, base, x0, y, room, true, out,
         );
-        let width = out.runs[runs_mark..]
+        let runs = &out.runs[runs_mark..];
+        let left = runs.iter().map(|r| r.x).fold(f32::MAX, f32::min);
+        let right = runs.iter().map(|r| r.x + r.width).fold(x0, f32::max);
+        let last = runs
             .iter()
-            .filter(|r| on_first(r))
-            .map(|r| r.x + r.width)
-            .fold(x0, f32::max)
-            - x0;
-        let last = out.runs[runs_mark..]
-            .iter()
-            .filter(|r| on_first(r))
             .map(|r| {
                 let len = masked[r.span].text(source).len();
                 match r.text {
@@ -5314,38 +5368,31 @@ fn split_after_equation(
                 }
             })
             .max();
-        if width <= room + 0.5 {
-            cut = last;
+        if let Some(c) = last {
+            let fits = left >= x0 - 0.5 && right - left <= room + 0.5;
+            if fits && cut_at_a_break(masked, source, c, end) {
+                cut = Some(c);
+            }
         }
     }
     let (mut span, mut byte) = match cut {
         Some(c) => {
-            // The first line joins the open line; the lines below it go.
-            let kept: Vec<TextRun> = out
-                .runs
-                .drain(runs_mark..)
-                .filter(|r| on_first(r))
-                .collect();
-            let pb = kept.iter().map(|r| r.baseline).fold(0.0, f32::max);
-            let pw = kept.iter().map(|r| r.x + r.width).fold(x0, f32::max) - x0;
+            // The first line joins the open line. Its baseline is the
+            // line box's, which any run gives whatever its own raise.
+            let runs = &out.runs[runs_mark..];
+            let pb = runs.first().map_or(y, |r| y + r.baseline - r.y);
+            let pw = runs.iter().map(|r| r.x + r.width).fold(x0, f32::max) - x0;
             let dx = line.end_x - x0;
             let dy = lb - pb;
-            out.runs.extend(kept.into_iter().map(|mut run| {
+            for run in &mut out.runs[runs_mark..] {
                 run.x += dx;
                 run.y += dy;
                 run.baseline += dy;
-                run
-            }));
-            let rects: Vec<_> = out
-                .rects
-                .drain(rects_mark..)
-                .filter(|r| r.y < y + line_height - 1.0)
-                .collect();
-            out.rects.extend(rects.into_iter().map(|mut rect| {
+            }
+            for rect in &mut out.rects[rects_mark..] {
                 rect.x += dx;
                 rect.y += dy;
-                rect
-            }));
+            }
             line.end_x += pw;
             c
         }
@@ -5372,14 +5419,7 @@ fn split_after_equation(
     let rmark_runs = out.runs.len();
     let rmark_rects = out.rects.len();
     if byte >= masked[span].text(source).len() {
-        // The whole chunk joined the line.
-        return Some((rmark_runs, rmark_rects, 0.0));
-    }
-    if cut.is_none() && (span, byte) == (start, 0) {
-        shape_block(
-            fonts, theme, cfg, source, masked, true, base, x0, y, avail, out,
-        );
-        return None;
+        return (rmark_runs, rmark_rects, 0.0);
     }
     let mut rest_spans = masked.to_vec();
     for s in &mut rest_spans[start..span] {
@@ -5407,7 +5447,29 @@ fn split_after_equation(
             }
         }
     }
-    Some((rmark_runs, rmark_rects, h))
+    (rmark_runs, rmark_rects, h)
+}
+
+/// Whether a cut of the chunk at `(span, byte)` has whitespace after it
+/// or ends the chunk. A cut inside a word comes from a word wider than
+/// the room, which shaping breaks between glyphs.
+fn cut_at_a_break(
+    masked: &[Span],
+    source: &str,
+    (mut span, mut byte): (usize, usize),
+    end: usize,
+) -> bool {
+    loop {
+        let text = masked[span].text(source);
+        if byte < text.len() {
+            return text[byte..].starts_with(char::is_whitespace);
+        }
+        span += 1;
+        if span >= end {
+            return true;
+        }
+        byte = 0;
+    }
 }
 
 /// Text with inline images or equations. Text shapes normally; an image
@@ -5471,59 +5533,56 @@ fn layout_flow(
                 .collect();
             let runs_mark = out.runs.len();
             let rects_mark = out.rects.len();
-            let mut h = shape_block(
-                fonts, theme, cfg, source, &masked, true, base, x0, y, avail, out,
-            );
-            let (mut last_top, mut end_x, mut last_base) =
-                chunk_metrics(&out.runs[runs_mark..], x0, y);
-            let single_line = h <= 1.5 * line_height;
-            let merged = if let Some(l) = line.as_mut() {
-                let fits = l.end_x + (end_x - x0) <= x0 + avail;
-                match l.baseline {
-                    Some(lb) if single_line && fits => {
-                        let dx = l.end_x - x0;
-                        let dy = lb - last_base;
-                        for run in &mut out.runs[runs_mark..] {
-                            run.x += dx;
-                            run.y += dy;
-                            run.baseline += dy;
-                        }
-                        for rect in &mut out.rects[rects_mark..] {
-                            rect.x += dx;
-                            rect.y += dy;
-                        }
-                        l.end_x += end_x - x0;
-                        true
-                    }
-                    _ => false,
+            // After an equation on an open text line, the split lays the
+            // chunk out: the words that fit join the line, and the rest
+            // flows below from its first word.
+            let after_equation = start > 0
+                && spans[start - 1].math
+                && line.as_ref().is_some_and(|l| l.baseline.is_some());
+            let (h, runs_mark, rects_mark, merged) = if after_equation {
+                let l = line.as_mut().expect("an open line with a baseline");
+                let (rm, rcm, rh) = split_after_equation(
+                    fonts, theme, cfg, source, &masked, start, i, l, base, x0, y, avail, runs_mark,
+                    rects_mark, out,
+                );
+                if out.runs.len() == rm {
+                    // The whole chunk joined the line, which stays open.
+                    continue;
                 }
+                (rh, rm, rcm, false)
             } else {
-                false
-            };
-            if !merged {
-                // The words that fit after an equation join its line, and
-                // the rest flows below from its first word.
-                let mut runs_mark = runs_mark;
-                let mut rects_mark = rects_mark;
-                if start > 0 && spans[start - 1].math {
-                    if let Some(l) = line.as_mut() {
-                        if let Some((rm, rcm, rh)) = split_after_equation(
-                            fonts, theme, cfg, source, &masked, start, i, l, base, x0, y, avail,
-                            runs_mark, rects_mark, out,
-                        ) {
-                            if out.runs.len() == rm {
-                                // The whole chunk joined the line, which
-                                // stays open.
-                                continue;
+                let h = shape_block(
+                    fonts, theme, cfg, source, &masked, true, base, x0, y, avail, out,
+                );
+                let (_, end_x, last_base) = chunk_metrics(&out.runs[runs_mark..], x0, y);
+                let single_line = h <= 1.5 * line_height;
+                let merged = if let Some(l) = line.as_mut() {
+                    let fits = l.end_x + (end_x - x0) <= x0 + avail;
+                    match l.baseline {
+                        Some(lb) if single_line && fits => {
+                            let dx = l.end_x - x0;
+                            let dy = lb - last_base;
+                            for run in &mut out.runs[runs_mark..] {
+                                run.x += dx;
+                                run.y += dy;
+                                run.baseline += dy;
                             }
-                            runs_mark = rm;
-                            rects_mark = rcm;
-                            h = rh;
-                            (last_top, end_x, last_base) =
-                                chunk_metrics(&out.runs[runs_mark..], x0, y);
+                            for rect in &mut out.rects[rects_mark..] {
+                                rect.x += dx;
+                                rect.y += dy;
+                            }
+                            l.end_x += end_x - x0;
+                            true
                         }
+                        _ => false,
                     }
-                }
+                } else {
+                    false
+                };
+                (h, runs_mark, rects_mark, merged)
+            };
+            let (mut last_top, end_x, mut last_base) = chunk_metrics(&out.runs[runs_mark..], x0, y);
+            if !merged {
                 if let Some(l) = line.take() {
                     if l.row {
                         let below = l.top + l.height + 0.25 * base.size;
