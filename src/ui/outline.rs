@@ -195,10 +195,12 @@ impl OutlineTree {
     /// top of the view, wherever the list puts it, since a book's table
     /// of contents need not follow the reading order. At the end of the
     /// page a heading lower in the view cannot reach the top, so the
-    /// nearest at or above the view's bottom wins instead. Among entries
-    /// at the same place, the one listed last wins. `top` answers a
-    /// heading block's document y, None while it is folded away or not
-    /// yet placed.
+    /// nearest at or above the view's bottom wins instead. At the start
+    /// of a book nothing is above the top and a cover may hold the first
+    /// heading in the lower half of the view: the first heading in view
+    /// wins then. Among entries at the same place, the one listed last
+    /// wins. `top` answers a heading block's document y, None while it
+    /// is folded away or not yet placed.
     pub fn current_of(
         &self,
         scroll_y: f32,
@@ -225,10 +227,17 @@ impl OutlineTree {
         } else {
             scroll_y + 1.0
         };
-        placed()
+        let above = placed()
             .filter(|&(_, y)| y <= line)
             // max_by keeps the last of equal maxima.
             .max_by(|a, b| a.1.total_cmp(&b.1))
+            .map(|(i, _)| i);
+        if above.is_some() {
+            return above;
+        }
+        placed()
+            .filter(|&(_, y)| y <= scroll_y + view_h)
+            .min_by(|a, b| a.1.total_cmp(&b.1).then_with(|| b.0.cmp(&a.0)))
             .map(|(i, _)| i)
     }
 
@@ -423,8 +432,8 @@ mod tests {
         };
         assert_eq!(
             tree.current_of(0.0, 150.0, false, tops),
-            None,
-            "above the first heading, which is under the half line"
+            Some(0),
+            "above the first heading, under the half line: the first in view"
         );
         assert_eq!(
             tree.current_of(100.0, 400.0, false, tops),
@@ -509,6 +518,35 @@ mod tests {
             tree.current_of(600.0, view_h, true, tops),
             Some(1),
             "a heading in the top half wins at the end too"
+        );
+    }
+
+    #[test]
+    fn at_the_start_of_a_book_the_first_heading_in_view_is_current() {
+        // A cover stands above the first heading, which the first view
+        // shows in its lower half: nothing is above the top, and the
+        // reader is at the start of that chapter.
+        let tree = book(&[("One", 1), ("Two", 5)]);
+        let tops = |block: usize| match block {
+            1 => Some(300.0),
+            5 => Some(900.0),
+            _ => None,
+        };
+        let view_h = 400.0;
+        assert_eq!(
+            tree.current_of(0.0, view_h, false, tops),
+            Some(0),
+            "the first heading, in the lower half of the first view"
+        );
+        let far = |block: usize| match block {
+            1 => Some(500.0),
+            5 => Some(900.0),
+            _ => None,
+        };
+        assert_eq!(
+            tree.current_of(0.0, view_h, false, far),
+            None,
+            "no heading in view: nothing"
         );
     }
 
