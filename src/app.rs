@@ -5411,11 +5411,16 @@ impl App {
         };
         if let Some(sel) = sel {
             self.selection = Some(sel);
-            self.occurrences = if paragraph {
-                None
+            // A double-clicked word lights its whole-word matches; a
+            // triple-clicked paragraph, line of code or table cell lights
+            // its text as a selection does, a line of code its identical
+            // lines among them.
+            let matched = if paragraph {
+                occurrences::Match::Text
             } else {
-                occurrences::find(&self.document, sel)
+                occurrences::Match::Word
             };
+            self.occurrences = occurrences::find(&self.document, sel, matched);
             self.band = None;
             self.request_redraw();
         }
@@ -5503,7 +5508,7 @@ impl App {
         if self.search.is_some() || self.occurrences.as_ref().is_some_and(|f| f.word == sel) {
             return;
         }
-        self.occurrences = occurrences::find(&self.document, sel);
+        self.occurrences = occurrences::find(&self.document, sel, occurrences::Match::Text);
         if self.occurrences.is_some() {
             self.band = None;
             self.request_redraw();
@@ -5921,7 +5926,7 @@ impl App {
                 state.stale = true;
             }
             if let Some(found) = self.occurrences.take() {
-                self.occurrences = occurrences::find(&self.document, found.word);
+                self.occurrences = occurrences::find(&self.document, found.word, found.matched);
             }
         } else {
             self.layout = None;

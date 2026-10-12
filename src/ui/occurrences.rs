@@ -1,18 +1,31 @@
 //! The other occurrences of the selected text, lit in the search's
-//! match color while the selection stands: a double-clicked word, or a
-//! text of several words on one line, selected by a drag, a Shift+click
-//! or the keyboard. The set is found once per selection, when it has
-//! settled, and lives exactly as long as that selection.
+//! match color while the selection stands: a double-clicked word, whole,
+//! or a text on one line selected by a drag, a Shift+click or the
+//! keyboard, wherever it appears. The set is found once per selection,
+//! when it has settled, and lives exactly as long as that selection.
 
 use crate::doc::model::Document;
 use crate::ui::search;
 use crate::ui::selection::{self, Selection};
 
+/// How a selection's occurrences are matched: a double-clicked word
+/// whole, as `search::word_matches` finds it; a selected text as it is,
+/// partial words included, as `search::text_matches` finds it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Match {
+    Word,
+    Text,
+}
+
 pub struct Occurrences {
-    /// The double-clicked word. The set is dropped the moment the
-    /// standing selection is no longer this one.
+    /// The selection as made, a double-clicked word or a selected text.
+    /// The set is dropped the moment the standing selection is no
+    /// longer this one.
     pub word: Selection,
-    /// Every other whole-word match, in document order.
+    /// How the matches were found, for a second search in the same
+    /// text after a highlight fold.
+    pub matched: Match,
+    /// Every other match, in document order.
     pub matches: Vec<Selection>,
     /// The rectangles of the matches around the view, and the scroll
     /// they were computed at; the same windowing as the search's.
@@ -35,19 +48,25 @@ pub fn lights(text: &str) -> bool {
     (2..=LONGEST).contains(&chars) && !text.contains('\n') && !text.chars().all(char::is_whitespace)
 }
 
-/// The other occurrences of a selection, a word or a text on one line,
-/// or None when its text does not light or stands nowhere else. The
-/// match is exact, whole at an end where the text begins or ends with a
-/// word character (`search::text_matches`).
-pub fn find(doc: &Document, word: Selection) -> Option<Occurrences> {
-    let text = selection::plain_text(&word, doc);
-    if !lights(&text) {
+/// The other occurrences of a selection: a double-clicked word, whole,
+/// or a selected text trimmed of whitespace at its ends, wherever it
+/// appears. None when the text does not light or stands nowhere else.
+/// The set keeps the selection as made, since it lives as long as that
+/// selection stands.
+pub fn find(doc: &Document, selection: Selection, matched: Match) -> Option<Occurrences> {
+    let text = selection::plain_text(&selection, doc);
+    let text = text.trim();
+    if !lights(text) {
         return None;
     }
-    let (start, end) = word.ordered();
+    let (start, end) = selection.ordered();
+    let found = match matched {
+        Match::Word => search::word_matches(doc, text),
+        Match::Text => search::text_matches(doc, text),
+    };
     // A word styled in two spans is addressed differently by the click
     // and by the search, so the selected one is told by overlap.
-    let matches: Vec<Selection> = search::text_matches(doc, &text)
+    let matches: Vec<Selection> = found
         .into_iter()
         .filter(|m| {
             let (a, b) = m.ordered();
@@ -55,7 +74,8 @@ pub fn find(doc: &Document, word: Selection) -> Option<Occurrences> {
         })
         .collect();
     (!matches.is_empty()).then_some(Occurrences {
-        word,
+        word: selection,
+        matched,
         matches,
         rects: Vec::new(),
         rects_scroll: 0.0,
@@ -91,7 +111,7 @@ mod tests {
         let doc = markdown::parse("The panel opens.\n\nA panel, another panel and a Panel.");
         let clicked = word(&doc, 1, 0, 3);
         assert_eq!(selection::plain_text(&clicked, &doc), "panel");
-        let found = find(&doc, clicked).expect("two other places");
+        let found = find(&doc, clicked, Match::Word).expect("two other places");
         assert_eq!(found.word, clicked);
         let texts: Vec<String> = found
             .matches
@@ -116,15 +136,15 @@ mod tests {
     }
 
     #[test]
-    fn a_sentence_lights_its_other_occurrences_whole_at_its_ends() {
+    fn a_sentence_lights_its_other_occurrences_partial_words_included() {
         let doc = markdown::parse(
             "the quick brown fox and the quick brown dog, but the quickest cat and the quick brown.\n\nAnother the quick brown here.",
         );
-        let phrase = |end: usize| Selection {
+        let phrase = |start: usize, end: usize| Selection {
             start: ModelPos {
                 block: 0,
                 span: 0,
-                byte: 0,
+                byte: start,
             },
             end: ModelPos {
                 block: 0,
@@ -132,9 +152,9 @@ mod tests {
                 byte: end,
             },
         };
-        let sel = phrase(15);
+        let sel = phrase(0, 15);
         assert_eq!(selection::plain_text(&sel, &doc), "the quick brown");
-        let found = find(&doc, sel).expect("three other places");
+        let found = find(&doc, sel, Match::Text).expect("three other places");
         assert_eq!(found.word, sel);
         let texts: Vec<String> = found
             .matches
@@ -149,8 +169,60 @@ mod tests {
             !found.matches.contains(&sel),
             "the selection itself is left out"
         );
-        let found = find(&doc, phrase(9)).expect("three other places");
-        assert_eq!(found.matches.len(), 3, "\"the quickest\" is left out");
+        let found = find(&doc, phrase(0, 9), Match::Text).expect("four other places");
+        assert_eq!(found.matches.len(), 4, "\"the quickest\" lights too");
+        let found = find(&doc, phrase(3, 16), Match::Text).expect("the selection trimmed");
+        assert_eq!(selection::plain_text(&found.word, &doc), " quick brown ");
+        assert_eq!(
+            found.matches.len(),
+            3,
+            "the spaces at the ends do not count"
+        );
+    }
+
+    #[test]
+    fn a_selection_from_inside_a_word_lights_the_same_fragment_elsewhere() {
+        let doc = markdown::parse("Aggregates samples into fixed-width buckets.\n\nAggregates samples into fixed-width buckets.");
+        let sel = Selection {
+            start: ModelPos {
+                block: 0,
+                span: 0,
+                byte: 21,
+            },
+            end: ModelPos {
+                block: 0,
+                span: 0,
+                byte: 35,
+            },
+        };
+        assert_eq!(selection::plain_text(&sel, &doc), "to fixed-width");
+        let found = find(&doc, sel, Match::Text).expect("the other paragraph");
+        assert_eq!(found.matches.len(), 1);
+        assert_eq!(found.matches[0].start.block, 1);
+    }
+
+    #[test]
+    fn a_triple_clicked_line_of_code_lights_its_identical_lines() {
+        let doc = load::code_document(
+            Some("rust"),
+            "/// Aggregates samples into buckets.\npub struct A;\n\n/// Aggregates samples into buckets.\npub struct B;\n",
+        );
+        let line = selection::paragraph_at(
+            &doc,
+            ModelPos {
+                block: 0,
+                span: 0,
+                byte: 4,
+            },
+        )
+        .expect("the line under the triple click");
+        assert_eq!(
+            selection::plain_text(&line, &doc).trim(),
+            "/// Aggregates samples into buckets."
+        );
+        let found = find(&doc, line, Match::Text).expect("the identical line");
+        assert_eq!(found.matches.len(), 1);
+        assert!(!found.matches.contains(&line));
     }
 
     #[test]
@@ -169,13 +241,13 @@ mod tests {
             },
         };
         assert!(selection::plain_text(&sel, &doc).contains('\n'));
-        assert!(find(&doc, sel).is_none());
+        assert!(find(&doc, sel, Match::Text).is_none());
     }
 
     #[test]
     fn a_word_that_stands_alone_lights_nothing() {
         let doc = markdown::parse("The panel opens.");
-        assert!(find(&doc, word(&doc, 0, 0, 5)).is_none());
+        assert!(find(&doc, word(&doc, 0, 0, 5), Match::Word).is_none());
     }
 
     #[test]
@@ -183,7 +255,7 @@ mod tests {
         let doc = markdown::parse("A **pan**el here, a panel there.");
         let clicked = word(&doc, 0, 1, 1);
         assert_eq!(selection::plain_text(&clicked, &doc), "panel");
-        let found = find(&doc, clicked).expect("the plain one");
+        let found = find(&doc, clicked, Match::Word).expect("the plain one");
         assert_eq!(found.matches.len(), 1);
         assert!(found.matches[0].start > clicked.end);
     }
@@ -196,7 +268,7 @@ mod tests {
         );
         let clicked = word(&doc, 0, 0, 5);
         assert_eq!(selection::plain_text(&clicked, &doc), "count");
-        let found = find(&doc, clicked).expect("two others");
+        let found = find(&doc, clicked, Match::Word).expect("two others");
         assert_eq!(found.matches.len(), 2, "not recount, not count_all");
     }
 }
