@@ -197,6 +197,10 @@ fn book_export_probe() {
     let t = Instant::now();
     let bytes = export_book(&book);
     let pages = Pdf::load_mem(&bytes).unwrap().get_pages().len();
+    // ORYX_PDF names a file for the pages, for a look at them.
+    if let Ok(out) = std::env::var("ORYX_PDF") {
+        std::fs::write(&out, &bytes).unwrap();
+    }
     println!(
         "export: {:?}, {} pages, {} bytes of pdf",
         t.elapsed(),

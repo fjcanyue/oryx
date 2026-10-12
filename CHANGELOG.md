@@ -2,6 +2,10 @@
 
 ## v1.2.2
 
+### Improvements
+
+- In a book, an image alone on its line is now centered, the cover too, unless the book's stylesheet places it. Before, such an image stood at the left.
+
 ### Fixes
 
 - The AppImage now carries the keyboard libraries of X11, and the deb and the rpm declare them. Before, on a system without `libxkbcommon-x11`, Oryx stopped at once with an error trace. On such a system, Oryx now says which package to install.

@@ -554,7 +554,10 @@ pub struct Walker {
     /// A whitespace run is pending; the next visible character spends it.
     space: bool,
     quote_depth: u8,
-    center: Vec<bool>,
+    /// The word of each open paragraph or division on its alignment:
+    /// Some(true) centered, Some(false) placed left or right, None when
+    /// it says nothing.
+    center: Vec<Option<bool>>,
     bold: u16,
     italic: u16,
     strike: u16,
@@ -893,9 +896,13 @@ impl Walker {
                 });
             }
             "p" | "div" if !in_table => {
-                let centered = attr("align").is_some_and(|a| a.eq_ignore_ascii_case("center"))
-                    || emphasis.centered() == Some(true);
-                self.center.push(centered);
+                // The attribute first, then the stylesheet.
+                let word = match attr("align").map(|a| a.to_ascii_lowercase()) {
+                    Some(a) if a == "center" => Some(true),
+                    Some(a) if a == "left" || a == "right" || a == "justify" => Some(false),
+                    _ => emphasis.centered(),
+                };
+                self.center.push(word);
                 self.flush();
                 self.children(node);
                 self.flush();
@@ -1279,7 +1286,7 @@ impl Walker {
             return;
         };
         if let Some(caption) = t.caption.take() {
-            self.center.push(true);
+            self.center.push(Some(true));
             self.emit(BlockKind::Paragraph { spans: caption });
             self.center.pop();
         }
@@ -1385,6 +1392,18 @@ impl Walker {
         self.emit_placed(kind, range);
     }
 
+    /// A paragraph that holds an image and nothing else: a figure or a
+    /// cover. It is centered when the book says nothing about its place.
+    fn lone_image(&self, kind: &BlockKind) -> bool {
+        let BlockKind::Paragraph { spans } = kind else {
+            return false;
+        };
+        spans.iter().any(|s| s.image.is_some())
+            && spans
+                .iter()
+                .all(|s| s.image.is_some() || s.text(&self.source).trim().is_empty())
+    }
+
     fn emit_placed(&mut self, kind: BlockKind, range: std::ops::Range<usize>) {
         // A summary row belongs to the group enclosing its own; it is
         // the toggle, visible while its group is closed.
@@ -1392,11 +1411,13 @@ impl Walker {
             BlockKind::Summary { group, .. } => self.details[*group as usize].parent,
             _ => self.details_stack.last().copied(),
         };
+        let centered = self.center.contains(&Some(true))
+            || (self.center.iter().all(|c| c.is_none()) && self.lone_image(&kind));
         self.blocks.push(Block {
             quote_depth: self.quote_depth,
             alert: None,
             range,
-            centered: self.center.iter().any(|&c| c),
+            centered,
             right: false,
             left: false,
             details,
@@ -1600,6 +1621,37 @@ mod tests {
             "<html><body><p class=\"tb\">* * *</p></body></html>",
         );
         assert!(blocks[0].centered);
+    }
+
+    #[test]
+    fn a_lone_image_is_centered_when_the_book_says_nothing() {
+        let (blocks, _, _) =
+            walk("<html><body><p><img src=\"cover.jpg\" alt=\"The cover\"/></p></body></html>");
+        assert!(blocks[0].centered, "a paragraph holding only an image");
+        let (blocks, _, _) = walk("<html><body><div><img src=\"a.png\"/></div></body></html>");
+        assert!(blocks[0].centered, "a division holding only an image");
+    }
+
+    #[test]
+    fn a_lone_image_the_book_places_keeps_its_word() {
+        let (blocks, _, _) = walk_styled(
+            ".fig { text-align: left }",
+            "<html><body><p class=\"fig\"><img src=\"a.png\"/></p></body></html>",
+        );
+        assert!(!blocks[0].centered, "the stylesheet says left");
+        let (blocks, _, _) =
+            walk("<html><body><p align=\"right\"><img src=\"a.png\"/></p></body></html>");
+        assert!(!blocks[0].centered, "the attribute says right");
+        let (blocks, _, _) =
+            walk("<html><body><div align=\"left\"><p><img src=\"a.png\"/></p></div></body></html>");
+        assert!(!blocks[0].centered, "an enclosing block says left");
+    }
+
+    #[test]
+    fn an_image_inside_text_is_not_centered() {
+        let (blocks, _, _) =
+            walk("<html><body><p>See <img src=\"a.png\"/> here.</p></body></html>");
+        assert!(!blocks[0].centered);
     }
 
     #[test]

@@ -5092,3 +5092,20 @@ fn a_raised_pill_on_the_line_below_the_kept_one_is_not_kept() {
         assert_eq!(l.rects.len(), 1, "at {w} wide: {:?}", l.rects);
     }
 }
+
+#[test]
+fn a_lone_image_in_markdown_stays_at_the_left() {
+    // The standard reading of markdown: a book centers its lone images,
+    // a markdown page does not.
+    let dir = std::env::temp_dir().join(format!("oryx-laytest-left-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let img = image::RgbaImage::from_pixel(100, 50, image::Rgba([10, 20, 30, 255]));
+    img.save(dir.join("small.png")).unwrap();
+    let margin = lay("text", 800.0).runs[0].x;
+    let l = lay_with_images("![small](small.png)", 800.0, dir);
+    assert!(
+        (l.images[0].x - margin).abs() < 0.5,
+        "at {} with the margin at {margin}",
+        l.images[0].x
+    );
+}

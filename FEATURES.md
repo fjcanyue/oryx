@@ -53,7 +53,9 @@ Oryx opens text in UTF-8 only. A file in an older encoding is refused, and so is
 
 ## Ebooks
 
-Oryx opens EPUB, FB2, MOBI and AZW3 (Kindle) books, and FB2 books zipped as `.fb2.zip` or `.fbz`. A book is shown as one continuous document, in your theme rather than in the book's own style. It keeps its structure: chapter headings, italics and bold (including those set by the book's stylesheet), images and the cover, tables and code. The first chapters show immediately, and the rest of the book loads in the background. The window title shows the book's title and its format, which helps when you have the same book in several formats.
+Oryx opens EPUB, FB2, MOBI and AZW3 (Kindle) books, and FB2 books zipped as `.fb2.zip` or `.fbz`. A book is shown as one continuous document, in your theme rather than in the book's own style. It keeps its structure: chapter headings, italics and bold (including those set by the book's stylesheet), images and the cover, tables and code. An image alone on its line is centered, the cover too, unless the book's stylesheet places it.
+
+The first chapters show immediately, and the rest of the book loads in the background. The window title shows the book's title and its format, which helps when you have the same book in several formats.
 
 Book text is justified: lines end at the same right edge, and the last line of each paragraph stays short, as in print. `Ctrl+J` turns justification off and on. Markdown files can be justified too. They start unjustified, and Oryx remembers the choice separately for books and for markdown.
 
