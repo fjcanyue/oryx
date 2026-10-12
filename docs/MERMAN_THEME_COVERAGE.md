@@ -1,35 +1,41 @@
-# Merman 0.7 主题变量覆盖矩阵（Theme Coverage Inventory）
+# Merman 0.8 主题变量覆盖矩阵（Theme Coverage Inventory）
 
-本文档是 Oryx ↔ Merman 的主题契约：固定 `merman = "=0.7.0"`（`Cargo.lock` pin）
-下，按 Diagram Family 记录 renderer 实际消费的颜色变量、视觉语义、语义类别、
-以及 Oryx 侧的语义角色来源。升级 Merman 后必须重新审计（重新生成本表），
-因为 family renderer 消费的变量可能改变。
+本文档是 Oryx ↔ Merman 的主题契约：固定 `merman = "=0.8.0"`（`Cargo.lock` pin，
+`all-diagrams + complete-svg`，无 ELK）下，按 Diagram Family 记录 renderer 实际
+消费的颜色变量、视觉语义、语义类别、以及 Oryx 侧的语义角色来源。升级 Merman
+后必须重新审计（重新生成本表），因为 family renderer 消费的变量可能改变。
 
-数据来源：`merman-render-0.7.0/src/svg/theme_profile.rs`（host roles →
-themeVariables 的中心映射 `put_theme_roles` / `put_series_palette` /
-`put_diagram_config`）、`src/svg/parity/theme.rs`（`PresentationTheme` 按
-family 解析变量）、以及各 family 的 `css.rs` / renderer 源码。
+数据来源：`merman-render-0.8.0/src/svg/parity/theme/families.rs`（各 family
+按 `raw.color(<变量>, <默认>)` 直读 themeVariables）、`src/svg/parity/css.rs`
+（theme 名相关的例外分支）、`src/presentation/`（HostTheme 编译层——Oryx 不经
+过，仅作对照）、以及各 family 的 `css.rs` / renderer 源码。0.8 重审计
+（2026-10-12）：变量消费面与 0.7 一致，selector 名（`.entityBox`、
+`.relationshipLabelBox` 等）不变。
 
-## 注入链路与优先级
+## 注入链路与优先级（0.8）
 
 ```text
-HostThemeProfile.roles          → put_theme_roles   → 常规 themeVariables（长尾）
-HostThemeProfile.series_palette → put_series_palette → 索引色（git/pie/cScale/venn/…）
-HostThemeProfile.theme_variables ────────merge 最后──────► 覆盖以上派生值
-HostThemeProfile.site_config    → 根级 diagram config（packet/treemap/radar/c4）
+Oryx site config（Engine::with_site_config）
+  ├─ themeVariables = MermaidPresentation 投影 + fontFamily（全部显式）
+  └─ family_config 键（根级 diagram config，现时为空）
 ────────────────────────────────────────────────────────────
-图源 frontmatter / %%{init}%%    → 在 site_config 之上合并（用户配置优先）
+图源 frontmatter / %%{init}%%    → 在 site config 之上合并（用户配置优先）
 classDef / style / inline style  → 最高（源码级样式）
 ```
 
-注意一个 0.7 契约细节：`%%{init}%%` 里只写 `primaryColor` 不会派生进
-flowchart 的节点填充——默认/base 主题展开时 `mainBkg` 是
-`set_if_missing(默认值)`，不从用户 `primaryColor` 推导。用户要改节点填充
-需直接写 `mainBkg`（Oryx 的 host 投影两个都设，故 host 侧无此问题）。
+0.7 的 `HostThemeProfile.roles → put_theme_roles` 派生层在 Oryx 路径中不再
+经过（Oryx 投影显式覆盖全部契约变量，含 git/pie/cScale/venn/fillType 全系
+列 categorical）。0.8 的 `presentation/compiler.rs` 仍为 HostTheme 用户提供
+等价编译，Oryx 不使用。
+
+注意一个跨版本保持的契约细节（0.7 与 0.8 相同）：`%%{init}%%` 里只写
+`primaryColor` 不会派生进 flowchart 的节点填充——family 解析是
+`raw.color("mainBkg", <默认>)` 直读，不从 `primaryColor` 推导。用户要改节点
+填充需直接写 `mainBkg`（Oryx 的投影两个都设，故 host 侧无此问题）。
 
 Oryx 的投影：`MermaidPresentation`（`src/doc/mermaid_theme.rs`）= palette +
-显式 theme_variables（覆盖派生）+ family_config（site_config）。Oryx 显式
-设置的变量全部写入 `theme_variables`，因此对 Merman 派生值保持确定胜出。
+显式 theme_variables + family_config。Oryx 显式设置的变量全部写入
+`theme_variables`，因此对 renderer 默认值保持确定胜出。
 
 ## 语义类别图例
 
@@ -94,7 +100,7 @@ Oryx 的投影：`MermaidPresentation`（`src/doc/mermaid_theme.rs`）= palette 
 | `lineColor` | `.relationshipLine` | Structural | `line` |
 | `tertiaryColor` | `.relationshipLabelBox` 填充 | Structural | `label_surface` |
 | `edgeLabelBackground` | 边标签底 | Structural | `label_surface` |
-| `erEdgeLabelBackground` | ER 专属标签底 | — | **0.7 仅在 theme 名为 `redux-color`/`redux-dark-color` 时读取**；host 主题名为 `base`，不生效，勿设置 |
+| `erEdgeLabelBackground` | ER 专属标签底 | — | **仅在 theme 名为 `redux-color`/`redux-dark-color` 时读取**（0.7 与 0.8 相同，`parity/css.rs`）；Oryx 走 themeVariables 直通、无 theme 名，不生效，勿设置 |
 
 ## Requirement
 
@@ -203,18 +209,24 @@ Oryx 的投影：`MermaidPresentation`（`src/doc/mermaid_theme.rs`）= palette 
 
 ## 根级 diagram config（`site_config`，非 themeVariables）
 
-Merman 0.7 的 `put_diagram_config` 从 host roles 自动派生以下配置，Oryx
-设置语义 roles 后即被覆盖，无需在 family_config 重复：
+0.7 由 `put_diagram_config` 从 host roles 自动派生以下配置；0.8 的等价派生
+位于 `presentation/compiler.rs`（HostTheme 路径），**Oryx 不再经过**。这些
+family 的标题/标签等长尾颜色现在由 renderer 默认值或 themeVariables 解析，
+分区/系列着色仍走 `cScaleN`（Oryx 已显式投影）：
 
-| Config | 键 | 来源 role |
+| Config | 键 | 0.8 状态 |
 | --- | --- | --- |
-| `packet` | `startByteColor`/`endByteColor`/`labelColor`/`titleColor`/`blockStrokeColor`/`blockFillColor` | line/border/text/surface |
-| `treemap` | `titleColor`/`labelColor`/`valueColor`/`sectionStrokeColor`/`sectionFillColor`/`leafStrokeColor`/`leafFillColor` | text/line/border/surface_alt/surface；分区实际按 `cScaleN` 系列着色 |
-| `radar` | `axisColor`/`graticuleColor` | line/border |
-| `treeView`（themeVariables 嵌套） | `labelColor`/`lineColor` | text/line |
-| `c4` | 20 组 `{prefix}_bg_color`/`{prefix}_border_color` | surface/border |
-| eventmodeling（em*） | `emUiFill`…`emEventStroke` | surface/border/line + series[0..4] |
-| `sankey` | `nodeColors`/`linkColor` 等 | 见上；主题层不设置 |
+| `packet` | `startByteColor` 等 | renderer 默认;showcase QA 观察 |
+| `treemap` | `titleColor`/`labelColor` 等 | 同上；分区按 `cScaleN`（已投影） |
+| `radar` | `axisColor`/`graticuleColor` | renderer 默认 |
+| `treeView`（themeVariables 嵌套） | `labelColor`/`lineColor` | themeVariables 可达 |
+| `c4` | 20 组 `{prefix}_bg_color` 等 | renderer 默认 |
+| eventmodeling（em*） | `emUiFill`…`emEventStroke` | renderer 默认 |
+| `sankey` | `nodeColors`/`linkColor` 等 | **按图配置，键为节点 id，主题层无法预知**。需要时由用户按图通过 frontmatter 覆盖 |
+
+若 showcase QA（`examples/mermaid-theme-showcase.md`）发现这些 family 的
+长尾颜色与主题明显不符，再评估把对应键加进 `family_config` 投影（届时
+`THEME_POLICY_VERSION` 递增）。
 
 ## 基线问题（本设计的直接动因，已由新投影修复）
 

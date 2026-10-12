@@ -6,9 +6,10 @@
 
 use std::sync::Arc;
 
-use merman::render::{
-    HeadlessError, HeadlessRenderer, HostThemeAppearance, HostThemeOutput, HostThemeProfile,
-    HostThemeRoles,
+use merman::svg::{RootBackgroundPostprocessor, SvgPipeline, SvgRenderOptions};
+use merman::{
+    Engine, MermaidConfig, OperationControl, ParseOptions, RenderError, RenderOutput,
+    RenderRequest, Renderer, SvgRequest,
 };
 
 use crate::doc::mermaid_theme::MermaidAppearance;
@@ -46,51 +47,44 @@ impl std::fmt::Display for MermaidError {
     }
 }
 
-/// The presentation as Merman's host theme: the palette's roles carry
-/// the host-level contract Merman derives its long tail from, the
-/// presentation's explicit theme variables pin the contract variables
-/// over those derivations, and the family config rides along as site
-/// config. The appearance the derivations key on is the palette's own;
-/// the diagram font is the body font resvg's generic families already
-/// resolve to; the output is the resvg-safe editor preset, because
-/// Oryx's consumer of the svg is resvg/usvg, not a browser.
-fn host_profile(presentation: &MermaidPresentation) -> HostThemeProfile {
-    let palette = &presentation.palette;
-    HostThemeProfile {
-        appearance: match palette.appearance {
-            MermaidAppearance::Light => HostThemeAppearance::Light,
-            MermaidAppearance::Dark => HostThemeAppearance::Dark,
+/// The presentation as Merman's site config: the theme-variable
+/// projection pins the contract colors over the renderer's own
+/// derivations, the body font — the family resvg's generic families
+/// already resolve to — rides `fontFamily`, and the family-level
+/// diagram config merges in at the top level beside them. One JSON
+/// object, one owner: everything the host owes the renderer crosses
+/// here.
+fn site_config(presentation: &MermaidPresentation) -> serde_json::Value {
+    let mut variables = presentation.theme_variables.to_json();
+    variables.insert(
+        "fontFamily".to_string(),
+        serde_json::Value::String(format!("\"{BODY_FAMILY}\", sans-serif")),
+    );
+    let mut root = presentation.family_config.clone();
+    root.insert(
+        "themeVariables".to_string(),
+        serde_json::Value::Object(variables),
+    );
+    serde_json::Value::Object(root)
+}
+
+/// The diagram side of the render request: the stable svg id (safe
+/// when several diagrams share a host document's id space — `<defs>`,
+/// accessibility ids) and the resvg-safe pipeline — the output Oryx's
+/// consumer, resvg/usvg, needs — with the palette's canvas painted
+/// behind the diagram, because the reading surface must never show
+/// through a diagram's own ground. The environment stays the request
+/// default: deterministic text metrics, headless layout.
+fn svg_request(presentation: &MermaidPresentation, diagram_id: &str) -> SvgRequest {
+    SvgRequest {
+        options: SvgRenderOptions {
+            diagram_id: Some(diagram_id.to_string()),
+            ..SvgRenderOptions::default()
         },
-        font_family: Some(format!("\"{BODY_FAMILY}\", sans-serif")),
-        roles: HostThemeRoles {
-            canvas: Some(hex_string(palette.canvas)),
-            surface: Some(hex_string(palette.surface)),
-            surface_alt: Some(hex_string(palette.surface_alt)),
-            surface_muted: Some(hex_string(palette.surface_muted)),
-            text: Some(hex_string(palette.text)),
-            subtle_text: Some(hex_string(palette.muted_text)),
-            border: Some(hex_string(palette.border)),
-            line: Some(hex_string(palette.line)),
-            edge_label_background: Some(hex_string(palette.label_surface)),
-            cluster_background: Some(hex_string(palette.surface_muted)),
-            cluster_border: Some(hex_string(palette.border)),
-            note_background: Some(hex_string(palette.surface_alt)),
-            note_border: Some(hex_string(palette.border)),
-            note_text: Some(hex_string(palette.text)),
-            actor_background: Some(hex_string(palette.surface)),
-            actor_border: Some(hex_string(palette.border)),
-            actor_text: Some(hex_string(palette.text)),
-            activation_background: Some(hex_string(palette.surface_alt)),
-            activation_border: Some(hex_string(palette.border)),
-            error: Some(hex_string(palette.danger)),
-            warning: Some(hex_string(palette.warning)),
-            success: Some(hex_string(palette.success)),
-        },
-        series_palette: palette.series.iter().map(|color| hex_string(*color)).collect(),
-        output: HostThemeOutput::resvg_safe_editor(),
-        theme_variables: presentation.theme_variables.to_json(),
-        site_config: presentation.family_config.clone(),
-        ..HostThemeProfile::default()
+        pipeline: Some(SvgPipeline::resvg_safe().with_postprocessor(
+            RootBackgroundPostprocessor::new(hex_string(presentation.palette.canvas)),
+        )),
+        ..SvgRequest::default()
     }
 }
 
@@ -104,7 +98,7 @@ pub struct MermaidRender {
 
 /// The renderer identity: bump it when the pinned Merman version or
 /// its output behavior changes and every old entry misses.
-pub const RENDERER_VERSION: &str = "oryx-merman-0.7-v1";
+pub const RENDERER_VERSION: &str = "oryx-merman-0.8-v1";
 
 /// The theme policy identity: bump it when the palette projection or
 /// the theme-variable mapping changes, so every old entry misses. The
@@ -182,26 +176,42 @@ pub fn cache_key(source: &str, presentation: &MermaidPresentation) -> MermaidCac
 /// Renders diagram source into an svg with its natural size. The
 /// source arrives trimmed by the caller or here; empty never reaches
 /// the renderer. Strict parsing, so a bad diagram lands in the error
-/// panel instead of a guessed-at picture; the vendored text metrics
-/// Mermaid browsers run on; the presentation's resvg-safe editor
-/// output, because Oryx's consumer of the svg is resvg/usvg — the
-/// profile carries the pipeline, so the plain render call already runs
-/// it.
-pub fn render(source: &str, presentation: &MermaidPresentation) -> Result<MermaidRender, MermaidError> {
+/// panel instead of a guessed-at picture; deterministic text metrics
+/// (the request default); the resvg-safe pipeline carrying the
+/// presentation's colors, font, and canvas ground, because Oryx's
+/// consumer of the svg is resvg/usvg.
+pub fn render(
+    source: &str,
+    presentation: &MermaidPresentation,
+) -> Result<MermaidRender, MermaidError> {
     let source = source.trim();
     if source.is_empty() {
         return Err(MermaidError::Empty);
     }
     let key = cache_key(source, presentation);
-    let renderer = HeadlessRenderer::new()
-        .with_strict_parsing()
-        .with_host_theme(&host_profile(presentation))
-        .with_vendored_text_measurer()
-        .with_diagram_id(&key.svg_id());
-    let svg = renderer
-        .render_svg_sync(source)
-        .map_err(headless_error)?
-        .ok_or_else(|| MermaidError::Parse("no Mermaid diagram detected".to_string()))?;
+    let renderer = Renderer::new()
+        .with_engine(
+            Engine::new().with_site_config(MermaidConfig::from_value(site_config(presentation))),
+        )
+        .with_parse_options(ParseOptions::strict());
+    let output = renderer
+        .render(RenderRequest::svg(
+            source,
+            OperationControl::new(),
+            svg_request(presentation, &key.svg_id()),
+        ))
+        .map_err(render_error)?;
+    let RenderOutput::Svg(svg) = output else {
+        return Err(MermaidError::Parse(
+            "no Mermaid diagram detected".to_string(),
+        ));
+    };
+    let Some(svg) = svg else {
+        return Err(MermaidError::Parse(
+            "no Mermaid diagram detected".to_string(),
+        ));
+    };
+    let (svg, _evidence) = svg.into_parts();
     let (width, height) = dimensions(&svg)?;
     dump_debug(&key, svg.as_bytes());
     Ok(MermaidRender {
@@ -213,12 +223,14 @@ pub fn render(source: &str, presentation: &MermaidPresentation) -> Result<Mermai
 
 /// Merman's error, classified once: parse failures read as the user's
 /// syntax to fix, everything past parsing as the renderer's own
-/// trouble. The messages carry over verbatim; no deep matching of the
-/// internals — the panel only needs a readable story.
-fn headless_error(err: HeadlessError) -> MermaidError {
+/// trouble — a rejected svg pipeline, a blown resource budget, a
+/// cancelled operation. The messages carry over verbatim; no deep
+/// matching of the internals — the panel only needs a readable story.
+fn render_error(err: RenderError) -> MermaidError {
     match err {
-        HeadlessError::Parse(err) => MermaidError::Parse(err.to_string()),
-        HeadlessError::Render(err) => MermaidError::Render(err.to_string()),
+        RenderError::NoDiagram => MermaidError::Parse("no Mermaid diagram detected".to_string()),
+        RenderError::Parse(err) => MermaidError::Parse(err.to_string()),
+        other => MermaidError::Render(other.to_string()),
     }
 }
 
@@ -470,7 +482,10 @@ mod tests {
     #[test]
     fn a_theme_change_misses_the_cache() {
         let source = "flowchart LR\n    A --> B";
-        let dark = cache_key(source, &MermaidPresentation::from_oryx(&Theme::default_dark()));
+        let dark = cache_key(
+            source,
+            &MermaidPresentation::from_oryx(&Theme::default_dark()),
+        );
         let light = cache_key(source, &light_presentation());
         assert_ne!(dark, light);
         assert_eq!(
@@ -483,40 +498,63 @@ mod tests {
         );
     }
 
-    /// The host profile carries more than colors: the appearance read
-    /// off the ground, the body font resvg's generic families resolve
-    /// to, the canvas root background of the resvg-safe editor output,
-    /// the label ground, the full series, and the explicit theme
-    /// variables overriding the role derivations.
+    /// The site config carries more than colors: the body font resvg's
+    /// generic families resolve to rides `fontFamily`, and the
+    /// projection's explicit theme variables pin the contract over the
+    /// renderer's own derivations — the whole series included, so the
+    /// categorical slots never fall back to the defaults.
     #[test]
-    fn the_host_profile_carries_font_output_and_appearance() {
-        use merman::render::HostThemeRootBackground;
+    fn the_site_config_carries_font_and_contract_variables() {
         let dark = MermaidPresentation::from_oryx(&Theme::default_dark());
-        let profile = host_profile(&dark);
-        assert_eq!(profile.appearance, HostThemeAppearance::Dark);
+        let config = site_config(&dark);
+        let variables = config
+            .get("themeVariables")
+            .and_then(serde_json::Value::as_object)
+            .expect("the variables ride the site config");
         assert_eq!(
-            profile.font_family.as_deref(),
+            variables
+                .get("fontFamily")
+                .and_then(serde_json::Value::as_str),
             Some("\"DejaVu Sans\", sans-serif")
         );
         assert_eq!(
-            profile.output.root_background,
-            HostThemeRootBackground::Canvas
-        );
-        assert_eq!(
-            profile.roles.edge_label_background,
-            Some(hex_string(dark.palette.label_surface))
-        );
-        assert_eq!(profile.series_palette.len(), SERIES_SLOTS);
-        assert_eq!(
-            profile
-                .theme_variables
+            variables
                 .get("tertiaryColor")
                 .and_then(serde_json::Value::as_str),
             Some(hex_string(dark.palette.label_surface).as_str()),
-            "the explicit projection overrides the role derivation"
+            "the explicit projection pins the contract"
         );
-        let light = light_presentation();
-        assert_eq!(host_profile(&light).appearance, HostThemeAppearance::Light);
+        assert_eq!(
+            variables
+                .get(&format!("pie{SERIES_SLOTS}"))
+                .and_then(serde_json::Value::as_str),
+            Some(hex_string(dark.palette.series[SERIES_SLOTS - 1]).as_str()),
+            "the last categorical slot rides the variables"
+        );
+    }
+
+    /// The request's diagram side: the stable svg id, and the
+    /// resvg-safe pipeline carrying the canvas as the painted ground —
+    /// the editor-output contract 0.7's host profile used to pin.
+    #[test]
+    fn the_request_carries_the_id_and_the_resvg_safe_ground() {
+        use merman::svg::SvgPipelinePreset;
+        let dark = MermaidPresentation::from_oryx(&Theme::default_dark());
+        let request = svg_request(&dark, "oryx-mermaid-test");
+        assert_eq!(
+            request.options.diagram_id.as_deref(),
+            Some("oryx-mermaid-test")
+        );
+        let pipeline = request.pipeline.expect("the pipeline is explicit");
+        assert_eq!(pipeline.preset(), SvgPipelinePreset::ResvgSafe);
+    }
+
+    /// The renderer identity names the pinned engine line: a stale
+    /// cache entry can never pass as current, and the string greps
+    /// straight out of a debug dump.
+    #[test]
+    fn the_renderer_identity_names_the_pinned_line() {
+        assert_eq!(RENDERER_VERSION, "oryx-merman-0.8-v1");
     }
 
     /// Both palettes rasterize through Oryx's own decode path, and the
@@ -609,11 +647,8 @@ mod tests {
     fn sequence_actors_paint_the_surface() {
         for dark in [false, true] {
             let presentation = neon_presentation(dark);
-            let out = render(
-                "sequenceDiagram\n    Alice->>Bob: Hello",
-                &presentation,
-            )
-            .expect("the sequence diagram renders");
+            let out = render("sequenceDiagram\n    Alice->>Bob: Hello", &presentation)
+                .expect("the sequence diagram renders");
             let svg = std::str::from_utf8(&out.svg).unwrap();
             let palette = &presentation.palette;
             assert!(
@@ -641,7 +676,10 @@ mod tests {
             "the requirement box paints the surface"
         );
         assert!(
-            svg.contains(&format!(".reqLabelBox{{fill:{}", hex_string(palette.label_surface))),
+            svg.contains(&format!(
+                ".reqLabelBox{{fill:{}",
+                hex_string(palette.label_surface)
+            )),
             "the relation label paints the label surface"
         );
         assert!(
@@ -655,8 +693,11 @@ mod tests {
     #[test]
     fn pie_slices_paint_the_series() {
         let presentation = MermaidPresentation::from_oryx(&Theme::default_dark());
-        let out = render("pie title Tasks\n    \"Done\" : 70\n    \"Todo\" : 30", &presentation)
-            .expect("the pie renders");
+        let out = render(
+            "pie title Tasks\n    \"Done\" : 70\n    \"Todo\" : 30",
+            &presentation,
+        )
+        .expect("the pie renders");
         let svg = std::str::from_utf8(&out.svg).unwrap();
         for index in 0..2 {
             assert!(
