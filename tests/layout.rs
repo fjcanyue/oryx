@@ -3258,9 +3258,9 @@ pill x={} y={} w={}",
 
 #[test]
 fn punctuation_glued_to_an_equation_stays_on_its_line() {
-    // The continuation after the equation is too long to merge back, so
-    // it wraps below; the period glued to the equation must not go with
-    // it.
+    // The continuation after the equation is too long to merge back
+    // whole: the words that fit stay on the equation's line, the period
+    // glued to the equation first, and the rest wraps below.
     let src = "Roots take an optional degree: $\\sqrt[23]{x+1}$. Now this \
 continuation is deliberately long enough that it cannot merge back as a \
 single line and must wrap onto several more lines below the equation.";
@@ -3271,8 +3271,8 @@ single line and must wrap onto several more lines below the equation.";
     let period = l
         .runs
         .iter()
-        .find(|r| l.run_text(&doc, r).trim() == ".")
-        .expect("the period shapes as its own run");
+        .find(|r| l.run_text(&doc, r).starts_with('.'))
+        .expect("the period starts the run after the equation");
     assert!(
         (period.baseline - eq_base).abs() < 2.0,
         "the period stays on the equation's line: period baseline {} vs \
@@ -3281,14 +3281,27 @@ equation baseline {}",
         eq_base
     );
     assert!(period.x >= eq_end, "and sits right after the equation");
-    // The continuation still reads in order below, and its runs resolve
-    // the right model text after the offset shift.
-    let now = l
+    // The continuation reads in order, on the equation's line and then
+    // below it, and its runs resolve the right model text after the
+    // offset shift.
+    let mut after: Vec<&TextRun> = l
         .runs
         .iter()
-        .find(|r| l.run_text(&doc, r).contains("Now this continuation"))
-        .expect("the continuation resolves its text");
-    assert!(now.baseline > eq_base + 2.0, "the long chunk wraps below");
+        .filter(|r| {
+            r.baseline > eq_base + 2.0 || (r.x >= eq_end && (r.baseline - eq_base).abs() < 2.0)
+        })
+        .collect();
+    after.sort_by(|a, b| (a.y, a.x).partial_cmp(&(b.y, b.x)).unwrap());
+    assert!(
+        after.iter().any(|r| r.baseline > eq_base + 2.0),
+        "the long chunk wraps below"
+    );
+    let read: Vec<&str> = after.iter().map(|r| l.run_text(&doc, r)).collect();
+    let read = read.join(" ");
+    let read: Vec<&str> = read.split_whitespace().collect();
+    let chunk = &src[src.find("$.").unwrap() + 1..];
+    let expected: Vec<&str> = chunk.split_whitespace().collect();
+    assert_eq!(read, expected);
 }
 
 #[test]
@@ -4910,5 +4923,71 @@ fn the_window_follows_a_jump_of_the_bound_during_the_pass() {
     assert_eq!(
         out.runs[0].block, first,
         "the runs are in step with the marks"
+    );
+}
+
+#[test]
+fn no_line_starts_with_a_space_after_an_inline_formula() {
+    // The sentence of the picture of 05/10/2026 (Task 261), at each
+    // width from 400 to 1200 pixels: the first run of a line never
+    // starts with a space.
+    let source = "A pendulum of length $L$ takes the same time for each swing. The period $T$ depends on the length and on gravity $g$:\n";
+    let mut fonts = fonts();
+    let doc = markdown::parse(source);
+    let mut faults = Vec::new();
+    for w in 400..=1200 {
+        let l = lay_doc(&doc, w as f32, &mut fonts);
+        let mut lines: Vec<(f32, Vec<&TextRun>)> = Vec::new();
+        for r in &l.runs {
+            match lines.iter_mut().find(|(y, _)| (*y - r.y).abs() < 0.5) {
+                Some((_, runs)) => runs.push(r),
+                None => lines.push((r.y, vec![r])),
+            }
+        }
+        for (y, runs) in &mut lines {
+            runs.sort_by(|a, b| a.x.partial_cmp(&b.x).unwrap());
+            let text = l.run_text(&doc, runs[0]);
+            // A formula that opens the line is a math glyph, not a run,
+            // and the words after it keep their space.
+            let after_formula = l
+                .math_glyphs
+                .iter()
+                .any(|g| g.y > *y && g.y < *y + 40.0 && g.x < runs[0].x);
+            if text.starts_with(' ') && !after_formula {
+                faults.push((w, text.to_string()));
+            }
+        }
+    }
+    assert!(faults.is_empty(), "lines starting with a space: {faults:?}");
+}
+
+#[test]
+fn the_words_that_fit_after_an_inline_formula_stay_on_its_line() {
+    // At 400 wide the content runs from x 32 to 368. "The period T" ends
+    // near x 170, so "depends on the" fits on that line and "length"
+    // starts the next one, at the margin and without a leading space.
+    let (doc, l) = lay2(
+        "The period $T$ depends on the length and on gravity and on nothing else at all.\n",
+        400.0,
+    );
+    let first_y = l.runs.iter().map(|r| r.y).fold(f32::MAX, f32::min);
+    let first_line: Vec<&str> = l
+        .runs
+        .iter()
+        .filter(|r| (r.y - first_y).abs() < 0.5)
+        .map(|r| l.run_text(&doc, r))
+        .collect();
+    assert_eq!(first_line, vec!["The period", " depends on the"]);
+    let second = l
+        .runs
+        .iter()
+        .filter(|r| r.y > first_y + 0.5)
+        .min_by(|a, b| a.y.partial_cmp(&b.y).unwrap())
+        .expect("a second line");
+    assert_eq!(second.x, l.runs[0].x, "at the margin");
+    assert!(
+        l.run_text(&doc, second).starts_with("length"),
+        "second line starts with {:?}",
+        l.run_text(&doc, second)
     );
 }

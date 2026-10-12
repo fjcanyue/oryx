@@ -5255,21 +5255,24 @@ fn chunk_metrics(runs: &[TextRun], x0: f32, y: f32) -> (f32, f32, f32) {
     (last_top, end_x, last_base)
 }
 
-/// Reshapes a chunk that could not merge back after an equation so the
-/// punctuation glued to the equation joins its line and the remainder
-/// flows alone below. The prefix keeps its natural model offsets; the
-/// remainder's shift by the skipped bytes so selection and copy stay
-/// exact. Answers the remainder's marks and height, or None when there
-/// is no standalone punctuation prefix or it does not fit, the chunk
-/// reshaped in place as it was.
+/// Reshapes a chunk that could not merge whole after an equation: the
+/// words that fit in the room left on the line join it, and the rest
+/// flows alone below, from its first word. The chunk is shaped once in
+/// the room left, and its first visual line is the prefix, kept as
+/// shaped, so a justified paragraph stretches it to the margin. The
+/// prefix keeps its natural model offsets; the remainder's shift by
+/// the bytes skipped, so selection and copy stay exact. Answers the
+/// remainder's marks and height, or None when the chunk is reshaped in
+/// place as it was: no word fits, and the chunk starts with one.
 #[allow(clippy::too_many_arguments)]
-fn split_glued_punctuation(
+fn split_after_equation(
     fonts: &mut FontStore,
     theme: &Theme,
     cfg: &ViewConfig,
     source: &str,
     masked: &[Span],
     start: usize,
+    end: usize,
     line: &mut FlowLine,
     base: &BlockStyle,
     x0: f32,
@@ -5280,80 +5283,110 @@ fn split_glued_punctuation(
     out: &mut LayoutDoc,
 ) -> Option<(usize, usize, f32)> {
     let lb = line.baseline?;
-    let text = masked[start].text(source);
-    let punct: usize = text
-        .chars()
-        .take_while(|c| ".,;:!?".contains(*c))
-        .map(char::len_utf8)
-        .sum();
-    let ws: usize = text[punct..]
-        .chars()
-        .take_while(|c| c.is_whitespace())
-        .map(char::len_utf8)
-        .sum();
-    let skip = punct + ws;
-    if punct == 0 || (skip < text.len() && ws == 0) {
-        return None;
-    }
-    let prefix_text = text[..punct].to_string();
-    let rest_text = text[skip..].to_string();
+    let line_height = metrics::LINE_HEIGHT * base.size;
+    let room = x0 + avail - line.end_x;
     out.runs.truncate(runs_mark);
     out.rects.truncate(rects_mark);
-    let mut prefix_spans = masked.to_vec();
-    for (si, s) in prefix_spans.iter_mut().enumerate() {
-        if si == start {
-            s.set_text(prefix_text.clone());
-        } else {
-            s.clear_text();
+    let on_first = |r: &TextRun| r.y < y + 0.5 * line_height;
+    // The cut: where the first visual line of the chunk, shaped in the
+    // room left, ends. A first line with no run (a blank alone, which
+    // shaping trims) or wider than the room (a word that cannot break)
+    // gives none.
+    let mut cut: Option<(usize, usize)> = None;
+    if room > 0.0 {
+        shape_block(
+            fonts, theme, cfg, source, masked, true, base, x0, y, room, out,
+        );
+        let width = out.runs[runs_mark..]
+            .iter()
+            .filter(|r| on_first(r))
+            .map(|r| r.x + r.width)
+            .fold(x0, f32::max)
+            - x0;
+        let last = out.runs[runs_mark..]
+            .iter()
+            .filter(|r| on_first(r))
+            .map(|r| {
+                let len = masked[r.span].text(source).len();
+                match r.text {
+                    TextRef::Model { start: s, len: l } => (r.span, ((s + l) as usize).min(len)),
+                    TextRef::Side { .. } => (r.span, len),
+                }
+            })
+            .max();
+        if width <= room + 0.5 {
+            cut = last;
         }
     }
-    shape_block(
-        fonts,
-        theme,
-        cfg,
-        source,
-        &prefix_spans,
-        true,
-        base,
-        x0,
-        y,
-        avail,
-        out,
-    );
-    let pw = out.runs[runs_mark..]
-        .iter()
-        .map(|r| r.x + r.width)
-        .fold(x0, f32::max)
-        - x0;
-    let pb = out.runs[runs_mark..]
-        .iter()
-        .map(|r| r.baseline)
-        .fold(0.0, f32::max);
-    if out.runs.len() == runs_mark || line.end_x + pw > x0 + avail {
-        // No prefix fits; the chunk reshapes exactly as it was.
-        out.runs.truncate(runs_mark);
-        out.rects.truncate(rects_mark);
+    let (mut span, mut byte) = match cut {
+        Some(c) => {
+            // The first line joins the open line; the lines below it go.
+            let kept: Vec<TextRun> = out
+                .runs
+                .drain(runs_mark..)
+                .filter(|r| on_first(r))
+                .collect();
+            let pb = kept.iter().map(|r| r.baseline).fold(0.0, f32::max);
+            let pw = kept.iter().map(|r| r.x + r.width).fold(x0, f32::max) - x0;
+            let dx = line.end_x - x0;
+            let dy = lb - pb;
+            out.runs.extend(kept.into_iter().map(|mut run| {
+                run.x += dx;
+                run.y += dy;
+                run.baseline += dy;
+                run
+            }));
+            let rects: Vec<_> = out
+                .rects
+                .drain(rects_mark..)
+                .filter(|r| r.y < y + line_height - 1.0)
+                .collect();
+            out.rects.extend(rects.into_iter().map(|mut rect| {
+                rect.x += dx;
+                rect.y += dy;
+                rect
+            }));
+            line.end_x += pw;
+            c
+        }
+        None => {
+            out.runs.truncate(runs_mark);
+            out.rects.truncate(rects_mark);
+            (start, 0)
+        }
+    };
+    // The remainder starts at the first word after the cut.
+    loop {
+        let text = masked[span].text(source);
+        byte += text[byte..]
+            .chars()
+            .take_while(|c| c.is_whitespace())
+            .map(char::len_utf8)
+            .sum::<usize>();
+        if byte < text.len() || span + 1 >= end {
+            break;
+        }
+        span += 1;
+        byte = 0;
+    }
+    let rmark_runs = out.runs.len();
+    let rmark_rects = out.rects.len();
+    if byte >= masked[span].text(source).len() {
+        // The whole chunk joined the line.
+        return Some((rmark_runs, rmark_rects, 0.0));
+    }
+    if cut.is_none() && (span, byte) == (start, 0) {
         shape_block(
             fonts, theme, cfg, source, masked, true, base, x0, y, avail, out,
         );
         return None;
     }
-    let dx = line.end_x - x0;
-    let dy = lb - pb;
-    for run in &mut out.runs[runs_mark..] {
-        run.x += dx;
-        run.y += dy;
-        run.baseline += dy;
-    }
-    for rect in &mut out.rects[rects_mark..] {
-        rect.x += dx;
-        rect.y += dy;
-    }
-    line.end_x += pw;
-    let rmark_runs = out.runs.len();
-    let rmark_rects = out.rects.len();
     let mut rest_spans = masked.to_vec();
-    rest_spans[start].set_text(rest_text);
+    for s in &mut rest_spans[start..span] {
+        s.clear_text();
+    }
+    let tail = masked[span].text(source)[byte..].to_string();
+    rest_spans[span].set_text(tail);
     let h = shape_block(
         fonts,
         theme,
@@ -5368,9 +5401,9 @@ fn split_glued_punctuation(
         out,
     );
     for run in &mut out.runs[rmark_runs..] {
-        if run.span == start {
+        if run.span == span {
             if let TextRef::Model { start: s, .. } = &mut run.text {
-                *s += skip as u32;
+                *s += byte as u32;
             }
         }
     }
@@ -5468,19 +5501,19 @@ fn layout_flow(
                 false
             };
             if !merged {
-                // Punctuation glued to an equation joins the equation's
-                // line even when the rest of the chunk wraps below.
+                // The words that fit after an equation join its line, and
+                // the rest flows below from its first word.
                 let mut runs_mark = runs_mark;
                 let mut rects_mark = rects_mark;
                 if start > 0 && spans[start - 1].math {
                     if let Some(l) = line.as_mut() {
-                        if let Some((rm, rcm, rh)) = split_glued_punctuation(
-                            fonts, theme, cfg, source, &masked, start, l, base, x0, y, avail,
+                        if let Some((rm, rcm, rh)) = split_after_equation(
+                            fonts, theme, cfg, source, &masked, start, i, l, base, x0, y, avail,
                             runs_mark, rects_mark, out,
                         ) {
                             if out.runs.len() == rm {
-                                // The chunk was the punctuation alone;
-                                // the line stays open as it was.
+                                // The whole chunk joined the line, which
+                                // stays open.
                                 continue;
                             }
                             runs_mark = rm;

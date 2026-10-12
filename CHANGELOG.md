@@ -14,6 +14,7 @@
 - In the search bar and in the fields of the theme dialogs, the caret, the selection and a click now stand at their place in text written from right to left. Before, they stood at the mirror of it.
 - A line or paragraph separator pasted into the search bar or a field is now dropped, like a control character. Before, it closed Oryx at once.
 - In a formula, `\%` now shows a percent sign, and `\#`, `\&`, `\$` and `\_` show their character, as in KaTeX. Before, each was shown as written, in the color of an unknown command. A bare `%` still starts a comment, as in TeX.
+- The words that fit after an inline formula now stay on its line, and the next line starts at the margin. Before, the text after a formula went whole to the next line unless all of it fit beside the formula, and that next line started with a space. With justification on, a line that goes on after a formula now ends at the margin.
 
 ## v1.2.1
 
