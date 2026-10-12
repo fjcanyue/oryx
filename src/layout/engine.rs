@@ -6702,7 +6702,10 @@ struct GlyphGroup {
 }
 
 /// Walks a shaped line grouping consecutive glyphs by metadata, the
-/// one walk both the prose and the code paths consume. With
+/// one walk both the prose and the code paths consume. A group also
+/// ends where the next glyph's bytes do not touch the previous one's
+/// (`glyphs_touch`), so that its byte span, the smallest and the largest
+/// byte of its glyphs, holds its glyphs and nothing else. With
 /// `cut_spaces`, a group also ends after each space run, since a
 /// justified line must hold no stretched space inside a group: paint
 /// re-shapes runs naturally, so every word paints at its own recorded
@@ -6722,6 +6725,7 @@ fn glyph_groups<'a>(
         let mut end = g + 1;
         while end < glyphs.len()
             && glyphs[end].metadata == meta
+            && glyphs_touch(&glyphs[end - 1], &glyphs[end])
             && !(cut_spaces
                 && glyph_is_space(line_text, &glyphs[end - 1])
                 && !glyph_is_space(line_text, &glyphs[end]))
@@ -6758,6 +6762,16 @@ fn glyph_groups<'a>(
         g = end;
         Some(group)
     })
+}
+
+/// Whether two glyphs next to each other on the line come from bytes
+/// that touch or overlap, in either direction, since the glyphs of a
+/// right-to-left line arrive from the right. A gap means the bidi rules
+/// placed one of them away from its neighbors in the text, as the final
+/// period of a Latin run, which lands at the run's left end in a
+/// right-to-left line, next to the run's first word.
+fn glyphs_touch(a: &cosmic_text::LayoutGlyph, b: &cosmic_text::LayoutGlyph) -> bool {
+    b.start <= a.end && b.end >= a.start
 }
 
 /// Whether a glyph draws only a stretchable space, U+0020 or U+00A0,

@@ -5008,6 +5008,22 @@ fn overlapping_runs<'a>(l: &'a LayoutDoc, doc: &'a Document) -> Vec<(&'a str, &'
 }
 
 #[test]
+fn the_latin_words_of_a_justified_right_to_left_line_do_not_overlap() {
+    // The chunk after the formula reads right to left and ends with a
+    // Latin tail, whose final period the bidi rules place at the tail's
+    // left end, next to its first word. No run of the line may hold
+    // several words, and no two runs of a line may overlap.
+    let src = "The period of the swing $T$ يعتمد على الطول والجاذبية and on gravity and on nothing else at all here today.\n";
+    let (doc, l) = lay_justified(src, 600.0);
+    let found = overlapping_runs(&l, &doc);
+    assert!(found.is_empty(), "runs overlap: {found:?}");
+    for r in &l.runs {
+        let t = l.run_text(&doc, r);
+        assert!(!t.trim().contains(' '), "a run holds several words: {t:?}");
+    }
+}
+
+#[test]
 fn arabic_words_after_an_inline_formula_overlap_nothing() {
     // The words after the formula read right to left, so they are not
     // split onto the formula's line: shaped alone they would be laid

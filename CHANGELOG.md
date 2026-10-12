@@ -21,6 +21,7 @@
 - A line or paragraph separator pasted into the search bar or a field is now dropped, like a control character. Before, it closed Oryx at once.
 - In a formula, `\%` now shows a percent sign, and `\#`, `\&`, `\$` and `\_` show their character, as in KaTeX. Before, each was shown as written, in the color of an unknown command. A bare `%` still starts a comment, as in TeX.
 - The words that fit after an inline formula now stay on its line, and the next line starts at the margin. Before, the text after a formula went whole to the next line unless all of it fit beside the formula, and that next line started with a space. With justification on, a line that goes on after a formula now ends at the margin.
+- With justification on, the Latin words at the end of a line written from right to left are now drawn once each. Before, the first of them was drawn over the others, with the text of the whole line stacked on it.
 
 ## v1.2.1
 
