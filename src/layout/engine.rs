@@ -4120,6 +4120,14 @@ fn shape_segment_chunk(
         line_acc += line.text().len() as u32 + 1;
     }
 
+    // Inline code is drawn as written, left to right: its group keeps
+    // the gaps the bidi rules open in its bytes, while the span is one
+    // group. Justification cuts a span at its spaces, and a kept gap
+    // in one of its words would span the bytes of the others.
+    let as_written: Vec<bool> = spans
+        .iter()
+        .map(|s| s.code && (!base.justify || !s.text(source).contains([' ', '\u{a0}'])))
+        .collect();
     let mut height = 0.0_f32;
     for (visual_line, run) in buffer.layout_runs().enumerate() {
         if first_line_only && visual_line > 0 {
@@ -4133,7 +4141,7 @@ fn shape_segment_chunk(
         // words of one phrase share a pill instead of overlapping at
         // their spaces, which doubles a translucent color.
         let mut open_pill: Option<(usize, Rgba)> = None;
-        for group in glyph_groups(glyphs, line_text, base.justify) {
+        for group in glyph_groups(glyphs, line_text, base.justify, &as_written) {
             let span_index = group.meta;
             let (start_byte, end_byte) = (group.bytes.start, group.bytes.end);
             let st = &styles[span_index];
@@ -4143,8 +4151,14 @@ fn shape_segment_chunk(
             let baseline = y0 + run.line_y - st.rise;
             match (st.pill, open_pill) {
                 (Some(pill), Some((at, color))) if color == pill => {
+                    // The groups of a right-to-left line come from the
+                    // right, and the bidi rules can put a group left of
+                    // the first one: the pill grows on both sides.
                     let rect = &mut out.rects[at];
-                    rect.width = (x + width + 3.0 - rect.x).max(rect.width);
+                    let left = rect.x.min(x - 3.0);
+                    let right = (rect.x + rect.width).max(x + width + 3.0);
+                    rect.x = left;
+                    rect.width = right - left;
                 }
                 (Some(pill), _) => {
                     let radius = metrics::PILL_RADIUS * cfg.zoom;
@@ -6607,7 +6621,7 @@ fn shape_code_chunk(
         height = height.max(run.line_top + line_height);
         let line_text = buffer.lines[run.line_i].text();
         let glyphs = trim_trailing_spaces(run.glyphs, line_text);
-        for group in glyph_groups(glyphs, line_text, false) {
+        for group in glyph_groups(glyphs, line_text, false, &[]) {
             let segment_index = group.meta;
             let (start_byte, end_byte) = (group.bytes.start, group.bytes.end);
             let role = segments[segment_index].1;
@@ -6705,8 +6719,13 @@ struct GlyphGroup {
 /// one walk both the prose and the code paths consume. A group also
 /// ends where the next glyph's bytes do not touch the previous one's
 /// (`glyphs_touch`), so that its byte span, the smallest and the largest
-/// byte of its glyphs, holds its glyphs and nothing else. With
-/// `cut_spaces`, a group also ends after each space run, since a
+/// byte of its glyphs, holds its glyphs and nothing else. A span marked
+/// in `as_written` (inline code that stays one group) keeps such a gap,
+/// so that paint draws its text as written, left to right, whatever the
+/// line's direction; the caller leaves the mark off a span that the
+/// space cut below splits, since a kept gap in one of its words would
+/// span the bytes of the others.
+/// With `cut_spaces`, a group also ends after each space run, since a
 /// justified line must hold no stretched space inside a group: paint
 /// re-shapes runs naturally, so every word paints at its own recorded
 /// x, and the space stays with the word before it to keep byte ranges
@@ -6715,6 +6734,7 @@ fn glyph_groups<'a>(
     glyphs: &'a [cosmic_text::LayoutGlyph],
     line_text: &'a str,
     cut_spaces: bool,
+    as_written: &'a [bool],
 ) -> impl Iterator<Item = GlyphGroup> + 'a {
     let mut g = 0;
     std::iter::from_fn(move || {
@@ -6722,10 +6742,11 @@ fn glyph_groups<'a>(
             return None;
         }
         let meta = glyphs[g].metadata;
+        let keep_gaps = as_written.get(meta).copied().unwrap_or(false);
         let mut end = g + 1;
         while end < glyphs.len()
             && glyphs[end].metadata == meta
-            && glyphs_touch(&glyphs[end - 1], &glyphs[end])
+            && (keep_gaps || glyphs_touch(&glyphs[end - 1], &glyphs[end]))
             && !(cut_spaces
                 && glyph_is_space(line_text, &glyphs[end - 1])
                 && !glyph_is_space(line_text, &glyphs[end]))

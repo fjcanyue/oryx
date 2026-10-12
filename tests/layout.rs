@@ -348,6 +348,101 @@ fn inline_code_gets_pill() {
 }
 
 #[test]
+fn a_highlight_on_a_right_to_left_line_keeps_its_pill_whole() {
+    // The bidi rules place the final period of the highlight at its left
+    // end, as a run of its own; the pill must cover that run too.
+    let (doc, l) = lay2("نص عربي ثم ==highlight here.== ثم نهاية.\n", 800.0);
+    let t = Theme::default_dark();
+    let pills: Vec<&DecoRect> = l
+        .rects
+        .iter()
+        .filter(|r| r.color == t.ui.search_match_bg)
+        .collect();
+    assert_eq!(pills.len(), 1, "one pill for the highlight");
+    let pill = pills[0];
+    let mut seen = 0;
+    for r in &l.runs {
+        let text = l.run_text(&doc, r);
+        if text.trim().is_empty() || !"highlight here.".contains(text.trim()) {
+            continue;
+        }
+        seen += 1;
+        assert!(
+            pill.x <= r.x + 0.5 && pill.x + pill.width >= r.x + r.width - 0.5,
+            "the run {text:?} at {} + {} is outside the pill at {} + {}",
+            r.x,
+            r.width,
+            pill.x,
+            pill.width
+        );
+    }
+    assert!(
+        seen >= 2,
+        "the period is a run of its own: {seen} runs seen"
+    );
+}
+
+#[test]
+fn inline_code_on_a_right_to_left_line_is_one_run() {
+    // Code is drawn as written: its group is not cut where the bidi
+    // rules move its brackets to the other end.
+    let (doc, l) = lay2("نص عربي `print()` ثم نهاية.\n", 800.0);
+    let code: Vec<&str> = l
+        .runs
+        .iter()
+        .filter(|r| l.run_family(r) == CODE_FAMILY)
+        .map(|r| l.run_text(&doc, r))
+        .collect();
+    assert_eq!(code, vec!["print()"]);
+}
+
+#[test]
+fn justified_inline_code_on_a_right_to_left_line_does_not_overlap() {
+    // With justification on, the words of a code span are groups of
+    // their own, so a gap the bidi rules open is cut like any other:
+    // a group that kept it would span the bytes of the other words.
+    let src = "استخدم `--help` ثم `abc def.` هنا، و **bold words.** في النهاية.\n";
+    for w in [800.0, 1000.0] {
+        let (doc, l) = lay_justified(src, w);
+        let found = overlapping_runs(&l, &doc);
+        assert!(found.is_empty(), "runs overlap at {w} wide: {found:?}");
+        // A code span without a space is one group whatever the
+        // justification, so it is drawn as written there too.
+        let code: Vec<&str> = l
+            .runs
+            .iter()
+            .filter(|r| l.run_family(r) == CODE_FAMILY)
+            .map(|r| l.run_text(&doc, r))
+            .collect();
+        assert!(
+            code.contains(&"--help"),
+            "the code without a space is one run at {w} wide: {code:?}"
+        );
+        // A run paints its whole text from its x: a byte in two runs is
+        // drawn twice, the second time over the other run.
+        let mut ranges: Vec<(usize, u32, u32)> = l
+            .runs
+            .iter()
+            .filter_map(|r| match r.text {
+                TextRef::Model { start, len } => Some((r.span, start, start + len)),
+                TextRef::Side { .. } => None,
+            })
+            .collect();
+        ranges.sort_unstable();
+        for pair in ranges.windows(2) {
+            let (sa, _, a1) = pair[0];
+            let (sb, b0, _) = pair[1];
+            assert!(
+                sa != sb || b0 >= a1,
+                "a byte is covered twice at {w} wide: {:?} then {:?}",
+                pair[0],
+                pair[1]
+            );
+        }
+    }
+}
+
+#[test]
 fn quote_indents_with_bar_and_panel() {
     let plain = lay("text", 800.0);
     let quoted = lay("> text", 800.0);

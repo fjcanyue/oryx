@@ -303,6 +303,10 @@ fn lines_of(lay: &LayoutDoc, doc: &Document) -> Vec<Line> {
         match lines.last_mut() {
             Some(line) if (line.y - y).abs() < 0.5 => {
                 line.h = line.h.max(h);
+                // The runs come in screen order, which on a right-to-left
+                // line is not the order of the text: the line's bytes
+                // are the smallest start and the largest end.
+                line.start = line.start.min(run.start);
                 line.end = line.end.max(run.start + run.len);
                 line.runs.push(run);
             }
@@ -2649,5 +2653,20 @@ mod tests {
         assert_eq!(ledger.current(), "abcx\n");
         ledger.edit(caret.offset - 1..caret.offset + 1, "");
         assert_eq!(ledger.current(), "ab\n");
+    }
+
+    #[test]
+    fn home_and_end_on_a_right_to_left_line_with_a_number() {
+        // The runs of the line stand on the screen in bidi order: the
+        // number and the Latin words are runs of their own, and the
+        // leftmost run holds the last text. The line still starts at
+        // its first byte and ends at its last.
+        let doc = text_doc("كتبت 25 صفحة و abc def هنا\nسطر ثان\n");
+        let (l, mut fonts) = lay_of(&doc);
+        let end = doc.source.find('\n').unwrap();
+        let c = step(Caret::at(9), Motion::Home, &l, &doc, &mut fonts);
+        assert_eq!(c.offset, 0, "Home from the middle of the line");
+        let c = step(Caret::at(9), Motion::End, &l, &doc, &mut fonts);
+        assert_eq!(c.offset, end, "End from the middle of the line");
     }
 }
