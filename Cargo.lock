@@ -2361,6 +2361,7 @@ dependencies = [
  "tiny-skia",
  "toml",
  "ttf-parser",
+ "unicode-linebreak",
  "ureq",
  "wayland-backend",
  "wayland-client",

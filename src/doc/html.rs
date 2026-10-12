@@ -896,14 +896,20 @@ impl Walker {
                 });
             }
             "p" | "div" if !in_table => {
-                // The attribute first, then the stylesheet.
-                let word = match attr("align").map(|a| a.to_ascii_lowercase()) {
-                    Some(a) if a == "center" => Some(true),
-                    Some(a) if a == "left" || a == "right" || a == "justify" => Some(false),
-                    _ => emphasis.centered(),
-                };
-                self.center.push(word);
+                // The stylesheet's word first, the attribute's when the
+                // stylesheet says nothing: the attribute is a presentational
+                // hint, which any stylesheet rule overrides.
+                let word = emphasis.centered().or_else(|| {
+                    match attr("align").map(|a| a.to_ascii_lowercase()) {
+                        Some(a) if a == "center" => Some(true),
+                        Some(a) if a == "left" || a == "right" || a == "justify" => Some(false),
+                        _ => None,
+                    }
+                });
+                // The content pending before this block belongs to the
+                // enclosing blocks and takes their words, not this one's.
                 self.flush();
+                self.center.push(word);
                 self.children(node);
                 self.flush();
                 self.center.pop();
@@ -1652,6 +1658,41 @@ mod tests {
         let (blocks, _, _) =
             walk("<html><body><p>See <img src=\"a.png\"/> here.</p></body></html>");
         assert!(!blocks[0].centered);
+    }
+
+    #[test]
+    fn a_bare_image_before_a_paragraph_is_centered_by_the_lone_image_rule() {
+        // The image stands outside any paragraph. The paragraph after it
+        // has a word of its own, which is not the image's.
+        let (blocks, _, _) = walk_styled(
+            "p { text-align: justify }",
+            "<html><body><h2>One</h2><img src=\"a.png\"/><p>First paragraph.</p></body></html>",
+        );
+        assert!(
+            blocks[1].centered,
+            "the bare image before a justified paragraph"
+        );
+        assert!(!blocks[2].centered, "the paragraph itself");
+    }
+
+    #[test]
+    fn the_stylesheet_wins_over_the_align_attribute() {
+        let (blocks, _, _) = walk_styled(
+            ".c { text-align: center }",
+            "<html><body><p align=\"left\" class=\"c\">Title</p></body></html>",
+        );
+        assert!(
+            blocks[0].centered,
+            "the stylesheet says center, the attribute left"
+        );
+        let (blocks, _, _) = walk_styled(
+            ".l { text-align: left }",
+            "<html><body><p align=\"center\" class=\"l\">Title</p></body></html>",
+        );
+        assert!(
+            !blocks[0].centered,
+            "the stylesheet says left, the attribute center"
+        );
     }
 
     #[test]

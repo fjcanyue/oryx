@@ -5450,9 +5450,12 @@ fn split_after_equation(
     (rmark_runs, rmark_rects, h)
 }
 
-/// Whether a cut of the chunk at `(span, byte)` has whitespace after it
-/// or ends the chunk. A cut inside a word comes from a word wider than
-/// the room, which shaping breaks between glyphs.
+/// Whether a cut of the chunk at `(span, byte)` is a place where a line
+/// may break: whitespace follows it, the chunk ends there, or the Unicode
+/// line-breaking rules allow a break there in the span's text (after a
+/// hyphen or a dash, between Chinese characters), the rules the shaper
+/// breaks by. A cut anywhere else is inside a word wider than the room,
+/// which shaping breaks between glyphs.
 fn cut_at_a_break(
     masked: &[Span],
     source: &str,
@@ -5462,7 +5465,8 @@ fn cut_at_a_break(
     loop {
         let text = masked[span].text(source);
         if byte < text.len() {
-            return text[byte..].starts_with(char::is_whitespace);
+            return text[byte..].starts_with(char::is_whitespace)
+                || unicode_linebreak::linebreaks(text).any(|(i, _)| i == byte);
         }
         span += 1;
         if span >= end {

@@ -5082,6 +5082,69 @@ fn a_word_glued_to_a_formula_is_not_cut_inside() {
 }
 
 #[test]
+fn the_words_up_to_a_hyphen_join_the_formula_line() {
+    // At 500 wide the room after "The period of the swing T" ends inside
+    // "well-known". The shaper breaks after the hyphen, a break the
+    // Unicode rules allow, so the words up to "well-" stay on the line
+    // and "known" starts the next one.
+    let (doc, l) = lay2(
+        "The period of the swing $T$ is a well-known quantity of the pendulum and gravity.\n",
+        500.0,
+    );
+    let first_y = l.runs.iter().map(|r| r.y).fold(f32::MAX, f32::min);
+    let first_line: Vec<&str> = l
+        .runs
+        .iter()
+        .filter(|r| (r.y - first_y).abs() < 0.5)
+        .map(|r| l.run_text(&doc, r))
+        .collect();
+    assert_eq!(first_line, vec!["The period of the swing", " is a well-"]);
+    let second = l
+        .runs
+        .iter()
+        .filter(|r| r.y > first_y + 0.5)
+        .min_by(|a, b| a.y.partial_cmp(&b.y).unwrap())
+        .expect("a second line");
+    assert!(
+        l.run_text(&doc, second).starts_with("known"),
+        "second line starts with {:?}",
+        l.run_text(&doc, second)
+    );
+}
+
+#[test]
+fn chinese_text_after_a_formula_joins_its_line() {
+    // Chinese has no spaces: a line may break between any two characters,
+    // so the characters that fit after the formula stay on its line and
+    // the rest starts the next one at the margin.
+    let (doc, l) = lay2(
+        "摆的周期 $T$ 取决于摆的长度和重力加速度以及其他很多很多因素的影响程度大小和方向。\n",
+        500.0,
+    );
+    let first_y = l.runs.iter().map(|r| r.y).fold(f32::MAX, f32::min);
+    let first_line: Vec<&str> = l
+        .runs
+        .iter()
+        .filter(|r| (r.y - first_y).abs() < 0.5)
+        .map(|r| l.run_text(&doc, r))
+        .collect();
+    assert_eq!(first_line.len(), 2, "the first line holds {first_line:?}");
+    assert_eq!(first_line[0], "摆的周期");
+    assert!(
+        first_line[1].starts_with(" 取决于"),
+        "the first line holds {first_line:?}"
+    );
+    let second = l
+        .runs
+        .iter()
+        .filter(|r| r.y > first_y + 0.5)
+        .min_by(|a, b| a.y.partial_cmp(&b.y).unwrap())
+        .expect("a second line");
+    assert_eq!(second.x, l.runs[0].x, "at the margin");
+    assert!(!l.run_text(&doc, second).starts_with(' '));
+}
+
+#[test]
 fn a_raised_pill_on_the_line_below_the_kept_one_is_not_kept() {
     // The shaping in the room left emits the first visual line only,
     // so no rectangle of the second line is carried onto the formula's
