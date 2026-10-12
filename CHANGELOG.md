@@ -2,7 +2,9 @@
 
 ## v1.2.2
 
-### Improvements
+### New features
+
+#### Books
 
 - In a book, an image alone on its line is now centered, the cover too, unless the book's stylesheet places it. Before, such an image stood at the left.
 
