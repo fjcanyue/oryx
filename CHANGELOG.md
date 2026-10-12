@@ -27,6 +27,7 @@
 - The words that fit after an inline formula now stay on its line, and the next line starts at the margin. Before, the text after a formula went whole to the next line unless all of it fit beside the formula, and that next line started with a space. With justification on, a line that goes on after a formula now ends at the margin.
 - With justification on, the Latin words at the end of a line written from right to left are now drawn once each. Before, the first of them was drawn over the others, with the text of the whole line stacked on it.
 - In the editor, on a line written from right to left that holds a number, a Latin word or colored markup, Home and End now go to the ends of the line, and a click left of it to its start. Before, the line was taken to be its last words only, so Home did not move or went to those words.
+- After an editing key on a selection made with the mouse, `Ctrl+B` or `Ctrl+U` among them, moving the mouse no longer extends the selection. Before, the key left the drag's state on, as if the button were still held, and the layout and the parsing of the file waited until the selection was gone.
 
 ## v1.2.1
 

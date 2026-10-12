@@ -324,6 +324,7 @@ pub fn run(
         hover_link: false,
         tooltip: None,
         sel_anchor: None,
+        left_held: false,
         last_click: None,
         selection: None,
         clipboard: None,
@@ -517,6 +518,15 @@ fn outline_current(
         .map(|e| outline.visible_entry(e));
     outline.track_current(entry, sidebar::ROW_H, side.list_h());
     entry
+}
+
+/// Whether a selection drag is live: the left button held since the
+/// press that grabbed the anchor. A selection an editing key, a
+/// Shift+click's release or the keyboard leaves standing keeps its
+/// anchor for the highlight fold, and is not a drag: the pointer's
+/// move leaves it alone, and no background work waits on it.
+fn selection_drag(left_held: bool, anchored: bool) -> bool {
+    left_held && anchored
 }
 
 /// Whether the view shows the end of the page: the scroll stops where
@@ -1495,8 +1505,13 @@ struct App {
     /// The expansion of the abbreviation under the cursor, shown in a
     /// tooltip beside it.
     tooltip: Option<String>,
-    /// Selection drag in progress: the caret grabbed at mouse down.
+    /// The anchor of the selection: grabbed at the mouse's press, or set
+    /// by an editing key that leaves the new text selected, so that the
+    /// highlight fold re-cuts it. A drag is live only while the left
+    /// button is held (`selecting`).
     sel_anchor: Option<ModelPos>,
+    /// The left button is held, from its press to its release.
+    left_held: bool,
     /// The last document-area press, for the double and triple click
     /// chain: when, where, and how many clicks it had reached.
     last_click: Option<(Instant, f32, f32, u8)>,
@@ -5395,6 +5410,11 @@ impl App {
         }
     }
 
+    /// Whether a selection drag is live (`selection_drag`).
+    fn selecting(&self) -> bool {
+        selection_drag(self.left_held, self.sel_anchor.is_some())
+    }
+
     /// Grabs a selection anchor at the cursor and clears any previous
     /// selection.
     fn begin_selection(&mut self) {
@@ -5726,7 +5746,7 @@ impl App {
     /// time, and a band a landed guess covers asks for nothing
     /// (`speculation_target`).
     fn maybe_speculate(&mut self) {
-        if self.document.plain_file || self.drag.is_some() || self.sel_anchor.is_some() {
+        if self.document.plain_file || self.drag.is_some() || self.selecting() {
             return;
         }
         let Some(lay) = self.layout.as_ref() else {
@@ -5793,7 +5813,7 @@ impl App {
     /// Lands a parked parse delivery. Deferred while any drag is live: a
     /// replace would pull the layout out from under it.
     fn fold_parse(&mut self) {
-        if self.sel_anchor.is_some() || self.drag.is_some() {
+        if self.selecting() || self.drag.is_some() {
             return;
         }
         if let Some(delivered) = self.parser.drain() {
@@ -7889,11 +7909,7 @@ impl App {
     /// selection and scrollbar dragging stay smooth; the queue resumes on
     /// release.
     fn slice(&mut self, budget: Duration) {
-        if !self.pass_active()
-            || self.drag.is_some()
-            || self.sel_anchor.is_some()
-            || self.overlay_mouse
-        {
+        if !self.pass_active() || self.drag.is_some() || self.selecting() || self.overlay_mouse {
             return;
         }
         let before = self.doc_height();
@@ -8145,10 +8161,8 @@ impl App {
         // An open search counts as interactive: every keystroke edits the
         // highlights, so frames paint direct and the expensive band
         // rebuild waits until the bar closes.
-        let interactive = self.drag.is_some()
-            || self.sel_anchor.is_some()
-            || self.overlay_mouse
-            || self.search.is_some();
+        let interactive =
+            self.drag.is_some() || self.selecting() || self.overlay_mouse || self.search.is_some();
         // The materialized window slides to the scroll position before
         // anything reads geometry: the full band when settled, only the
         // viewport under a live gesture.
@@ -8871,7 +8885,9 @@ impl ApplicationHandler for App {
             }
             WindowEvent::Focused(false) => {
                 // The caret goes with the focus, as in a native text box.
+                // The button's release goes elsewhere too.
                 self.focused = false;
+                self.left_held = false;
                 self.request_redraw();
                 self.flush_note_copy();
                 if self.config.save_on_focus_loss {
@@ -9117,7 +9133,7 @@ impl ApplicationHandler for App {
                     self.request_redraw();
                 } else if self.drag.is_some() {
                     self.drag_to(position.y as f32);
-                } else if self.sel_anchor.is_some() {
+                } else if self.selecting() {
                     self.extend_selection();
                 } else {
                     self.update_hover();
@@ -9163,6 +9179,7 @@ impl ApplicationHandler for App {
                 }
                 match state {
                     ElementState::Pressed => {
+                        self.left_held = true;
                         self.fling = None;
                         if self.confirm.is_some() {
                             let (x, y) = self.ui_cursor();
@@ -9175,7 +9192,10 @@ impl ApplicationHandler for App {
                         }
                         self.left_press();
                     }
-                    ElementState::Released => self.left_release(),
+                    ElementState::Released => {
+                        self.left_held = false;
+                        self.left_release();
+                    }
                 }
             }
             WindowEvent::Resized(size) => {
@@ -10642,5 +10662,22 @@ mod tests {
     fn the_hidden_files_notice_names_the_new_state() {
         assert_eq!(super::hidden_notice(true), "Showing hidden files");
         assert_eq!(super::hidden_notice(false), "Hidden files out of the way");
+    }
+
+    #[test]
+    fn a_standing_selection_is_not_a_drag() {
+        assert!(
+            !super::selection_drag(false, true),
+            "an editing key left the selection and its anchor, the button up"
+        );
+        assert!(
+            super::selection_drag(true, true),
+            "the button held since the press that grabbed the anchor"
+        );
+        assert!(
+            !super::selection_drag(true, false),
+            "the button held with nothing grabbed"
+        );
+        assert!(!super::selection_drag(false, false));
     }
 }
