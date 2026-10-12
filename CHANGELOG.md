@@ -13,6 +13,7 @@
 - An image inside a paragraph, shown without its picture, now sizes its box to a label written from right to left. Before, the box took the smallest width and the label ran over the words before it.
 - In the search bar and in the fields of the theme dialogs, the caret, the selection and a click now stand at their place in text written from right to left. Before, they stood at the mirror of it.
 - A line or paragraph separator pasted into the search bar or a field is now dropped, like a control character. Before, it closed Oryx at once.
+- In a formula, `\%` now shows a percent sign, and `\#`, `\&`, `\$` and `\_` show their character, as in KaTeX. Before, each was shown as written, in the color of an unknown command. A bare `%` still starts a comment, as in TeX.
 
 ## v1.2.1
 
