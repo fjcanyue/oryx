@@ -1980,6 +1980,7 @@ impl App {
             Command::Italic => self.toggle_mark("*"),
             Command::Code => self.toggle_mark("`"),
             Command::Link => self.insert_link(),
+            Command::Case => self.cycle_case(),
             Command::MoveLineUp => self.move_lines(true),
             Command::MoveLineDown => self.move_lines(false),
             Command::DuplicateLines => self.duplicate_lines(),
@@ -4020,6 +4021,26 @@ impl App {
         }
         self.type_edit_at(edit.replace, &edit.text, Kind::Structural, edit.caret);
         if had_selection && !edit.inner.is_empty() {
+            if let Some(s) = caret::span_selection(&self.document, edit.inner.start, edit.inner.end)
+            {
+                self.sel_anchor = Some(s.start);
+                self.selection = Some(s);
+            }
+        }
+        self.rehighlight_now();
+    }
+
+    /// Ctrl+U: the next case of the selection, or of the word under the
+    /// caret. The new text stays selected, so the key cycles on.
+    fn cycle_case(&mut self) {
+        let selection = self.selection_source_range();
+        let had_selection = selection.is_some();
+        let caret = self.caret.map_or(0, |c| c.offset);
+        let Some(edit) = edit::manners::case_edit(&self.document.source, selection, caret) else {
+            return;
+        };
+        self.type_edit_at(edit.replace, &edit.text, Kind::Structural, edit.caret);
+        if had_selection {
             if let Some(s) = caret::span_selection(&self.document, edit.inner.start, edit.inner.end)
             {
                 self.sel_anchor = Some(s.start);

@@ -445,6 +445,11 @@ pub const TIPS: &[Tip] = &[
     Tip {
         kind: TipKind::Tip,
         area: Area::Editing,
+        text: r#"`Ctrl+U` changes the case of the selected text, or of the word the caret is on: lower case, then a capital on each word, then upper case. The address of a link and inline code keep their letters."#,
+    },
+    Tip {
+        kind: TipKind::Tip,
+        area: Area::Editing,
         text: r#"While you edit a markdown file, `Ctrl+V` pastes a picture from the clipboard. Oryx saves it in an `images` folder next to your file and adds the link. You can also drop an image file on the window."#,
     },
     Tip {

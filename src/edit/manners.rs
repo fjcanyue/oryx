@@ -1431,6 +1431,130 @@ fn outdent_cut(line: &str, unit: &IndentUnit) -> usize {
     b.iter().take_while(|c| **c == b' ').count().min(step)
 }
 
+/// The forms the case key cycles through, in this order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CaseForm {
+    Lower,
+    Title,
+    Upper,
+}
+
+const CASE_CYCLE: [CaseForm; 3] = [CaseForm::Lower, CaseForm::Title, CaseForm::Upper];
+
+/// The text cut into the pieces the case key changes and the pieces
+/// that keep their letters: the address of a link, `](...)`, and
+/// inline code with its backticks. True marks a kept piece.
+fn case_pieces(text: &str) -> Vec<(&str, bool)> {
+    let mut pieces = Vec::new();
+    let mut from = 0;
+    let mut i = 0;
+    while i < text.len() {
+        let rest = &text[i..];
+        let kept = if rest.starts_with('`') {
+            let ticks = rest.len() - rest.trim_start_matches('`').len();
+            let fence = &rest[..ticks];
+            rest[ticks..].find(fence).map(|at| ticks + at + ticks)
+        } else if rest.starts_with("](") {
+            rest.find(')').map(|at| at + 1)
+        } else {
+            None
+        };
+        match kept {
+            Some(len) => {
+                if from < i {
+                    pieces.push((&text[from..i], false));
+                }
+                pieces.push((&text[i..i + len], true));
+                i += len;
+                from = i;
+            }
+            None => i += rest.chars().next().map_or(1, char::len_utf8),
+        }
+    }
+    if from < text.len() {
+        pieces.push((&text[from..], false));
+    }
+    pieces
+}
+
+/// The text in a form. A capital on each word goes on the first letter
+/// or digit after whitespace, the punctuation before it left alone, and
+/// the rest of the word is lowered.
+fn in_case(text: &str, form: CaseForm) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut word_start = true;
+    for (piece, kept) in case_pieces(text) {
+        if kept {
+            out.push_str(piece);
+            word_start = false;
+            continue;
+        }
+        for c in piece.chars() {
+            match form {
+                CaseForm::Lower => out.extend(c.to_lowercase()),
+                CaseForm::Upper => out.extend(c.to_uppercase()),
+                CaseForm::Title if c.is_whitespace() => {
+                    word_start = true;
+                    out.push(c);
+                }
+                CaseForm::Title if word_start && c.is_alphanumeric() => {
+                    word_start = false;
+                    out.extend(c.to_uppercase());
+                }
+                CaseForm::Title if word_start => out.push(c),
+                CaseForm::Title => out.extend(c.to_lowercase()),
+            }
+        }
+    }
+    out
+}
+
+/// The text in the next form of the cycle, from the form it is in: the
+/// first form after it that reads differently, so that a single capital
+/// letter, both a capital on each word and upper case, goes to lower
+/// case. None when no letter the key changes is there.
+fn next_case(text: &str) -> Option<String> {
+    let has_letter = case_pieces(text)
+        .iter()
+        .any(|(piece, kept)| !kept && piece.chars().any(char::is_alphabetic));
+    if !has_letter {
+        return None;
+    }
+    let current = CASE_CYCLE.iter().position(|f| in_case(text, *f) == text);
+    let first = current.map_or(0, |i| i + 1);
+    (0..CASE_CYCLE.len())
+        .map(|k| in_case(text, CASE_CYCLE[(first + k) % CASE_CYCLE.len()]))
+        .find(|t| t != text)
+}
+
+/// The next case of the selection, or of the word under the caret:
+/// lower case, then a capital on each word, then upper case, then
+/// lower case again, from the form the text is in. The new text stays
+/// selected, so the key cycles on; with no selection the caret keeps
+/// its place in the word. None when nothing would change.
+pub fn case_edit(
+    source: &str,
+    selection: Option<std::ops::Range<usize>>,
+    caret: usize,
+) -> Option<MarkEdit> {
+    let selection = selection.filter(|r| !r.is_empty());
+    let had_selection = selection.is_some();
+    let range = selection.or_else(|| word_at(source, caret))?;
+    let text = next_case(&source[range.clone()])?;
+    let inner = range.start..range.start + text.len();
+    let caret = if had_selection {
+        inner.end
+    } else {
+        caret.min(inner.end)
+    };
+    Some(MarkEdit {
+        replace: range,
+        text,
+        inner,
+        caret,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2749,5 +2873,83 @@ mod tests {
         ledger.edit(splice.range, &splice.text);
         assert_eq!(ledger.current(), base, "the split heals in one step");
         assert_eq!(caret, at);
+    }
+
+    fn case_of(text: &str) -> String {
+        let edit = case_edit(text, Some(0..text.len()), text.len()).expect("a change");
+        assert_eq!(edit.replace, 0..text.len());
+        assert_eq!(
+            edit.inner,
+            0..edit.text.len(),
+            "the new text stays selected"
+        );
+        assert_eq!(
+            edit.caret,
+            edit.text.len(),
+            "the caret at the selection's end"
+        );
+        edit.text
+    }
+
+    #[test]
+    fn the_case_key_cycles_a_word() {
+        assert_eq!(case_of("hello"), "Hello");
+        assert_eq!(case_of("Hello"), "HELLO");
+        assert_eq!(case_of("HELLO"), "hello");
+        assert_eq!(case_of("hElLo"), "hello", "a mixed word goes to lower case");
+    }
+
+    #[test]
+    fn the_case_key_cycles_a_sentence() {
+        assert_eq!(case_of("the quick brown fox"), "The Quick Brown Fox");
+        assert_eq!(case_of("The Quick Brown Fox"), "THE QUICK BROWN FOX");
+        assert_eq!(case_of("THE QUICK BROWN FOX"), "the quick brown fox");
+        assert_eq!(case_of("Hello world"), "hello world");
+        assert_eq!(case_of("well-known, don't"), "Well-known, Don't");
+    }
+
+    #[test]
+    fn the_case_key_changes_each_line_of_a_selection() {
+        assert_eq!(case_of("one two\nthree four"), "One Two\nThree Four");
+        assert_eq!(
+            case_of("One Two\nthree four"),
+            "one two\nthree four",
+            "the selection as a whole decides the form"
+        );
+    }
+
+    #[test]
+    fn the_case_key_spares_links_and_inline_code() {
+        assert_eq!(
+            case_of("see [the page](https://x.y/Path) and `fooBar` now"),
+            "See [The Page](https://x.y/Path) And `fooBar` Now"
+        );
+        assert_eq!(
+            case_of("See [The Page](https://x.y/Path) And `fooBar` Now"),
+            "SEE [THE PAGE](https://x.y/Path) AND `fooBar` NOW"
+        );
+    }
+
+    #[test]
+    fn the_case_key_takes_the_word_at_the_caret() {
+        let edit = case_edit("say hello there", None, 6).expect("the word");
+        assert_eq!(edit.replace, 4..9);
+        assert_eq!(edit.text, "Hello");
+        assert_eq!(edit.inner, 4..9);
+        assert_eq!(edit.caret, 6, "the caret keeps its place in the word");
+        assert!(
+            case_edit("say  there", None, 4).is_none(),
+            "between two spaces there is no word"
+        );
+    }
+
+    #[test]
+    fn a_single_capital_letter_cycles_with_its_lower_case() {
+        assert_eq!(case_of("A"), "a");
+        assert_eq!(case_of("a"), "A");
+        assert!(
+            case_edit("123", Some(0..3), 3).is_none(),
+            "no letter to change"
+        );
     }
 }

@@ -8,6 +8,10 @@
 
 - In a book, an image alone on its line is now centered, the cover too, unless the book's stylesheet places it. Before, such an image stood at the left.
 
+#### Editor
+
+- `Ctrl+U` changes the case of the selection, or of the word under the cursor, in turn: lower case, a capital on each word, upper case. The new text stays selected, so the key can be pressed again. In a markdown file, the address of a link and inline code keep their letters.
+
 ### Fixes
 
 - The AppImage now carries the keyboard libraries of X11, and the deb and the rpm declare them. Before, on a system without `libxkbcommon-x11`, Oryx stopped at once with an error trace. On such a system, Oryx now says which package to install.

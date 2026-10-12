@@ -169,6 +169,8 @@ With nothing selected, `Ctrl+C` copies the whole line, `Ctrl+X` cuts it, and `Ct
 
 With text selected, typing a bracket or a quote wraps the selection instead of replacing it. In a markdown file, `*`, `_` and a backtick do the same.
 
+`Ctrl+U` changes the case of the selection, or of the word under the cursor, in turn: lower case, a capital on each word, upper case. The new text stays selected, so the key can be pressed again. In a markdown file, the address of a link and inline code keep their letters.
+
 `Alt+Up` and `Alt+Down` move the line or the selected lines, `Ctrl+Shift+D` duplicates them, `Ctrl+Shift+K` deletes them, and `Ctrl+/` comments them out in the style of the language. Each of these is undone with one `Ctrl+Z`.
 
 `Alt+Left` and `Alt+Right` go back and forward between the places you jumped from, in the editor too.

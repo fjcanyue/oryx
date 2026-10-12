@@ -63,6 +63,9 @@ pub enum Command {
     Italic,
     Code,
     Link,
+    /// The case of the selection or the word: lower case, a capital on
+    /// each word, upper case, in a cycle.
+    Case,
     MoveLineUp,
     MoveLineDown,
     DuplicateLines,
@@ -74,7 +77,7 @@ pub enum Command {
 impl Command {
     /// Every variant. One test checks each entry has a row in the table,
     /// another that every command a row binds is listed here.
-    pub const ALL: [Command; 65] = [
+    pub const ALL: [Command; 66] = [
         Command::OpenFile,
         Command::Reload,
         Command::Refetch,
@@ -134,6 +137,7 @@ impl Command {
         Command::Italic,
         Command::Code,
         Command::Link,
+        Command::Case,
         Command::MoveLineUp,
         Command::MoveLineDown,
         Command::DuplicateLines,
@@ -524,6 +528,12 @@ pub const SHORTCUTS: &[Shortcut] = &[
         action: "Link around the selection or the word, or an empty link; pasting an address over a selection links it too (markdown editing)",
         section: "Edit",
         bindings: &[(Binding::Ctrl("k"), Command::Link)],
+    },
+    Shortcut {
+        keys: "Ctrl+U",
+        action: "Change the case of the selection or the word, in turn: lower case, a capital on each word, upper case (editing)",
+        section: "Edit",
+        bindings: &[(Binding::Ctrl("u"), Command::Case)],
     },
     Shortcut {
         keys: "Alt+Up / Alt+Down",
@@ -1607,5 +1617,22 @@ mod tests {
         assert_eq!(platform_label("Ctrl+Shift+C", true), "Cmd+Shift+C");
         assert_eq!(platform_label("Ctrl+T", false), "Ctrl+T");
         assert_eq!(platform_label("F1", true), "F1");
+    }
+
+    #[test]
+    fn ctrl_u_changes_the_case_and_is_bound_once() {
+        assert_eq!(
+            command(&Key::Character("u".into()), true, false),
+            Some(Command::Case)
+        );
+        let rows = SHORTCUTS
+            .iter()
+            .filter(|row| {
+                row.bindings
+                    .iter()
+                    .any(|(b, _)| matches!(b, Binding::Ctrl("u")))
+            })
+            .count();
+        assert_eq!(rows, 1, "one row binds Ctrl+U");
     }
 }

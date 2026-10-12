@@ -71,6 +71,7 @@ On a keyboard layout that types another script, such as Cyrillic or Greek, or an
 | `Ctrl+Shift+D` | Duplicate the line or the selected lines |
 | `Ctrl+Shift+K` | Delete the line or the selected lines |
 | `Ctrl+/` | Comment or uncomment the line or the selected lines, in the style of the language |
+| `Ctrl+U` | Change the case of the selection or the word, in turn: lower case, a capital on each word, upper case |
 | `Tab` / `Shift+Tab` | Indent / remove an indent, on every selected line |
 
 Closing, quitting or reloading with unsaved changes asks first: `S` saves, `D` discards, `Escape` goes back to editing.
