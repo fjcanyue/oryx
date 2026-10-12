@@ -66,6 +66,9 @@ pub struct EmphasisFlags {
     pub sup: bool,
     pub mono: bool,
     pub centered: bool,
+    /// Justified text: not centered, and no word on where a single
+    /// line goes, so a lone image under it is not placed.
+    pub justified: bool,
 }
 
 /// What one selector says: traits it turns on and traits it explicitly
@@ -86,6 +89,7 @@ macro_rules! each_trait {
         $macro!(sup);
         $macro!(mono);
         $macro!(centered);
+        $macro!(justified);
     };
 }
 
@@ -133,6 +137,12 @@ impl Emphasis {
         } else {
             None
         }
+    }
+
+    /// Whether the text is justified, which clears a centering but
+    /// places nothing: a justified single line stays where it starts.
+    fn justified(&self) -> bool {
+        self.set.justified
     }
 }
 
@@ -299,10 +309,20 @@ impl EmphasisTable {
                     "center" => {
                         out.set.centered = true;
                         out.clear.centered = false;
+                        out.set.justified = false;
+                        out.clear.justified = true;
                     }
-                    "left" | "right" | "justify" | "start" | "end" => {
+                    "left" | "right" | "start" | "end" => {
                         out.set.centered = false;
                         out.clear.centered = true;
+                        out.set.justified = false;
+                        out.clear.justified = true;
+                    }
+                    "justify" => {
+                        out.set.centered = false;
+                        out.clear.centered = true;
+                        out.set.justified = true;
+                        out.clear.justified = false;
                     }
                     _ => {}
                 },
@@ -898,14 +918,17 @@ impl Walker {
             "p" | "div" if !in_table => {
                 // The stylesheet's word first, the attribute's when the
                 // stylesheet says nothing: the attribute is a presentational
-                // hint, which any stylesheet rule overrides.
-                let word = emphasis.centered().or_else(|| {
-                    match attr("align").map(|a| a.to_ascii_lowercase()) {
+                // hint, which any stylesheet rule overrides. Justify places
+                // nothing: a justified single line stays where it starts.
+                let word = match emphasis.centered() {
+                    Some(true) => Some(true),
+                    Some(false) => (!emphasis.justified()).then_some(false),
+                    None => match attr("align").map(|a| a.to_ascii_lowercase()) {
                         Some(a) if a == "center" => Some(true),
-                        Some(a) if a == "left" || a == "right" || a == "justify" => Some(false),
+                        Some(a) if a == "left" || a == "right" => Some(false),
                         _ => None,
-                    }
-                });
+                    },
+                };
                 // The content pending before this block belongs to the
                 // enclosing blocks and takes their words, not this one's.
                 self.flush();
@@ -1673,6 +1696,21 @@ mod tests {
             "the bare image before a justified paragraph"
         );
         assert!(!blocks[2].centered, "the paragraph itself");
+    }
+
+    #[test]
+    fn a_lone_image_under_a_justify_rule_is_centered() {
+        // Justify says nothing about where a single line goes, so it
+        // does not place the image; left and right do.
+        let (blocks, _, _) = walk_styled(
+            "p { text-align: justify }",
+            "<html><body><p><img src=\"a.png\"/></p><p>Text under the rule.</p></body></html>",
+        );
+        assert!(blocks[0].centered, "the stylesheet says justify");
+        assert!(!blocks[1].centered, "the text paragraph");
+        let (blocks, _, _) =
+            walk("<html><body><p align=\"justify\"><img src=\"a.png\"/></p></body></html>");
+        assert!(blocks[0].centered, "the attribute says justify");
     }
 
     #[test]
