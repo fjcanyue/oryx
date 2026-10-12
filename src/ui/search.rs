@@ -597,6 +597,30 @@ pub fn word_matches(doc: &Document, word: &str) -> Vec<Selection> {
         .collect()
 }
 
+/// The exact occurrences of a text, whole at an end where the text
+/// itself begins or ends with a word character: "the quick" is not
+/// found inside "the quickest", while a text that ends with a mark or a
+/// space may touch anything there. A word gives what `word_matches`
+/// gives.
+pub fn text_matches(doc: &Document, text: &str) -> Vec<Selection> {
+    if text.is_empty() {
+        return Vec::new();
+    }
+    let whole_start = text.chars().next().is_some_and(word_char);
+    let whole_end = text.chars().next_back().is_some_and(word_char);
+    let hay = Haystack::build(doc);
+    find_exact(&hay.text, text)
+        .into_iter()
+        .filter(|range| {
+            let before = hay.text[..range.start].chars().next_back();
+            let after = hay.text[range.end..].chars().next();
+            !(whole_start && before.is_some_and(word_char))
+                && !(whole_end && after.is_some_and(word_char))
+        })
+        .filter_map(|range| hay.selection(range))
+        .collect()
+}
+
 /// Every regex match in document order, or `None` when the pattern does
 /// not compile or exceeds the engine's backtracking limit, which the bar
 /// reports as an invalid pattern. `^` and `$` match at line starts and

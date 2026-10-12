@@ -84,6 +84,9 @@ const REHIGHLIGHT_REST: Duration = Duration::from_millis(400);
 /// How long after a touch pan the emulated mouse stays ignored, long
 /// enough to cover the click Windows synthesizes behind a lifted finger.
 const MOUSE_MUTE: Duration = Duration::from_millis(150);
+/// The pause after a keyboard selection before its other occurrences
+/// are looked for, so a held Shift+Right scans once.
+const OCCURRENCES_PAUSE: Duration = Duration::from_millis(150);
 
 /// The window icon raster produced by the build script.
 const ICON_64: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/icon_64.rgba"));
@@ -343,6 +346,7 @@ pub fn run(
         sidebar_canvas: None,
         search: None,
         occurrences: None,
+        occurrences_at: None,
         goto: None,
         pending_goto: launch_target,
         search_canvas: None,
@@ -1558,6 +1562,9 @@ struct App {
     /// The other places a double-clicked word stands at, lit while the
     /// word stays selected and the search bar is closed.
     occurrences: Option<Occurrences>,
+    /// A keyboard selection is looked up for its occurrences once the
+    /// keys have paused: when.
+    occurrences_at: Option<Instant>,
     /// The go to line field while it is open; never beside the search
     /// bar, since both stand in the same corner and take the keys.
     goto: Option<GotoState>,
@@ -4335,6 +4342,10 @@ impl App {
                 (Some(a), Some(c)) if a != c => caret::span_selection(&self.document, a, c),
                 _ => None,
             };
+            self.occurrences_at = self
+                .selection
+                .is_some()
+                .then(|| Instant::now() + OCCURRENCES_PAUSE);
             self.band = None;
             self.request_redraw();
             return;
@@ -5481,14 +5492,38 @@ impl App {
         true
     }
 
+    /// The other occurrences of a selection that settled: a drag's or a
+    /// Shift+click's release, or a keyboard selection after its pause.
+    /// A selection already looked up keeps its set, and the search bar's
+    /// own matches rule while it is open.
+    fn light_selection(&mut self) {
+        let Some(sel) = self.selection.filter(|s| !s.is_empty()) else {
+            return;
+        };
+        if self.search.is_some() || self.occurrences.as_ref().is_some_and(|f| f.word == sel) {
+            return;
+        }
+        self.occurrences = occurrences::find(&self.document, sel);
+        if self.occurrences.is_some() {
+            self.band = None;
+            self.request_redraw();
+        }
+    }
+
     /// Ends a selection drag. A drag that never left its starting caret is
     /// a click and follows the link under the cursor instead.
     fn end_selection(&mut self) {
+        // A double or a triple click dropped the anchor at its press and
+        // found its own occurrences; a drag or a Shift+click kept it.
+        let dragged = self.sel_anchor.is_some();
         self.sel_anchor = None;
         if self.selection.is_some_and(|s| !s.is_empty()) {
             // The drag's release point is where editing continues.
             if self.mode == edit::Mode::Edit {
                 self.caret_to_selection_edge();
+            }
+            if dragged {
+                self.light_selection();
             }
             if let Some(gfx) = self.gfx.as_ref() {
                 gfx.window.request_redraw();
@@ -8685,6 +8720,14 @@ impl ApplicationHandler for App {
             if Instant::now() >= at {
                 self.rehighlight_at = None;
                 self.rehighlight_edited();
+            } else {
+                wake.by(at);
+            }
+        }
+        if let Some(at) = self.occurrences_at {
+            if Instant::now() >= at {
+                self.occurrences_at = None;
+                self.light_selection();
             } else {
                 wake.by(at);
             }

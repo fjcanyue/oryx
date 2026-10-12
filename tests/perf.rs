@@ -1090,6 +1090,9 @@ fn occurrences_measured() {
             "occurrences of {word:?} at 8 MB, {name}: whole words {word_ms:.2}ms ({words}), a plain search {plain_ms:.2}ms ({plain})"
         );
     }
+    let phrase = "first item with some text";
+    let (phrase_ms, phrases) = best(&|| search::text_matches(&page, phrase).len());
+    println!("occurrences of {phrase:?} at 8 MB, markdown page: the text, whole at its ends {phrase_ms:.2}ms ({phrases})");
 }
 
 /// What bringing a big picture in costs on the window's thread: a

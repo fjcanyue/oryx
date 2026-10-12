@@ -1,9 +1,10 @@
-//! The other occurrences of a double-clicked word, lit in the search's
-//! match color while the word stays selected. The set is found once at
-//! the double click and lives exactly as long as that selection.
+//! The other occurrences of the selected text, lit in the search's
+//! match color while the selection stands: a double-clicked word, or a
+//! text of several words on one line, selected by a drag, a Shift+click
+//! or the keyboard. The set is found once per selection, when it has
+//! settled, and lives exactly as long as that selection.
 
 use crate::doc::model::Document;
-use crate::edit::caret::word_char;
 use crate::ui::search;
 use crate::ui::selection::{self, Selection};
 
@@ -21,15 +22,23 @@ pub struct Occurrences {
     pub stale: bool,
 }
 
-/// Whether a selected text is a word worth lighting: two characters or
-/// more, every one a word character. A single letter would light half
-/// the page, and a gap or a punctuation mark is not a word.
+/// The length a selection may have and still light, in characters:
+/// VS Code's default limit.
+const LONGEST: usize = 200;
+
+/// Whether a selected text lights its other occurrences: two characters
+/// or more, no line break, not whitespace alone, at most `LONGEST`
+/// characters. A single character and a selection across lines light
+/// nothing, as in VS Code and Zed.
 pub fn lights(text: &str) -> bool {
-    text.chars().nth(1).is_some() && text.chars().all(word_char)
+    let chars = text.chars().count();
+    (2..=LONGEST).contains(&chars) && !text.contains('\n') && !text.chars().all(char::is_whitespace)
 }
 
-/// The occurrences of a double-clicked word, or None when the selection
-/// is not a word or the word stands nowhere else.
+/// The other occurrences of a selection, a word or a text on one line,
+/// or None when its text does not light or stands nowhere else. The
+/// match is exact, whole at an end where the text begins or ends with a
+/// word character (`search::text_matches`).
 pub fn find(doc: &Document, word: Selection) -> Option<Occurrences> {
     let text = selection::plain_text(&word, doc);
     if !lights(&text) {
@@ -37,8 +46,8 @@ pub fn find(doc: &Document, word: Selection) -> Option<Occurrences> {
     }
     let (start, end) = word.ordered();
     // A word styled in two spans is addressed differently by the click
-    // and by the search, so the clicked one is told by overlap.
-    let matches: Vec<Selection> = search::word_matches(doc, &text)
+    // and by the search, so the selected one is told by overlap.
+    let matches: Vec<Selection> = search::text_matches(doc, &text)
         .into_iter()
         .filter(|m| {
             let (a, b) = m.ordered();
@@ -66,7 +75,7 @@ mod tests {
     }
 
     #[test]
-    fn a_word_lights_and_a_letter_a_gap_or_a_mark_does_not() {
+    fn a_word_lights_and_a_letter_or_a_gap_does_not() {
         assert!(lights("panel"));
         assert!(lights("snake_case"));
         assert!(lights("x2"));
@@ -74,7 +83,6 @@ mod tests {
         assert!(!lights("a"), "a single character");
         assert!(!lights("é"), "one character of two bytes");
         assert!(!lights("   "));
-        assert!(!lights("--"));
         assert!(!lights(""));
     }
 
@@ -94,6 +102,74 @@ mod tests {
         assert!(!found.matches.contains(&clicked));
         assert_eq!(found.matches[0].start.block, 0);
         assert!(found.stale, "the rectangles wait for the first frame");
+    }
+
+    #[test]
+    fn a_selection_of_several_words_lights_and_a_line_break_or_spaces_do_not() {
+        assert!(lights("the quick brown"));
+        assert!(lights("--"), "marks light too, as in VS Code and Zed");
+        assert!(lights("a."), "two characters");
+        assert!(!lights("the\nquick"), "a line break");
+        assert!(!lights(" \t"), "whitespace alone");
+        assert!(lights(&"x".repeat(200)), "200 characters, the limit");
+        assert!(!lights(&"x".repeat(201)), "over the limit");
+    }
+
+    #[test]
+    fn a_sentence_lights_its_other_occurrences_whole_at_its_ends() {
+        let doc = markdown::parse(
+            "the quick brown fox and the quick brown dog, but the quickest cat and the quick brown.\n\nAnother the quick brown here.",
+        );
+        let phrase = |end: usize| Selection {
+            start: ModelPos {
+                block: 0,
+                span: 0,
+                byte: 0,
+            },
+            end: ModelPos {
+                block: 0,
+                span: 0,
+                byte: end,
+            },
+        };
+        let sel = phrase(15);
+        assert_eq!(selection::plain_text(&sel, &doc), "the quick brown");
+        let found = find(&doc, sel).expect("three other places");
+        assert_eq!(found.word, sel);
+        let texts: Vec<String> = found
+            .matches
+            .iter()
+            .map(|m| selection::plain_text(m, &doc))
+            .collect();
+        assert_eq!(
+            texts,
+            vec!["the quick brown", "the quick brown", "the quick brown"]
+        );
+        assert!(
+            !found.matches.contains(&sel),
+            "the selection itself is left out"
+        );
+        let found = find(&doc, phrase(9)).expect("three other places");
+        assert_eq!(found.matches.len(), 3, "\"the quickest\" is left out");
+    }
+
+    #[test]
+    fn a_selection_across_paragraphs_lights_nothing() {
+        let doc = markdown::parse("one two\n\none two");
+        let sel = Selection {
+            start: ModelPos {
+                block: 0,
+                span: 0,
+                byte: 4,
+            },
+            end: ModelPos {
+                block: 1,
+                span: 0,
+                byte: 3,
+            },
+        };
+        assert!(selection::plain_text(&sel, &doc).contains('\n'));
+        assert!(find(&doc, sel).is_none());
     }
 
     #[test]
