@@ -28,11 +28,13 @@ grep-searcher = "0.1.17"
 html5ever = "0.39"
 ignore = "0.4.33"
 markup5ever_rcdom = "0.39"
-# SVG output only: the default features pull the `mmdc`-style CLI (clap)
-# and a PNG rasterizer (resvg/usvg) Oryx already has its own copy of.
-# The diagram renderer: parity-oriented Mermaid, SVG out. `render` only
-# — `raster` would drag a second resvg/usvg stack in beside Oryx's own.
-merman = { version = "=0.7.0", default-features = false, features = ["render"] }
+# The diagram renderer: parity-oriented Mermaid, SVG out. `complete-svg`
+# keeps the SVG path on the Cytoscape layout engine and math labels; the
+# defaults would add the ELK layered engine, whose translated Eclipse ELK
+# sources are EPL-2.0 — incompatible with Oryx's GPL-3.0-only binary
+# distribution — and the binary-export features would drag a second
+# resvg/usvg stack in beside Oryx's own.
+merman = { version = "=0.8.0", default-features = false, features = ["all-diagrams", "complete-svg"] }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "rayon"] }
 miniz_oxide = "0.8"
 noad = { path = "noad" }
