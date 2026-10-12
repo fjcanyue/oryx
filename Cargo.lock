@@ -2362,6 +2362,7 @@ dependencies = [
  "toml",
  "ttf-parser",
  "unicode-linebreak",
+ "unicode-properties",
  "ureq",
  "wayland-backend",
  "wayland-client",

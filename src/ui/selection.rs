@@ -412,11 +412,11 @@ pub fn run_interval(run: &TextRun) -> Option<(ModelPos, ModelPos)> {
 /// The model position nearest to a point in document coordinates.
 /// Snaps vertically to the closest line and horizontally to the closest
 /// character boundary. None only when nothing selectable is placed.
-/// Character classes word expansion runs over: letters, digits and
-/// underscores make words, whitespace makes gaps, anything else stands
-/// alone.
+/// Character classes word expansion runs over: the characters of a
+/// word (`caret::word_char`) make words, whitespace makes gaps,
+/// anything else stands alone.
 fn word_class(c: char) -> u8 {
-    if c.is_alphanumeric() || c == '_' {
+    if crate::edit::caret::word_char(c) {
         0
     } else if c.is_whitespace() {
         1

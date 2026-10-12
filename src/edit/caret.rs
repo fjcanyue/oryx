@@ -37,8 +37,11 @@ pub enum Motion {
     WordRight,
 }
 
+/// A character of a word: a letter, a digit, an underscore, or a
+/// combining mark, which belongs to the letter before it.
 pub(crate) fn word_char(c: char) -> bool {
-    c.is_alphanumeric() || c == '_'
+    use unicode_properties::{GeneralCategoryGroup, UnicodeGeneralCategory};
+    c.is_alphanumeric() || c == '_' || c.general_category_group() == GeneralCategoryGroup::Mark
 }
 
 /// The last position a caret may stand on: the text's end, or the byte
@@ -646,9 +649,13 @@ fn x_of(
     text_run.width
 }
 
-/// The character boundary nearest an absolute x on a line. Past the
-/// last run's visible end the answer is the line's end, which extends
-/// over the trailing whitespace layout trimmed, the place End reaches.
+/// The character boundary nearest an absolute x on a line. Beside the
+/// line, and in a gap between runs, the answer is the edge of the
+/// nearest run on that side: a run reading left to right starts at its
+/// left edge and ends at its right, a run reading right to left the
+/// reverse. The line's end stands for the end of the run that holds
+/// the line's last bytes: it extends over the trailing whitespace
+/// layout trimmed, the place End reaches.
 fn offset_at_x(
     fonts: &mut FontStore,
     lay: &LayoutDoc,
@@ -657,20 +664,47 @@ fn offset_at_x(
     x: f32,
 ) -> usize {
     let Some(run) = line.runs.iter().find(|r| x < r.x + r.width) else {
-        return if line.runs.is_empty() {
-            line.start
+        let Some(last) = line.runs.last() else {
+            return line.start;
+        };
+        return if run_reads_rtl(fonts, lay, doc, last) {
+            last.start
         } else {
-            line.end
+            run_end(line, last)
         };
     };
     if x <= run.x {
-        return run.start;
+        return if run_reads_rtl(fonts, lay, doc, run) {
+            run_end(line, run)
+        } else {
+            run.start
+        };
     }
     let text_run = &lay.runs[run.index];
     let text = lay.run_text(doc, text_run);
     let family = lay.run_family(text_run);
     let ch = selection::char_index_at(fonts, text_run, text, family, x - run.x);
     run.start + selection::byte_of_char(text, ch)
+}
+
+/// The byte after a run's last: the line's end for the run that holds
+/// the line's last bytes, the run's own end for the others.
+fn run_end(line: &Line, run: &MappedRun) -> usize {
+    let end = run.start + run.len;
+    if line.runs.iter().all(|r| r.start + r.len <= end) {
+        line.end
+    } else {
+        end
+    }
+}
+
+/// Whether a run's text reads right to left, from its shaping.
+fn run_reads_rtl(fonts: &mut FontStore, lay: &LayoutDoc, doc: &Document, run: &MappedRun) -> bool {
+    let text_run = &lay.runs[run.index];
+    let text = lay.run_text(doc, text_run);
+    let family = lay.run_family(text_run);
+    let buffer = selection::shape_run(fonts, text_run, text, family);
+    buffer.layout_runs().next().is_some_and(|r| r.rtl)
 }
 
 impl Caret {
@@ -2668,5 +2702,35 @@ mod tests {
         assert_eq!(c.offset, 0, "Home from the middle of the line");
         let c = step(Caret::at(9), Motion::End, &l, &doc, &mut fonts);
         assert_eq!(c.offset, end, "End from the middle of the line");
+    }
+
+    #[test]
+    fn a_click_beside_a_right_to_left_line_lands_at_its_ends() {
+        // The leftmost run holds the last words, read right to left, so
+        // its left edge is the line's end; the rightmost run holds the
+        // first word, so its right edge is the line's start.
+        let doc = text_doc("كتبت 25 صفحة و abc def هنا\nسطر ثان\n");
+        let (l, mut fonts) = lay_of(&doc);
+        let end = doc.source.find('\n').unwrap();
+        let row = |l: &LayoutDoc, doc: &Document| {
+            l.runs
+                .iter()
+                .find(|r| l.run_text(doc, r).contains("abc"))
+                .expect("the Latin run")
+                .y
+                + 1.0
+        };
+        let y = row(&l, &doc);
+        let c = place(&l, &doc, &mut fonts, -10.0, y).unwrap();
+        assert_eq!(c.offset, end, "left of the line");
+        let c = place(&l, &doc, &mut fonts, 10_000.0, y).unwrap();
+        assert_eq!(c.offset, 0, "right of the line");
+        let doc = text_doc("abc def\nmore\n");
+        let (l, mut fonts) = lay_of(&doc);
+        let y = row(&l, &doc);
+        let c = place(&l, &doc, &mut fonts, -10.0, y).unwrap();
+        assert_eq!(c.offset, 0, "left of a left-to-right line");
+        let c = place(&l, &doc, &mut fonts, 10_000.0, y).unwrap();
+        assert_eq!(c.offset, 7, "right of a left-to-right line");
     }
 }

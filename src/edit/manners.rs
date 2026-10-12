@@ -806,9 +806,10 @@ pub fn wrap_pair(typed: &str, markdown: bool) -> Option<(&'static str, &'static 
 }
 
 /// The word the caret stands in or at an end of: a run of letters,
-/// digits and underscores. None between two spaces or in an empty file.
+/// digits, underscores and combining marks (`caret::word_char`). None
+/// between two spaces or in an empty file.
 fn word_at(source: &str, at: usize) -> Option<std::ops::Range<usize>> {
-    let is_word = |c: char| c.is_alphanumeric() || c == '_';
+    let is_word = super::caret::word_char;
     let start = source[..at]
         .char_indices()
         .rev()
@@ -1441,106 +1442,342 @@ enum CaseForm {
 
 const CASE_CYCLE: [CaseForm; 3] = [CaseForm::Lower, CaseForm::Title, CaseForm::Upper];
 
-/// The text cut into the pieces the case key changes and the pieces
-/// that keep their letters: the address of a link, `](...)`, and
-/// inline code with its backticks. True marks a kept piece.
-fn case_pieces(text: &str) -> Vec<(&str, bool)> {
-    let mut pieces = Vec::new();
-    let mut from = 0;
-    let mut i = 0;
-    while i < text.len() {
-        let rest = &text[i..];
-        let kept = if rest.starts_with('`') {
-            let ticks = rest.len() - rest.trim_start_matches('`').len();
-            let fence = &rest[..ticks];
-            rest[ticks..].find(fence).map(|at| ticks + at + ticks)
-        } else if rest.starts_with("](") {
-            rest.find(')').map(|at| at + 1)
-        } else {
-            None
-        };
-        match kept {
-            Some(len) => {
-                if from < i {
-                    pieces.push((&text[from..i], false));
-                }
-                pieces.push((&text[i..i + len], true));
-                i += len;
-                from = i;
+/// The stretches of a text between its blank lines, each with the line
+/// breaks it holds.
+fn paragraphs(text: &str) -> Vec<std::ops::Range<usize>> {
+    let mut out = Vec::new();
+    let mut start = None;
+    let mut at = 0;
+    for line in text.split_inclusive('\n') {
+        match (line.trim().is_empty(), start) {
+            (true, Some(s)) => {
+                out.push(s..at);
+                start = None;
             }
-            None => i += rest.chars().next().map_or(1, char::len_utf8),
+            (false, None) => start = Some(at),
+            _ => {}
+        }
+        at += line.len();
+    }
+    if let Some(s) = start {
+        out.push(s..text.len());
+    }
+    out
+}
+
+/// The stretch from the start of the paragraph that holds a range's
+/// start to the end of the one that holds its end.
+fn paragraphs_around(source: &str, range: &std::ops::Range<usize>) -> std::ops::Range<usize> {
+    let mut start = source[..range.start].rfind('\n').map_or(0, |i| i + 1);
+    while start > 0 {
+        let line_end = start - 1;
+        let line_start = source[..line_end].rfind('\n').map_or(0, |i| i + 1);
+        if source[line_start..line_end].trim().is_empty() {
+            break;
+        }
+        start = line_start;
+    }
+    let mut end = source[range.end..]
+        .find('\n')
+        .map_or(source.len(), |i| range.end + i + 1);
+    while end < source.len() {
+        let line_end = source[end..].find('\n').map_or(source.len(), |i| end + i);
+        if source[end..line_end].trim().is_empty() {
+            break;
+        }
+        end = (line_end + 1).min(source.len());
+    }
+    start..end
+}
+
+/// The ranges of a markdown text that keep their letters under the case
+/// key: inline code with its backticks, the address of a link with its
+/// parentheses, an autolink with its angle brackets, and the address of
+/// a reference definition. Inline code closes with a run of backticks
+/// of the same length in the same paragraph, as the markdown rules say,
+/// so a lone backtick is text, and an escaped backtick outside code is
+/// text too. An address runs to the parenthesis that balances its own,
+/// on its line; an autolink holds no whitespace. A length of backtick
+/// run found unclosed is not searched again in its paragraph, so a
+/// press costs about the text's length.
+fn kept_pieces(text: &str) -> Vec<std::ops::Range<usize>> {
+    let mut kept = Vec::new();
+    for para in paragraphs(text) {
+        let mut unclosed: Vec<usize> = Vec::new();
+        let mut line_start = true;
+        let mut i = para.start;
+        while i < para.end {
+            let rest = &text[i..para.end];
+            if line_start {
+                if let Some(address) = definition_address(rest) {
+                    kept.push(i + address.start..i + address.end);
+                    i += address.end;
+                    line_start = false;
+                    continue;
+                }
+            }
+            line_start = false;
+            let c = rest.chars().next().expect("inside the text");
+            if c == '\n' {
+                line_start = true;
+                i += 1;
+            } else if c == '\\' {
+                // An escaped character is text, a backtick among them.
+                i += 1 + rest[1..].chars().next().map_or(0, char::len_utf8);
+            } else if c == '`' {
+                let ticks = rest.len() - rest.trim_start_matches('`').len();
+                let close = if unclosed.contains(&ticks) {
+                    None
+                } else {
+                    closing_ticks(&rest[ticks..], ticks)
+                };
+                match close {
+                    Some(at) => {
+                        let len = ticks + at + ticks;
+                        kept.push(i..i + len);
+                        i += len;
+                    }
+                    None => {
+                        if !unclosed.contains(&ticks) {
+                            unclosed.push(ticks);
+                        }
+                        i += ticks;
+                    }
+                }
+            } else if let Some(after) = rest.strip_prefix("](") {
+                match address_end(after) {
+                    Some(len) => {
+                        kept.push(i..i + 2 + len);
+                        i += 2 + len;
+                    }
+                    None => i += 2,
+                }
+            } else if c == '<' {
+                match autolink_end(&rest[1..]) {
+                    Some(len) => {
+                        kept.push(i..i + 1 + len);
+                        i += 1 + len;
+                    }
+                    None => i += 1,
+                }
+            } else {
+                i += c.len_utf8();
+            }
         }
     }
-    if from < text.len() {
-        pieces.push((&text[from..], false));
+    kept
+}
+
+/// The offset in `after` of a run of exactly `ticks` backticks, the
+/// closer of a code span.
+fn closing_ticks(after: &str, ticks: usize) -> Option<usize> {
+    let mut from = 0;
+    while let Some(at) = after[from..].find('`') {
+        let run_start = from + at;
+        let run = after[run_start..].len() - after[run_start..].trim_start_matches('`').len();
+        if run == ticks {
+            return Some(run_start);
+        }
+        from = run_start + run;
+    }
+    None
+}
+
+/// The length of a link's address from after its `](` to its closing
+/// parenthesis, the parentheses inside it balanced, on its line. None
+/// when the line ends first.
+fn address_end(after: &str) -> Option<usize> {
+    let mut depth = 1;
+    let mut chars = after.char_indices();
+    while let Some((i, c)) = chars.next() {
+        match c {
+            '\n' => return None,
+            '\\' => {
+                chars.next();
+            }
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(i + 1);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// The length of an autolink from after its `<` to its `>`: an address
+/// with a scheme or an at sign and no whitespace. None otherwise.
+fn autolink_end(after: &str) -> Option<usize> {
+    let end = after.find('>')?;
+    let inner = &after[..end];
+    let plain = !inner.is_empty() && !inner.contains(|c: char| c.is_whitespace() || c == '<');
+    let scheme = inner.split_once(':').is_some_and(|(s, _)| {
+        s.len() >= 2
+            && s.starts_with(|c: char| c.is_ascii_alphabetic())
+            && s.chars()
+                .all(|c| c.is_ascii_alphanumeric() || "+.-".contains(c))
+    });
+    (plain && (scheme || inner.contains('@'))).then_some(end + 1)
+}
+
+/// The address of a reference definition at the start of a line,
+/// `[label]: address`, as its range in the line. None for any other
+/// line.
+fn definition_address(line: &str) -> Option<std::ops::Range<usize>> {
+    let indent = line.len() - line.trim_start_matches(' ').len();
+    if indent > 3 || !line[indent..].starts_with('[') {
+        return None;
+    }
+    let label_end = indent + 1 + line[indent + 1..].find([']', '\n'])?;
+    if label_end == indent + 1 || !line[label_end..].starts_with("]:") {
+        return None;
+    }
+    let after = label_end + 2;
+    let start = after + line[after..].len() - line[after..].trim_start_matches([' ', '\t']).len();
+    let len = line[start..]
+        .find(char::is_whitespace)
+        .unwrap_or(line.len() - start);
+    (len > 0).then(|| start..start + len)
+}
+
+/// The text of a range cut into the pieces the case key changes and
+/// the pieces that keep their letters, from the kept ranges of the
+/// source. True marks a kept piece.
+fn pieces_of<'s>(
+    source: &'s str,
+    range: &std::ops::Range<usize>,
+    kept: &[std::ops::Range<usize>],
+) -> Vec<(&'s str, bool)> {
+    let mut pieces = Vec::new();
+    let mut at = range.start;
+    for k in kept {
+        if k.end <= at {
+            continue;
+        }
+        if k.start >= range.end {
+            break;
+        }
+        let (from, to) = (k.start.max(at), k.end.min(range.end));
+        if at < from {
+            pieces.push((&source[at..from], false));
+        }
+        pieces.push((&source[from..to], true));
+        at = to;
+    }
+    if at < range.end {
+        pieces.push((&source[at..range.end], false));
     }
     pieces
 }
 
-/// The text in a form. A capital on each word goes on the first letter
-/// or digit after whitespace, the punctuation before it left alone, and
-/// the rest of the word is lowered.
-fn in_case(text: &str, form: CaseForm) -> String {
-    let mut out = String::with_capacity(text.len());
+/// The pieces in a form, the kept ones as they are. A capital on each
+/// word goes on the first letter or digit after whitespace, the
+/// punctuation before it left alone, and the rest of the word is
+/// lowered. The letters change as strings, so a Greek sigma at the end
+/// of a word takes its final form.
+fn in_case(pieces: &[(&str, bool)], form: CaseForm) -> String {
+    let mut out = String::new();
     let mut word_start = true;
-    for (piece, kept) in case_pieces(text) {
-        if kept {
+    for (piece, kept) in pieces {
+        if *kept {
             out.push_str(piece);
             word_start = false;
             continue;
         }
-        for c in piece.chars() {
-            match form {
-                CaseForm::Lower => out.extend(c.to_lowercase()),
-                CaseForm::Upper => out.extend(c.to_uppercase()),
-                CaseForm::Title if c.is_whitespace() => {
-                    word_start = true;
-                    out.push(c);
-                }
-                CaseForm::Title if word_start && c.is_alphanumeric() => {
-                    word_start = false;
-                    out.extend(c.to_uppercase());
-                }
-                CaseForm::Title if word_start => out.push(c),
-                CaseForm::Title => out.extend(c.to_lowercase()),
-            }
+        match form {
+            CaseForm::Lower => out.push_str(&piece.to_lowercase()),
+            CaseForm::Upper => out.push_str(&piece.to_uppercase()),
+            CaseForm::Title => title_case(piece, &mut word_start, &mut out),
         }
     }
     out
 }
 
-/// The text in the next form of the cycle, from the form it is in: the
-/// first form after it that reads differently, so that a single capital
-/// letter, both a capital on each word and upper case, goes to lower
-/// case. None when no letter the key changes is there.
-fn next_case(text: &str) -> Option<String> {
-    let has_letter = case_pieces(text)
+/// A text with a capital on each word, appended to `out`. `word_start`
+/// says whether the text begins a word, and says at the end whether a
+/// word begins after it.
+fn title_case(text: &str, word_start: &mut bool, out: &mut String) {
+    let mut rest = text;
+    while !rest.is_empty() {
+        let blank = rest.len() - rest.trim_start().len();
+        if blank > 0 {
+            out.push_str(&rest[..blank]);
+            *word_start = true;
+            rest = &rest[blank..];
+            continue;
+        }
+        let len = rest.find(char::is_whitespace).unwrap_or(rest.len());
+        let word = &rest[..len];
+        let first = (*word_start)
+            .then(|| word.char_indices().find(|(_, c)| c.is_alphanumeric()))
+            .flatten();
+        match first {
+            Some((i, c)) => {
+                out.push_str(&word[..i]);
+                out.extend(c.to_uppercase());
+                out.push_str(&word[i + c.len_utf8()..].to_lowercase());
+                *word_start = false;
+            }
+            None if *word_start => out.push_str(word),
+            None => out.push_str(&word.to_lowercase()),
+        }
+        rest = &rest[len..];
+    }
+}
+
+/// The pieces in the next form of the cycle, from the form they are in:
+/// the first form after it that reads differently, so that a single
+/// capital letter, both a capital on each word and upper case, goes to
+/// lower case. None when no letter the key changes is there.
+fn next_case(pieces: &[(&str, bool)]) -> Option<String> {
+    let has_letter = pieces
         .iter()
         .any(|(piece, kept)| !kept && piece.chars().any(char::is_alphabetic));
     if !has_letter {
         return None;
     }
-    let current = CASE_CYCLE.iter().position(|f| in_case(text, *f) == text);
+    let text: String = pieces.iter().map(|(piece, _)| *piece).collect();
+    let current = CASE_CYCLE.iter().position(|f| in_case(pieces, *f) == text);
     let first = current.map_or(0, |i| i + 1);
     (0..CASE_CYCLE.len())
-        .map(|k| in_case(text, CASE_CYCLE[(first + k) % CASE_CYCLE.len()]))
-        .find(|t| t != text)
+        .map(|k| in_case(pieces, CASE_CYCLE[(first + k) % CASE_CYCLE.len()]))
+        .find(|t| *t != text)
 }
 
 /// The next case of the selection, or of the word under the caret:
 /// lower case, then a capital on each word, then upper case, then
 /// lower case again, from the form the text is in. The new text stays
 /// selected, so the key cycles on; with no selection the caret keeps
-/// its place in the word. None when nothing would change.
+/// its place in the word. In a markdown file the pieces that keep
+/// their letters (`kept_pieces`) are found on the paragraphs the text
+/// touches, and the word under the caret inside one is not the key's
+/// to change. None when nothing would change.
 pub fn case_edit(
     source: &str,
     selection: Option<std::ops::Range<usize>>,
     caret: usize,
+    markdown: bool,
 ) -> Option<MarkEdit> {
     let selection = selection.filter(|r| !r.is_empty());
     let had_selection = selection.is_some();
     let range = selection.or_else(|| word_at(source, caret))?;
-    let text = next_case(&source[range.clone()])?;
+    let kept = if markdown {
+        let around = paragraphs_around(source, &range);
+        kept_pieces(&source[around.clone()])
+            .into_iter()
+            .map(|k| around.start + k.start..around.start + k.end)
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let pieces = pieces_of(source, &range, &kept);
+    if !had_selection && pieces.iter().any(|(_, kept)| *kept) {
+        return None;
+    }
+    let text = next_case(&pieces)?;
     let inner = range.start..range.start + text.len();
     let caret = if had_selection {
         inner.end
@@ -2876,7 +3113,7 @@ mod tests {
     }
 
     fn case_of(text: &str) -> String {
-        let edit = case_edit(text, Some(0..text.len()), text.len()).expect("a change");
+        let edit = case_edit(text, Some(0..text.len()), text.len(), true).expect("a change");
         assert_eq!(edit.replace, 0..text.len());
         assert_eq!(
             edit.inner,
@@ -2932,13 +3169,13 @@ mod tests {
 
     #[test]
     fn the_case_key_takes_the_word_at_the_caret() {
-        let edit = case_edit("say hello there", None, 6).expect("the word");
+        let edit = case_edit("say hello there", None, 6, true).expect("the word");
         assert_eq!(edit.replace, 4..9);
         assert_eq!(edit.text, "Hello");
         assert_eq!(edit.inner, 4..9);
         assert_eq!(edit.caret, 6, "the caret keeps its place in the word");
         assert!(
-            case_edit("say  there", None, 4).is_none(),
+            case_edit("say  there", None, 4, true).is_none(),
             "between two spaces there is no word"
         );
     }
@@ -2948,8 +3185,104 @@ mod tests {
         assert_eq!(case_of("A"), "a");
         assert_eq!(case_of("a"), "A");
         assert!(
-            case_edit("123", Some(0..3), 3).is_none(),
+            case_edit("123", Some(0..3), 3, true).is_none(),
             "no letter to change"
         );
+    }
+
+    #[test]
+    fn the_caret_inside_inline_code_or_an_address_changes_nothing() {
+        assert!(
+            case_edit("in `fooBar` code", None, 7, true).is_none(),
+            "the word at the caret is inline code"
+        );
+        assert!(
+            case_edit("a [link](https://x.y/Path) here", None, 23, true).is_none(),
+            "the word at the caret is in the address"
+        );
+        let edit =
+            case_edit("in `fooBar` code", None, 7, false).expect("a code file spares nothing");
+        assert_eq!(edit.text, "foobar");
+    }
+
+    #[test]
+    fn an_autolink_and_a_reference_definition_keep_their_address() {
+        assert_eq!(
+            case_of("see <https://x.y/Path> now"),
+            "See <https://x.y/Path> Now"
+        );
+        assert_eq!(
+            case_of("[Ref]: https://x.y/Path"),
+            "[REF]: https://x.y/Path"
+        );
+    }
+
+    #[test]
+    fn an_address_with_balanced_parentheses_is_kept_whole() {
+        assert_eq!(
+            case_of("a [w](https://en.wikipedia.org/wiki/Foo_(Bar)_Baz) b"),
+            "A [W](https://en.wikipedia.org/wiki/Foo_(Bar)_Baz) B"
+        );
+    }
+
+    #[test]
+    fn a_selection_begun_inside_the_address_spares_it() {
+        let source = "see [x](https://x.y/Path) then\n";
+        let from = source.find("x.y").unwrap();
+        let to = source.len() - 1;
+        let edit = case_edit(source, Some(from..to), to, true).expect("a change");
+        assert_eq!(edit.text, "x.y/Path) Then");
+    }
+
+    #[test]
+    fn a_backtick_pairs_in_its_paragraph_only() {
+        assert_eq!(
+            case_of("one `Two\n\nThree` Four"),
+            "one `two\n\nthree` four",
+            "a lone backtick in each paragraph is no code"
+        );
+        assert_eq!(
+            case_of("esc \\`not Code\\` Text"),
+            "esc \\`not code\\` text",
+            "an escaped backtick is no mark"
+        );
+        assert_eq!(
+            case_of("fn Main() {}\n```\nSome `x` Text"),
+            "fn main() {}\n```\nsome `x` text",
+            "a fence with no closer in the paragraph is no code, the span after it is"
+        );
+    }
+
+    #[test]
+    fn a_code_file_spares_nothing() {
+        let source = "let s = \"`\"; let X = 1; let t = \"`\";";
+        let edit = case_edit(source, Some(0..source.len()), source.len(), false).expect("a change");
+        assert_eq!(edit.text, "let s = \"`\"; let x = 1; let t = \"`\";");
+    }
+
+    #[test]
+    fn the_final_sigma_and_a_decomposed_accent() {
+        assert_eq!(case_of("ΟΔΟΣ ΚΑΙ ΣΟΦΟΣ"), "οδος και σοφος");
+        assert_eq!(case_of("οδος και σοφος"), "Οδος Και Σοφος");
+        let source = "an e\u{301}cole here";
+        let at = source.find("le").unwrap();
+        let edit = case_edit(source, None, at, true).expect("the word");
+        assert_eq!(
+            edit.replace,
+            3..3 + "e\u{301}cole".len(),
+            "the accent is part of the word"
+        );
+        assert_eq!(edit.text, "E\u{301}cole");
+    }
+
+    #[test]
+    fn an_unclosed_address_costs_its_line_only() {
+        let source = "see [x](y and more text\n".repeat(40_000);
+        let start = std::time::Instant::now();
+        let edit = case_edit(&source, Some(0..source.len()), source.len(), true).expect("a change");
+        assert!(edit.text.starts_with("See [X](y And More Text\n"));
+        let took = start.elapsed();
+        println!("the case key on 960 KB of unclosed links: {took:?}");
+        assert!(took < std::time::Duration::from_secs(2), "{took:?}");
     }
 }

@@ -328,6 +328,7 @@ pub fn run(
         tooltip: None,
         sel_anchor: None,
         left_held: false,
+        sel_grabbed: false,
         last_click: None,
         selection: None,
         clipboard: None,
@@ -524,13 +525,14 @@ fn outline_current(
     entry
 }
 
-/// Whether a selection drag is live: the left button held since the
-/// press that grabbed the anchor. A selection an editing key, a
-/// Shift+click's release or the keyboard leaves standing keeps its
-/// anchor for the highlight fold, and is not a drag: the pointer's
-/// move leaves it alone, and no background work waits on it.
-fn selection_drag(left_held: bool, anchored: bool) -> bool {
-    left_held && anchored
+/// Whether a selection drag is live: the left button held since a press
+/// that grabbed the anchor. A selection an editing key, a Shift+click's
+/// release or the keyboard leaves standing keeps its anchor for the
+/// highlight fold, and is not a drag: the pointer's move leaves it
+/// alone, and no background work waits on it. A press that grabbed
+/// nothing, on a row of the sidebar or a button, is no drag either.
+fn selection_drag(left_held: bool, grabbed: bool) -> bool {
+    left_held && grabbed
 }
 
 /// Whether the view shows the end of the page: the scroll stops where
@@ -1516,6 +1518,10 @@ struct App {
     sel_anchor: Option<ModelPos>,
     /// The left button is held, from its press to its release.
     left_held: bool,
+    /// The press that is held grabbed the anchor: a drag or a Shift+click
+    /// is live while the button stays down (`selection_drag`). An
+    /// editing key sets the anchor and not this mark.
+    sel_grabbed: bool,
     /// The last document-area press, for the double and triple click
     /// chain: when, where, and how many clicks it had reached.
     last_click: Option<(Instant, f32, f32, u8)>,
@@ -2888,12 +2894,15 @@ impl App {
         self.count_after_edit();
         self.arm_pause_save();
         // The match set holds positions of the text that just changed;
-        // the next frame recomputes it against the edit.
+        // the next frame recomputes it against the edit. The lit
+        // occurrences go with it: an editing key that selects the new
+        // text again lights nothing.
         if let Some(state) = self.search.as_mut() {
             state.matches.clear();
             state.rects.clear();
             state.stale = true;
         }
+        self.occurrences = None;
         true
     }
 
@@ -4053,12 +4062,19 @@ impl App {
     }
 
     /// Ctrl+U: the next case of the selection, or of the word under the
-    /// caret. The new text stays selected, so the key cycles on.
+    /// caret. The new text stays selected, so the key cycles on. Editor
+    /// only, as the other editing keys.
     fn cycle_case(&mut self) {
+        if self.mode != edit::Mode::Edit {
+            return;
+        }
         let selection = self.selection_source_range();
         let had_selection = selection.is_some();
         let caret = self.caret.map_or(0, |c| c.offset);
-        let Some(edit) = edit::manners::case_edit(&self.document.source, selection, caret) else {
+        let markdown = self.markdown_source();
+        let Some(edit) =
+            edit::manners::case_edit(&self.document.source, selection, caret, markdown)
+        else {
             return;
         };
         self.type_edit_at(edit.replace, &edit.text, Kind::Structural, edit.caret);
@@ -5428,7 +5444,7 @@ impl App {
 
     /// Whether a selection drag is live (`selection_drag`).
     fn selecting(&self) -> bool {
-        selection_drag(self.left_held, self.sel_anchor.is_some())
+        selection_drag(self.left_held, self.sel_grabbed)
     }
 
     /// Grabs a selection anchor at the cursor and clears any previous
@@ -5440,6 +5456,7 @@ impl App {
             return;
         };
         self.sel_anchor = selection::pos_at(lay, &self.document, &mut self.fonts, x, y);
+        self.sel_grabbed = self.sel_anchor.is_some();
         if self.selection.take().is_some() {
             self.band = None;
             if let Some(gfx) = self.gfx.as_ref() {
@@ -5490,6 +5507,7 @@ impl App {
         };
         self.last_click = None;
         self.sel_anchor = Some(anchor);
+        self.sel_grabbed = true;
         self.extend_selection();
         if self.mode == edit::Mode::Edit {
             self.caret_to_selection_edge();
@@ -5515,21 +5533,24 @@ impl App {
         }
     }
 
-    /// Ends a selection drag. A drag that never left its starting caret is
-    /// a click and follows the link under the cursor instead.
+    /// Ends a selection drag at the button's release. A drag that never
+    /// left its starting caret is a click and follows the link under the
+    /// cursor instead. The release of a press that grabbed nothing, on a
+    /// row of the sidebar or a button, changes nothing: a selection and
+    /// the anchor an editing key left stand as they are.
     fn end_selection(&mut self) {
         // A double or a triple click dropped the anchor at its press and
         // found its own occurrences; a drag or a Shift+click kept it.
-        let dragged = self.sel_anchor.is_some();
+        if !std::mem::take(&mut self.sel_grabbed) {
+            return;
+        }
         self.sel_anchor = None;
         if self.selection.is_some_and(|s| !s.is_empty()) {
             // The drag's release point is where editing continues.
             if self.mode == edit::Mode::Edit {
                 self.caret_to_selection_edge();
             }
-            if dragged {
-                self.light_selection();
-            }
+            self.light_selection();
             if let Some(gfx) = self.gfx.as_ref() {
                 gfx.window.request_redraw();
             }
@@ -5551,6 +5572,9 @@ impl App {
         // own release.
         self.search_mouse = false;
         self.search_drag = false;
+        // The pause of a keyboard selection ends with the press: a drag
+        // looks its selection up at its own release.
+        self.occurrences_at = None;
         if let Some(overlay) = self.overlay.as_mut() {
             self.overlay_mouse = true;
             let (x, y) = (
@@ -5670,8 +5694,11 @@ impl App {
                     PanTarget::Document
                 };
                 // The pre-slop tail of the gesture may have pressed the
-                // emulated mouse button; a swipe selects nothing.
+                // emulated mouse button; a swipe selects nothing, and the
+                // button counts as up, its release being muted.
                 self.sel_anchor = None;
+                self.sel_grabbed = false;
+                self.left_held = false;
                 self.drag = None;
                 match self.pan_target {
                     PanTarget::Sidebar => self.move_ownership(PaneAct::WheelSidebar),
@@ -8936,6 +8963,7 @@ impl ApplicationHandler for App {
                 // The button's release goes elsewhere too.
                 self.focused = false;
                 self.left_held = false;
+                self.sel_grabbed = false;
                 self.request_redraw();
                 self.flush_note_copy();
                 if self.config.save_on_focus_loss {
@@ -9221,31 +9249,36 @@ impl ApplicationHandler for App {
                 state,
                 button: MouseButton::Left,
                 ..
-            } => {
-                if self.mouse_muted() {
-                    return;
-                }
-                match state {
-                    ElementState::Pressed => {
-                        self.left_held = true;
-                        self.fling = None;
-                        if self.confirm.is_some() {
-                            let (x, y) = self.ui_cursor();
-                            let decision = self
-                                .confirm
-                                .as_mut()
-                                .map_or(confirm::Decision::Hold, |confirm| confirm.click(x, y));
-                            self.confirm_decide(decision, event_loop);
-                            return;
-                        }
-                        self.left_press();
+            } => match state {
+                ElementState::Pressed => {
+                    if self.mouse_muted() {
+                        return;
                     }
-                    ElementState::Released => {
-                        self.left_held = false;
-                        self.left_release();
+                    self.left_held = true;
+                    self.fling = None;
+                    if self.confirm.is_some() {
+                        let (x, y) = self.ui_cursor();
+                        let decision = self
+                            .confirm
+                            .as_mut()
+                            .map_or(confirm::Decision::Hold, |confirm| confirm.click(x, y));
+                        self.confirm_decide(decision, event_loop);
+                        return;
                     }
+                    self.left_press();
                 }
-            }
+                ElementState::Released => {
+                    // The release counts even when a touch pan mutes it:
+                    // the button is up, and the press it ends may have
+                    // passed before the pan was told from a tap.
+                    self.left_held = false;
+                    if self.mouse_muted() {
+                        self.sel_grabbed = false;
+                        return;
+                    }
+                    self.left_release();
+                }
+            },
             WindowEvent::Resized(size) => {
                 // A drag delivers a width per frame. When a full pass
                 // outlasts a slice, restarting it on each one would strand
@@ -10715,7 +10748,7 @@ mod tests {
     #[test]
     fn a_standing_selection_is_not_a_drag() {
         assert!(
-            !super::selection_drag(false, true),
+            !super::selection_drag(false, false),
             "an editing key left the selection and its anchor, the button up"
         );
         assert!(
@@ -10724,7 +10757,7 @@ mod tests {
         );
         assert!(
             !super::selection_drag(true, false),
-            "the button held with nothing grabbed"
+            "the button held by a press that grabbed nothing, a row of the sidebar after an editing key"
         );
         assert!(!super::selection_drag(false, false));
     }
