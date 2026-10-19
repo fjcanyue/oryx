@@ -329,6 +329,7 @@ pub fn run(
         sel_anchor: None,
         left_held: false,
         sel_grabbed: false,
+        page_press: false,
         last_click: None,
         selection: None,
         clipboard: None,
@@ -535,6 +536,30 @@ fn outline_current(
 /// nothing, on a row of the sidebar or a button, is no drag either.
 fn selection_drag(left_held: bool, grabbed: bool) -> bool {
     left_held && grabbed
+}
+
+/// What a left release does, from the press's grab of an anchor,
+/// whether the press was on the page, the selection the drag leaves
+/// and the mode. `Settle` ends a drag that selected text. `Click` is a
+/// release that selected nothing: it follows the link under the cursor
+/// while reading. `Nothing` is the release of a press that grabbed
+/// nothing elsewhere than on the page, a row of the sidebar or a
+/// button: a selection and the anchor an editing key left stand.
+#[derive(Debug, PartialEq, Eq)]
+enum Release {
+    Nothing,
+    Settle,
+    Click,
+}
+
+fn release_act(grabbed: bool, on_page: bool, selected: bool, reading: bool) -> Release {
+    if grabbed && selected {
+        Release::Settle
+    } else if grabbed || (on_page && reading) {
+        Release::Click
+    } else {
+        Release::Nothing
+    }
 }
 
 /// Whether the view shows the end of the page: the scroll stops where
@@ -1535,6 +1560,12 @@ struct App {
     /// is live while the button stays down (`selection_drag`). An
     /// editing key sets the anchor and not this mark.
     sel_grabbed: bool,
+    /// The press that is held was on the page, with or without text
+    /// under it: its release is a click while reading, which follows
+    /// the link under the cursor (`release_act`), as a linked picture
+    /// alone on a page needs. Dropped with the grab wherever the release
+    /// goes elsewhere.
+    page_press: bool,
     /// The last document-area press, for the double and triple click
     /// chain: when, where, and how many clicks it had reached.
     last_click: Option<(Instant, f32, f32, u8)>,
@@ -5480,6 +5511,7 @@ impl App {
         };
         self.sel_anchor = selection::pos_at(lay, &self.document, &mut self.fonts, x, y);
         self.sel_grabbed = self.sel_anchor.is_some();
+        self.page_press = true;
         if self.selection.take().is_some() {
             self.band = None;
             if let Some(gfx) = self.gfx.as_ref() {
@@ -5556,36 +5588,50 @@ impl App {
         }
     }
 
-    /// Ends a selection drag at the button's release. A drag that never
-    /// left its starting caret is a click and follows the link under the
-    /// cursor instead. The release of a press that grabbed nothing, on a
-    /// row of the sidebar or a button, changes nothing: a selection and
-    /// the anchor an editing key left stand as they are.
+    /// Ends a selection drag at the button's release (`release_act`): a
+    /// drag that selected text settles, a release that selected nothing
+    /// on the page is a click and follows the link under the cursor
+    /// while reading, and the release of a press that grabbed nothing
+    /// elsewhere, on a row of the sidebar or a button, changes nothing:
+    /// a selection and the anchor an editing key left stand as they are.
     fn end_selection(&mut self) {
         // A double or a triple click dropped the anchor at its press and
         // found its own occurrences; a drag or a Shift+click kept it.
-        if !std::mem::take(&mut self.sel_grabbed) {
-            return;
-        }
-        self.sel_anchor = None;
-        if self.selection.is_some_and(|s| !s.is_empty()) {
-            // The drag's release point is where editing continues.
-            if self.mode == edit::Mode::Edit {
-                self.caret_to_selection_edge();
+        let grabbed = std::mem::take(&mut self.sel_grabbed);
+        let on_page = std::mem::take(&mut self.page_press);
+        let selected = self.selection.is_some_and(|s| !s.is_empty());
+        match release_act(grabbed, on_page, selected, self.mode == edit::Mode::Read) {
+            Release::Nothing => return,
+            Release::Settle => {
+                self.sel_anchor = None;
+                // The drag's release point is where editing continues.
+                if self.mode == edit::Mode::Edit {
+                    self.caret_to_selection_edge();
+                }
+                self.light_selection();
+                if let Some(gfx) = self.gfx.as_ref() {
+                    gfx.window.request_redraw();
+                }
             }
-            self.light_selection();
-            if let Some(gfx) = self.gfx.as_ref() {
-                gfx.window.request_redraw();
-            }
-        } else {
-            self.selection = None;
-            // While editing, a click already placed the caret; a link
-            // never follows.
-            if self.mode == edit::Mode::Read {
-                self.link_press();
+            Release::Click => {
+                self.sel_anchor = None;
+                self.selection = None;
+                // While editing, a click already placed the caret; a link
+                // never follows.
+                if self.mode == edit::Mode::Read {
+                    self.link_press();
+                }
             }
         }
         self.fold_highlights();
+    }
+
+    /// The press that is held ends elsewhere than in a release on the
+    /// page: its grab and its mark go, so that a later release does not
+    /// end a drag that never was.
+    fn drop_grab(&mut self) {
+        self.sel_grabbed = false;
+        self.page_press = false;
     }
 
     /// A left button press at the current cursor, from the mouse or a
@@ -5656,6 +5702,9 @@ impl App {
         self.search_drag = false;
         if let Some(overlay) = self.overlay.as_mut() {
             overlay.release();
+            // An overlay opened while the button was held on the page
+            // takes the release: the press's grab ends here.
+            self.drop_grab();
         } else if self.search_mouse {
             self.search_mouse = false;
         } else if let Some(drag) = self.drag.take() {
@@ -5720,7 +5769,7 @@ impl App {
                 // emulated mouse button; a swipe selects nothing, and the
                 // button counts as up, its release being muted.
                 self.sel_anchor = None;
-                self.sel_grabbed = false;
+                self.drop_grab();
                 self.left_held = false;
                 self.drag = None;
                 match self.pan_target {
@@ -5767,7 +5816,13 @@ impl App {
             }
             touch::Act::PinchStart => {
                 self.pinch_base = self.user_zoom;
+                // As at a pan's start: the pre-slop tail of the gesture
+                // may have pressed the emulated mouse button, and a pinch
+                // selects nothing, so the button counts as up, or the
+                // layout would wait until the fingers lift.
                 self.sel_anchor = None;
+                self.drop_grab();
+                self.left_held = false;
                 self.drag = None;
             }
             touch::Act::Pinch { factor } => {
@@ -9019,7 +9074,7 @@ impl ApplicationHandler for App {
                 // The button's release goes elsewhere too.
                 self.focused = false;
                 self.left_held = false;
-                self.sel_grabbed = false;
+                self.drop_grab();
                 self.request_redraw();
                 self.flush_note_copy();
                 if self.config.save_on_focus_loss {
@@ -9329,7 +9384,7 @@ impl ApplicationHandler for App {
                     // passed before the pan was told from a tap.
                     self.left_held = false;
                     if self.mouse_muted() {
-                        self.sel_grabbed = false;
+                        self.drop_grab();
                         return;
                     }
                     self.left_release();
@@ -9465,6 +9520,26 @@ mod tests {
             super::speculation_target(&doc, &visible, false, &Guessed::new(), true),
             None
         );
+    }
+
+    /// The release of a press on the page that found no text under it
+    /// is a click while reading: it follows the link under the cursor,
+    /// which a linked picture alone on a page needs. A release that
+    /// grabbed nothing elsewhere, on a row of the sidebar or a button,
+    /// changes nothing, and so does one while editing, where the click
+    /// already placed the caret.
+    #[test]
+    fn a_release_on_the_page_that_grabbed_nothing_is_a_click_while_reading() {
+        use super::{release_act, Release};
+        assert_eq!(release_act(false, true, false, true), Release::Click);
+        assert_eq!(
+            release_act(false, true, false, false),
+            Release::Nothing,
+            "while editing the click placed the caret"
+        );
+        assert_eq!(release_act(false, false, false, true), Release::Nothing);
+        assert_eq!(release_act(true, true, true, true), Release::Settle);
+        assert_eq!(release_act(true, true, false, false), Release::Click);
     }
 
     #[test]
