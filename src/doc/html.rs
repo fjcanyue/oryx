@@ -1330,6 +1330,7 @@ impl Walker {
             BlockKind::Table {
                 header: t.header,
                 rows: t.rows,
+                aligns: Vec::new(),
             },
             start..start,
         );
@@ -1859,7 +1860,7 @@ mod tests {
         let (blocks, source, _) = walk(
             "<html><body><table><thead><tr><th>K</th><th>V</th></tr></thead><tbody><tr><td>a</td><td>1</td></tr></tbody></table></body></html>",
         );
-        let BlockKind::Table { header, rows } = &blocks[0].kind else {
+        let BlockKind::Table { header, rows, .. } = &blocks[0].kind else {
             panic!("expected a table, got {:?}", blocks[0].kind);
         };
         assert_eq!(header.len(), 2);
@@ -1872,7 +1873,7 @@ mod tests {
     fn headerless_table_keeps_an_empty_header() {
         let (blocks, source, _) =
             walk("<html><body><table><tr><td>a</td><td>b</td></tr></table></body></html>");
-        let BlockKind::Table { header, rows } = &blocks[0].kind else {
+        let BlockKind::Table { header, rows, .. } = &blocks[0].kind else {
             panic!("expected a table, got {:?}", blocks[0].kind);
         };
         assert!(header.is_empty());

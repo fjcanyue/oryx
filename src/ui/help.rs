@@ -695,7 +695,12 @@ pub const TIPS: &[Tip] = &[
     Tip {
         kind: TipKind::Tip,
         area: Area::Markdown,
-        text: r#"Tables keep each column's alignment, shade every other row and wrap long cells, so a wide table never runs off the page."#,
+        text: r#"You can align individual columns of a table: in the line under the header, `:---:` centers a column and `---:` aligns it to the right. The alignment is not lost when you copy the table."#,
+    },
+    Tip {
+        kind: TipKind::Tip,
+        area: Area::Markdown,
+        text: r#"Long cells of a table wrap, so a wide table stays on the page. Every other row is shaded."#,
     },
     Tip {
         kind: TipKind::Tip,

@@ -479,7 +479,7 @@ fn shown_source(span: &Span, source: &str, at: usize, len: usize) -> Range<usize
 /// cells, then its rows' cells.
 fn run_spans(kind: &BlockKind) -> Vec<&Span> {
     match kind {
-        BlockKind::Table { header, rows } => header
+        BlockKind::Table { header, rows, .. } => header
             .iter()
             .flatten()
             .chain(rows.iter().flatten().flatten())

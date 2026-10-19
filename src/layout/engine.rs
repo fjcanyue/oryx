@@ -12,7 +12,7 @@ use crate::style::fonts::line_width;
 use super::metrics;
 use crate::doc::images::MediaCache;
 use crate::doc::model::{
-    AlertKind, Block, BlockKind, Document, Marker, Span, SpanImage, SpanScript,
+    AlertKind, Block, BlockKind, ColumnAlign, Document, Marker, Span, SpanImage, SpanScript,
 };
 use crate::layout::pool::{Job, ShapeCtx, StepKey, Work};
 use crate::style::fonts::{FontStore, BODY_FAMILY, CODE_FAMILY};
@@ -144,7 +144,7 @@ fn model_span(doc: &Document, block: usize, span: usize) -> Option<&Span> {
         | BlockKind::ListItem { spans, .. }
         | BlockKind::FootnoteDef { spans, .. }
         | BlockKind::Summary { spans, .. } => spans.get(span),
-        BlockKind::Table { header, rows } => header
+        BlockKind::Table { header, rows, .. } => header
             .iter()
             .flatten()
             .chain(rows.iter().flatten().flatten())
@@ -2406,6 +2406,7 @@ pub(crate) fn shape_kind(
                 bold: heading.is_some(),
                 block_index,
                 justify: heading.is_none() && cfg.justify,
+                align: None,
             };
             flow_or_shape(
                 fonts, theme, cfg, source, media, spans, &base, x_base, 0.0, avail, scratch,
@@ -2467,13 +2468,18 @@ pub(crate) fn shape_kind(
             ));
             thickness
         }
-        BlockKind::Table { header, rows } => layout_table(
+        BlockKind::Table {
+            header,
+            rows,
+            aligns,
+        } => layout_table(
             fonts,
             theme,
             cfg,
             source,
             header,
             rows,
+            aligns,
             block_index,
             x_base,
             0.0,
@@ -3356,6 +3362,7 @@ fn shape_alert_title(
         bold: true,
         block_index,
         justify: false,
+        align: None,
     };
     let title_h = shape_block(
         fonts, theme, cfg, source, &title, false, &base, x_base, 0.0, avail, scratch,
@@ -3627,6 +3634,20 @@ struct BlockStyle {
     /// Justify this block's segments; runs then split per word so paint
     /// can re-shape each at its stretched position.
     justify: bool,
+    /// The alignment of the block's lines, a table cell's from its
+    /// column; `None` leaves each line its natural one.
+    align: Option<Align>,
+}
+
+/// A column's mark as the alignment of its cells' lines; a column
+/// without a mark leaves them to their direction.
+fn cell_align(column: ColumnAlign) -> Option<Align> {
+    match column {
+        ColumnAlign::Auto => None,
+        ColumnAlign::Left => Some(Align::Left),
+        ColumnAlign::Center => Some(Align::Center),
+        ColumnAlign::Right => Some(Align::Right),
+    }
 }
 
 fn heading_color(theme: &Theme, level: u8) -> Rgba {
@@ -4063,6 +4084,10 @@ fn shape_segment_chunk(
         for line in buffer.lines.iter_mut() {
             line.set_align(Some(Align::Justified));
         }
+    } else if let Some(align) = base.align {
+        for line in buffer.lines.iter_mut() {
+            line.set_align(Some(align));
+        }
     } else if cfg.direction != DirectionMode::Auto {
         // A forced direction aligns every line to the forced side; a
         // line already reading that way keeps its natural alignment.
@@ -4279,6 +4304,7 @@ fn layout_summary(
         bold: false,
         block_index,
         justify: false,
+        align: None,
     };
     let h = flow_or_shape(
         fonts, theme, cfg, source, media, spans, &base, text_x, 0.0, text_w, scratch,
@@ -4396,6 +4422,7 @@ fn layout_list_item(
         bold: false,
         block_index,
         justify: cfg.justify,
+        align: None,
     };
     let height = flow_or_shape(
         fonts, theme, cfg, source, media, spans, &base, text_x, y0, text_w, out,
@@ -4414,6 +4441,7 @@ fn layout_table(
     source: &str,
     header: &[Vec<Span>],
     rows: &[Vec<Vec<Span>>],
+    aligns: &[ColumnAlign],
     block_index: usize,
     x0: f32,
     y0: f32,
@@ -4447,6 +4475,7 @@ fn layout_table(
             bold,
             block_index,
             justify: false,
+            align: None,
         };
         shape_block(
             fonts, theme, cfg, source, spans, true, &base, 0.0, 0.0, 100_000.0, &mut tmp,
@@ -4528,6 +4557,7 @@ fn layout_table(
                 bold: *is_header,
                 block_index,
                 justify: false,
+                align: aligns.get(c).copied().and_then(cell_align),
             };
             let h = shape_block(
                 fonts,
@@ -4673,6 +4703,7 @@ fn layout_image(
         bold: false,
         block_index,
         justify: false,
+        align: None,
     };
     let rects_mark = out.rects.len();
     let text_h = shape_block(
@@ -4920,6 +4951,7 @@ fn layout_frontmatter(
         bold: false,
         block_index,
         justify: false,
+        align: None,
     };
     let runs_mark = out.runs.len();
     let rects_mark = out.rects.len();
@@ -5179,6 +5211,7 @@ fn layout_footnote_def(
         bold: true,
         block_index,
         justify: false,
+        align: None,
     };
     let runs_mark = out.runs.len();
     shape_block(
@@ -5214,6 +5247,7 @@ fn layout_footnote_def(
         bold: false,
         block_index,
         justify: false,
+        align: None,
     };
     let text_h = shape_block(
         fonts,

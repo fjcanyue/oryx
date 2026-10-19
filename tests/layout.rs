@@ -704,6 +704,60 @@ fn table_columns_header_and_stripes() {
     assert!((a.x - alpha.x).abs() < 1.0, "same column aligns");
 }
 
+/// The marks of the separator row align the column: `:---:` centers the
+/// cell's lines in the column, `---:` puts them against its right edge,
+/// `:---` and `---` leave them at the left. The example of SYNTAX.md.
+#[test]
+fn table_columns_follow_their_alignment_marks() {
+    let (doc, l) = lay2(
+        "| Left | Center | Right |\n|:-----|:------:|------:|\n| a | b | c |\n| long cells wrap | stripes alternate | columns size to content |\n",
+        800.0,
+    );
+    let t = Theme::default_dark();
+    let outline = l
+        .rects
+        .iter()
+        .find(|r| r.color == t.blocks.table_border && r.stroke > 0.0)
+        .expect("the outline");
+    let mut lines: Vec<f32> = l
+        .rects
+        .iter()
+        .filter(|r| r.color == t.blocks.table_border && r.stroke == 0.0 && r.height > r.width)
+        .map(|r| r.x)
+        .collect();
+    lines.sort_by(f32::total_cmp);
+    assert_eq!(lines.len(), 2, "two inner column lines");
+    let (x1, x2, x3) = (lines[0], lines[1], outline.x + outline.width);
+    let pad = 8.0;
+    let a = find_text(&l, &doc, "a");
+    let b = find_text(&l, &doc, "b");
+    let c = find_text(&l, &doc, "c");
+    let header = find_text(&l, &doc, "Center");
+    assert!(
+        (a.x - (outline.x + pad)).abs() < 1.5,
+        "a at the left edge: {} against {}",
+        a.x,
+        outline.x + pad
+    );
+    let mid = (x1 + x2) / 2.0;
+    assert!(
+        (b.x + b.width / 2.0 - mid).abs() < 1.5,
+        "b centered: {} against {mid}",
+        b.x + b.width / 2.0
+    );
+    assert!(
+        (header.x + header.width / 2.0 - mid).abs() < 1.5,
+        "the header is centered too: {} against {mid}",
+        header.x + header.width / 2.0
+    );
+    assert!(
+        (c.x + c.width - (x3 - pad)).abs() < 1.5,
+        "c at the right edge: {} against {}",
+        c.x + c.width,
+        x3 - pad
+    );
+}
+
 #[test]
 fn table_cells_wrap_within_capped_columns() {
     let (doc, l) = lay2(

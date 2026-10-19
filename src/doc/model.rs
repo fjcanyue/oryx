@@ -154,7 +154,7 @@ impl Document {
                 | BlockKind::ListItem { spans, .. }
                 | BlockKind::FootnoteDef { spans, .. }
                 | BlockKind::Summary { spans, .. } => sources.extend(from_spans(spans)),
-                BlockKind::Table { header, rows } => {
+                BlockKind::Table { header, rows, .. } => {
                     for cell in header.iter().chain(rows.iter().flatten()) {
                         sources.extend(from_spans(cell));
                     }
@@ -252,6 +252,16 @@ impl Block {
     }
 }
 
+/// The alignment of a table column, from the marks of the separator
+/// row: `:---` left, `:---:` center, `---:` right, `---` none.
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub enum ColumnAlign {
+    Auto,
+    Left,
+    Center,
+    Right,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum BlockKind {
     Heading {
@@ -280,6 +290,9 @@ pub enum BlockKind {
     Table {
         header: Vec<Vec<Span>>,
         rows: Vec<Vec<Vec<Span>>>,
+        /// One per column, from the marks of the separator row; empty for
+        /// a table without marks, such as an HTML table.
+        aligns: Vec<ColumnAlign>,
     },
     Rule,
     Image {
@@ -709,7 +722,7 @@ pub(crate) fn seal_blocks(blocks: &mut [Block], source: &str) {
                     span.seal(source);
                 }
             }
-            BlockKind::Table { header, rows } => {
+            BlockKind::Table { header, rows, .. } => {
                 for span in header
                     .iter_mut()
                     .flatten()

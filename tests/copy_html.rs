@@ -313,6 +313,30 @@ fn tables_have_a_header_row_and_bordered_cells() {
         .contains("border-collapse"));
 }
 
+/// Each cell of a marked column says its alignment, the header's too; a
+/// column without a mark says nothing, and its header stays at the left.
+#[test]
+fn table_cells_carry_the_alignment_of_their_column() {
+    let html = html_of_markdown("| L | C | R | P |\n|:--|:-:|--:|---|\n| 1 | 2 | 3 | 4 |\n");
+    let cells: Vec<String> = html
+        .elements("td")
+        .iter()
+        .map(|c| attr(c, "style").unwrap_or_default())
+        .collect();
+    assert!(cells[0].contains("text-align:left"), "{}", cells[0]);
+    assert!(cells[1].contains("text-align:center"), "{}", cells[1]);
+    assert!(cells[2].contains("text-align:right"), "{}", cells[2]);
+    assert!(!cells[3].contains("text-align"), "{}", cells[3]);
+    let heads: Vec<String> = html
+        .elements("th")
+        .iter()
+        .map(|c| attr(c, "style").unwrap_or_default())
+        .collect();
+    assert!(heads[1].contains("text-align:center"), "{}", heads[1]);
+    assert!(heads[2].contains("text-align:right"), "{}", heads[2]);
+    assert!(heads[3].contains("text-align:left"), "{}", heads[3]);
+}
+
 #[test]
 fn a_table_without_a_header_has_no_thead() {
     let html = html_of_markdown("<table><tr><td>a</td><td>b</td></tr></table>\n");

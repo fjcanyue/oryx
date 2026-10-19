@@ -93,7 +93,7 @@ pub(crate) fn block_pieces(doc: &Document, index: usize) -> Vec<Piece<'_>> {
                 });
             }
         }
-        BlockKind::Table { header, rows } => {
+        BlockKind::Table { header, rows, .. } => {
             let mut chain = 0usize;
             for (r, row) in std::iter::once(header).chain(rows.iter()).enumerate() {
                 if r > 0 {
@@ -855,7 +855,7 @@ fn breaks_only(doc: &Document, sel: &Selection) -> Option<usize> {
             let whole = a.byte == format!("{key}: {value}").len();
             (whole && b.span == a.span + 1 && b.span < entries.len()).then_some(1)
         }
-        BlockKind::Table { header, rows } => {
+        BlockKind::Table { header, rows, .. } => {
             // The spans of every cell chain header first; a break stands
             // only between a row's last span and the next row's first.
             let mut chain = 0;
