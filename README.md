@@ -30,7 +30,7 @@ Oryx is a markdown editor and reader, made for a keyboard workflow. It also edit
 
 Every package is on the [releases page](https://github.com/wmahfoudh/oryx/releases). Pick the one for your system:
 
-- **Windows**: the Microsoft Store (badge above), the MSI installer, or the zip to install in your user folder without administrator rights.
+- **Windows**: the Microsoft Store (badge above), `winget install Steerania.Oryx`, the MSI installer, or the zip to install in your user folder without administrator rights.
 - **macOS**: `brew install --cask wmahfoudh/tap/oryx`, or the `.dmg`. The app is not signed, so macOS asks you to approve it once ([how](INSTALL.md#macos)).
 - **Debian and Ubuntu**: `sudo apt install ./oryx-editor_*_amd64.deb`
 - **Fedora and openSUSE**: `sudo dnf install ./oryx-editor-*.x86_64.rpm` (on openSUSE, `zypper` in place of `dnf`)

@@ -4,9 +4,10 @@ Every package is on the [releases page](https://github.com/wmahfoudh/oryx/releas
 
 ## Windows
 
-There are three ways to install Oryx on Windows:
+There are four ways to install Oryx on Windows:
 
 - **Microsoft Store**: search for *Oryx Editor*, or open [its page](https://apps.microsoft.com/detail/9NQGHNSJF3VB). The Store keeps it up to date.
+- **winget**: `winget install Steerania.Oryx` in a terminal. winget downloads the MSI installer and runs it. `winget upgrade Steerania.Oryx` updates it. A new version reaches winget some days after its release.
 - **MSI installer**: `oryx-<version>-windows-x86_64.msi`, a classic installer.
 - **Zip**: `oryx-<version>-windows-x86_64.zip`, for an install in your user folder without administrator rights. Unzip it and run `install.ps1` in PowerShell. It copies Oryx to `%LOCALAPPDATA%\Programs\Oryx` and registers the file types. `install.ps1 -Uninstall` removes it.
 
