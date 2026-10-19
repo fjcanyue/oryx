@@ -2102,10 +2102,10 @@ impl App {
         let waiting =
             waiting_place(self.pending_row, self.pending_offset, None).filter(|_| sel.is_none());
         self.drop_waiting_landings();
-        let (offset, below) = match (waiting, self.layout.as_ref()) {
+        let (offset, below, image_bottom) = match (waiting, self.layout.as_ref()) {
             (Some(place), _) => {
                 let caret = waiting_caret(&self.document.source, place, remembered);
-                (caret::clamp(&self.document, caret), place.below)
+                (caret::clamp(&self.document, caret), place.below, None)
             }
             (None, Some(lay)) => {
                 let offset = caret::landing(
@@ -2118,12 +2118,18 @@ impl App {
                 );
                 let below = caret::place_box(lay, &self.document, offset, view_h)
                     .map_or(0.0, |(y, h)| caret::held(y, h, self.scroll_y, view_h));
-                (offset, below)
+                let bottom = caret::image_bottom(lay, &self.document, offset, self.scroll_y);
+                (offset, below, bottom)
             }
             // The path a reload and a file switch take: the layout is
             // fresh and the file may have shrunk since the mark was set.
-            (None, None) => (caret::clamp(&self.document, remembered.unwrap_or(0)), 0.0),
+            (None, None) => (
+                caret::clamp(&self.document, remembered.unwrap_or(0)),
+                0.0,
+                None,
+            ),
         };
+        let page_scroll = self.scroll_y;
         self.mode = edit::Mode::Edit;
         self.caret = Some(Caret::at(offset));
         self.ensure_ledger();
@@ -2149,6 +2155,13 @@ impl App {
             // two documents share no coordinate but the bytes. The row
             // the caret landed on takes the height its line had on the
             // page, so the line does not move under the reader's eyes.
+            // A tall image the page is scrolled into has no line in view
+            // to hold: its row ends where the image's bottom was, so the
+            // text under the image keeps its place instead.
+            let below = image_bottom.map_or(below, |bottom| {
+                let row_h = row_height(&self.document, &self.cfg);
+                caret::held(bottom - row_h, row_h, page_scroll, view_h)
+            });
             self.seat_editor_on(Place {
                 offset,
                 below,

@@ -34,6 +34,7 @@
 - After an editing key on a selection made with the mouse, `Ctrl+B` or `Ctrl+U` among them, moving the mouse no longer extends the selection. Before, the key left the drag's state on, as if the button were still held, and the layout and the parsing of the file waited until the selection was gone.
 - On KDE Plasma 6.8, the window is no longer see-through. KWin 6.8 now applies the opacity channel of every window, one that declares none included, and Oryx left that channel empty, which reads as fully transparent. Oryx now marks every pixel as fully opaque.
 - Columns of a table can now be aligned, each on its own, with the marks of the line under the header: `:---:` for the center, `---:` for the right. Before, the marks were ignored. The alignment is not lost when the table is copied as HTML (issue #11).
+- When the page is scrolled into a tall image and you press `Ctrl+E`, the text under the image now stays where it was on the screen. Before, the image's line went to the top of the editor and that text jumped up with it.
 
 ## v1.2.1
 

@@ -508,6 +508,22 @@ pub fn tall_block_end(lay: &LayoutDoc, doc: &Document, offset: usize, view_h: f3
     (span.end - span.start > view_h).then_some(span.end)
 }
 
+/// The bottom of a tall image whose top the page is scrolled past, for
+/// the line of that image: the editor seats the image's line so that
+/// its row ends there, and the text under the image keeps its place on
+/// the screen across the crossing. None while the image's top is in
+/// view or below it, where the top is the place, and for any other
+/// line.
+pub fn image_bottom(lay: &LayoutDoc, doc: &Document, offset: usize, scroll_y: f32) -> Option<f32> {
+    let index = doc.block_at_offset(offset)?;
+    let block = &doc.blocks[index];
+    if offset >= block.range.end || !matches!(block.kind, BlockKind::Image { .. }) {
+        return None;
+    }
+    let span = lay.block_span(index)?;
+    (span.start < scroll_y).then_some(span.end)
+}
+
 /// Where an offset stands on the page, as a top and a height: its row
 /// when the page shows one, else the top of its block with no height.
 /// An image line, a rule and a fence have a block and no row; a blank
@@ -2601,6 +2617,39 @@ mod tests {
         assert_eq!(got, image, "a view inside the image keeps the caret's line");
         let whole = landing(&l, &doc, None, Some(image), place.y - 60.0, 600.0);
         assert_eq!(whole, image, "and so does a view with text around it");
+    }
+
+    /// The page scrolled past the top of a tall image: the editor's
+    /// image line takes a row of the editor's height ending at the
+    /// image's bottom, so the text under the image keeps its place on
+    /// the screen. With the image's top in view, the top is the place.
+    #[test]
+    fn an_image_scrolled_past_its_top_holds_its_bottom() {
+        let (doc, l) = image_page();
+        let image = at(&doc, "![oryx]");
+        let place = l.images.first().expect("the image is placed");
+        let bottom = place.y + place.height;
+        assert_eq!(
+            image_bottom(&l, &doc, image, place.y + 40.0),
+            Some(bottom),
+            "the top above the view"
+        );
+        assert_eq!(
+            image_bottom(&l, &doc, image, place.y - 60.0),
+            None,
+            "the top in view"
+        );
+        assert_eq!(
+            image_bottom(&l, &doc, at(&doc, "After 2."), place.y + 40.0),
+            None,
+            "a text line"
+        );
+        let row_h = 30.0;
+        assert_eq!(
+            held(bottom - row_h, row_h, place.y + 40.0, 2000.0),
+            place.height - 70.0,
+            "the row ending at the bottom, held at its height"
+        );
     }
 
     #[test]
