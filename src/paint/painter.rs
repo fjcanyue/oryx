@@ -422,8 +422,8 @@ impl<'a> Painter<'a> {
         advance / s
     }
 
-    /// Blends the painted region onto an opaque 0RGB frame buffer; only
-    /// rows inside the dirty bounds are touched.
+    /// Blends the painted region onto the frame buffer, each pixel packed
+    /// by `paint::pixel`; only rows inside the dirty bounds are touched.
     pub fn composite(&self, frame: &mut [u32], frame_width: u32) {
         let Some((x0, y0, x1, y1)) = self.dirty else {
             return;
@@ -451,7 +451,7 @@ impl<'a> Painter<'a> {
                 let r = data[i] as u32 + dr * (255 - a) / 255;
                 let g = data[i + 1] as u32 + dg * (255 - a) / 255;
                 let b = data[i + 2] as u32 + db * (255 - a) / 255;
-                *dst = (r.min(255) << 16) | (g.min(255) << 8) | b.min(255);
+                *dst = super::pixel(r.min(255) as u8, g.min(255) as u8, b.min(255) as u8);
             }
         }
     }
@@ -553,6 +553,24 @@ mod tests {
         pixmap
             .pixel(x, y)
             .is_some_and(|p| p.alpha() > 0 || p.red() > 0)
+    }
+
+    /// The frame's pixels carry 0xFF in their top byte, which KWin 6.8
+    /// reads as the opacity: a blended pixel keeps it.
+    #[test]
+    fn composite_keeps_every_pixel_opaque() {
+        let mut pixmap = Pixmap::new(8, 8).unwrap();
+        let mut fonts = FontStore::new();
+        let mut painter = Painter::new(&mut pixmap, &mut fonts, None, 1.0);
+        painter.fill(2.0, 2.0, 4.0, 4.0, 0.0, RED);
+        let mut frame = vec![0u32; 64];
+        painter.composite(&mut frame, 8);
+        assert_eq!(frame[2 * 8 + 2] >> 24, 0xFF, "a painted pixel");
+        assert_eq!(
+            frame[2 * 8 + 2] & 0x00FF_FFFF,
+            0x00FF_0000,
+            "red over black"
+        );
     }
 
     /// A clip with nothing inside it, a list viewport squeezed to no

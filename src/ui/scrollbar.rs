@@ -49,7 +49,7 @@ pub fn draw(
     color: Rgba,
     scale: f32,
 ) {
-    let value = ((color.r as u32) << 16) | ((color.g as u32) << 8) | color.b as u32;
+    let value = crate::paint::pixel(color.r, color.g, color.b);
     let thumb_w = (THUMB_WIDTH as f32 * scale) as u32;
     let margin = (2.0 * scale) as u32;
     let x0 = width.saturating_sub(thumb_w + margin);
@@ -94,6 +94,23 @@ mod tests {
         assert!(painted(95), "right edge of the doubled thumb");
         assert!(!painted(79), "before the thumb");
         assert!(!painted(96), "the doubled margin stays clear");
+    }
+
+    /// The thumb's pixels carry 0xFF in their top byte, which KWin 6.8
+    /// reads as the opacity.
+    #[test]
+    fn the_thumb_paints_opaque_pixels() {
+        let (width, height) = (100u32, 4u32);
+        let mut frame = vec![0u32; (width * height) as usize];
+        let color = Rgba {
+            r: 10,
+            g: 20,
+            b: 30,
+            a: 255,
+        };
+        draw(&mut frame, width, height, (0.0, 4.0), color, 1.0);
+        assert_eq!(frame[90] >> 24, 0xFF);
+        assert_eq!(frame[90] & 0x00FF_FFFF, 0x000A_141E);
     }
 
     #[test]

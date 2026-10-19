@@ -32,6 +32,7 @@
 - With justification on, the Latin words at the end of a line written from right to left are now drawn once each. Before, the first of them was drawn over the others, with the text of the whole line stacked on it.
 - In the editor, on a line written from right to left that holds a number, a Latin word or colored markup, Home and End now go to the ends of the line, and a click beside the line to the end on that side. Before, the line was taken to be its last words only, so Home did not move or went to those words, and a click beside the line landed at them too.
 - After an editing key on a selection made with the mouse, `Ctrl+B` or `Ctrl+U` among them, moving the mouse no longer extends the selection. Before, the key left the drag's state on, as if the button were still held, and the layout and the parsing of the file waited until the selection was gone.
+- On KDE Plasma 6.8, the window now opens opaque. Before, it opened transparent, with the windows behind showing through: KWin 6.8 reads an unused byte of each pixel as its opacity, which Oryx left at zero. Older versions of KWin ignore the byte.
 
 ## v1.2.1
 

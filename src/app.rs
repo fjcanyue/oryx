@@ -575,7 +575,7 @@ fn draw_caret(
     caret: CaretBox,
     color: Rgba,
 ) {
-    let value = ((color.r as u32) << 16) | ((color.g as u32) << 8) | color.b as u32;
+    let value = oryx::paint::pixel(color.r, color.g, color.b);
     let bar = ((1.5 * scale).round() as u32).max(1);
     let x0 = (caret.x.max(0.0) as u32).saturating_add(inset).min(width);
     let x1 = x0.saturating_add(bar).min(width);
@@ -8464,7 +8464,7 @@ impl App {
         // canvas, fullscreen included.
         if self.mode == edit::Mode::Edit {
             let color = self.theme.ui.selection_bg;
-            let value = ((color.r as u32) << 16) | ((color.g as u32) << 8) | color.b as u32;
+            let value = oryx::paint::pixel(color.r, color.g, color.b);
             let h = (self.scale as u32).max(1).min(size.height);
             for y in 0..h {
                 let row = (y * size.width) as usize;
@@ -10215,6 +10215,28 @@ mod tests {
             (caret.y - scroll).floor(),
             "the raw position sat a pixel off"
         );
+    }
+
+    /// The caret's pixels carry 0xFF in their top byte, which KWin 6.8
+    /// reads as the opacity.
+    #[test]
+    fn the_caret_paints_opaque_pixels() {
+        let (width, height) = (20u32, 20u32);
+        let caret = oryx::edit::caret::CaretBox {
+            x: 5.0,
+            y: 5.0,
+            h: 10.0,
+        };
+        let color = oryx::style::theme::Rgba {
+            r: 255,
+            g: 255,
+            b: 255,
+            a: 255,
+        };
+        let mut frame = vec![0u32; (width * height) as usize];
+        super::draw_caret(&mut frame, width, height, 0, 0.0, 1.0, caret, color);
+        let painted = frame.iter().find(|p| **p != 0).expect("the caret painted");
+        assert_eq!(painted >> 24, 0xFF);
     }
 
     #[test]

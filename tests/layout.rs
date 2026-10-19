@@ -1225,7 +1225,7 @@ fn math_glyphs_reach_the_pixels() {
     let g = &l.math_glyphs[0];
     let pixels = oryx::paint::band(&l, &doc, &t, &mut f, &mut media, &[], 0.0, 800, 400);
     let bg = t.surface.background;
-    let bgpx = ((bg.r as u32) << 16) | ((bg.g as u32) << 8) | bg.b as u32;
+    let bgpx = oryx::paint::pixel(bg.r, bg.g, bg.b);
     // Ink lands somewhere in the box around the first glyph's baseline.
     let mut inked = false;
     for y in (g.y - g.size) as usize..(g.y + 0.4 * g.size) as usize {
@@ -1302,7 +1302,7 @@ fn quote_region_paints_without_seam() {
         let bottom = panels.iter().map(|r| r.y + r.height).fold(0.0, f32::max);
         let pixels = oryx::paint::band(&l, &doc, &t, &mut fonts(), &mut media, &[], 0.0, 800, 900);
         let bg = t.surface.background;
-        let bgpx = ((bg.r as u32) << 16) | ((bg.g as u32) << 8) | bg.b as u32;
+        let bgpx = oryx::paint::pixel(bg.r, bg.g, bg.b);
         let x = (0.08 * 800.0) as usize + 30;
         for row in (top.ceil() as usize + 1)..(bottom.floor() as usize - 1) {
             assert_ne!(
