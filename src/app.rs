@@ -2755,16 +2755,7 @@ impl App {
         let Some(ledger) = self.ledger.as_mut() else {
             return;
         };
-        let touched = ledger.edit(range.clone(), text);
-        let removed = self
-            .document
-            .source
-            .get(range)
-            .map_or(0, |cut| cut.matches('\n').count());
-        let old_touched = touched.start..touched.start + removed + 1;
-        if let Some(table) = self.seams.get_mut(&0) {
-            highlight::shift_seams(table, old_touched, touched);
-        }
+        ledger.edit(range, text);
         let current = ledger.current();
         let visible = self
             .layout
@@ -2774,9 +2765,12 @@ impl App {
         self.document = edit::rendered_document(load::detect_with_text(&path, &current), &current);
         self.restart_layout();
         self.outline = OutlineTree::build(&self.document);
-        self.cancel_highlight();
-        self.rehighlight_at =
-            (!self.document.plain_file).then(|| Instant::now() + REHIGHLIGHT_REST);
+        // The rebuilt page has no colors past the load's deadline, and a
+        // sweep resumed against the old seam table would converge at
+        // once and vouch for lines that have none: the coloring starts
+        // afresh, as at an open, and the table with it.
+        self.start_highlight(load::pending(&self.document));
+        self.rehighlight_at = None;
         self.selection = None;
         self.sel_anchor = None;
         if let Some(state) = self.search.as_mut() {

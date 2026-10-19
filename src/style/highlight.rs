@@ -155,6 +155,9 @@ pub struct Chunk {
     pub spans: Vec<LineSpans>,
     pub seam: Seam,
     pub converged: bool,
+    /// The line a converged stop vouches up to: the stored table's
+    /// reach, which the earlier sweep colored. Zero otherwise.
+    pub reach: usize,
 }
 
 /// Highlights a block in chunks, handing each to `deliver`. Delivery
@@ -162,8 +165,10 @@ pub struct Chunk {
 /// chunks. A resumed sweep starts from the stored seam and cuts its
 /// chunks at the stored downstream lines, so each comparison lands
 /// line-exact whatever line delta the table was shifted by; it stops
-/// early after a chunk whose seam matches the table. Returns whether
-/// the block completed, a converged stop included.
+/// early after a chunk whose seam matches the table when the table
+/// reaches the block's end, and goes on from the table's last seam when
+/// it does not. Returns whether the block completed, a converged stop
+/// included.
 pub fn spans_chunked(
     source: &str,
     lines: &CodeBody,
@@ -193,16 +198,33 @@ pub fn spans_chunked(
             .collect();
         let seam = parser.seam();
         let converged = expected.iter().any(|(line, s)| *line == end && *s == seam);
+        // A converged stop vouches for the lines up to the table's
+        // reach, the last line the earlier sweep colored and filed. A
+        // table that stops short of the block's end, as a keystroke
+        // during the first sweep leaves it, has a tail that sweep never
+        // reached: the sweep goes on with it from the table's last seam.
+        let table_end = expected
+            .last()
+            .map_or(0, |(line, _)| *line)
+            .min(lines.len());
+        let reach = if converged { table_end } else { 0 };
         if !deliver(Chunk {
             start_line: start,
             spans,
             seam,
             converged,
+            reach,
         }) {
             return false;
         }
         if converged {
-            return true;
+            if reach >= lines.len() {
+                return true;
+            }
+            let (_, last_seam) = expected.last().expect("a converged stop has a table");
+            parser = Parser::from_seam(last_seam.clone(), language);
+            start = reach;
+            continue;
         }
         start = end;
     }
@@ -310,9 +332,11 @@ pub struct Arrival {
     pub spans: Vec<LineSpans>,
     /// The state closing the chunk; None on a speculative arrival.
     pub seam: Option<Seam>,
-    /// The chunk's seam matched the stored table: the sweep stopped
-    /// here and the tail's colors and seams stand.
+    /// The chunk's seam matched the stored table: the colors and the
+    /// seams up to `reach` stand.
     pub converged: bool,
+    /// The line a converged chunk vouches up to; zero otherwise.
+    pub reach: usize,
     /// Colored from a guessed state for display only; never advances
     /// the exact frontier and never feeds the seam table.
     pub speculative: bool,
@@ -392,6 +416,7 @@ impl Highlighter {
                     spans,
                     seam: None,
                     converged: false,
+                    reach: 0,
                     speculative: true,
                 },
             ));
@@ -432,6 +457,7 @@ impl Highlighter {
                             spans: chunk.spans,
                             seam: Some(chunk.seam),
                             converged: chunk.converged,
+                            reach: chunk.reach,
                             speculative: false,
                         };
                         arrivals
@@ -1456,13 +1482,20 @@ mod tests {
             chunks.push(c);
             true
         });
-        assert_eq!(chunks.len(), 1);
         assert_eq!(
             chunks[0].spans.len(),
             188,
             "the chunk stops at the stored line"
         );
         assert!(chunks[0].converged);
+        assert_eq!(
+            chunks[0].reach, 700,
+            "the stop vouches up to the table's reach"
+        );
+        // The table stops at 700, so the sweep goes on from there.
+        assert_eq!(chunks.len(), 2);
+        assert_eq!(chunks[1].start_line, 700);
+        assert_eq!(chunks[1].spans.len(), 500, "to the block's end");
     }
 
     #[test]
@@ -1505,6 +1538,49 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(1));
         }
         assert!(!h.is_running(), "a converged stop completes the generation");
+    }
+
+    /// A table that stops short of the block's end, as a keystroke
+    /// during the first sweep leaves it: the resumed sweep converges,
+    /// names the table's reach, and goes on from the table's last seam,
+    /// so the tail gets its colors.
+    #[test]
+    fn a_converged_stop_goes_on_past_the_table_s_reach() {
+        let src = let_lines(3000);
+        let seams: Vec<(usize, Seam)> =
+            sweep_seams(&src, CHUNK_LINES).into_iter().take(3).collect();
+        assert_eq!(seams.last().map(|s| s.0), Some(1536));
+        let resume = Resume {
+            start_line: 0,
+            seam: None,
+            expected: seams,
+        };
+        let mut delivered: Vec<(usize, usize, bool, usize)> = Vec::new();
+        let complete = spans_chunked("", &src, Some("rust"), CHUNK_LINES, Some(&resume), |c| {
+            delivered.push((
+                c.start_line,
+                c.start_line + c.spans.len(),
+                c.converged,
+                c.reach,
+            ));
+            true
+        });
+        assert!(complete);
+        let converged: Vec<_> = delivered.iter().filter(|d| d.2).collect();
+        assert_eq!(converged.len(), 1, "one converged stop: {delivered:?}");
+        assert_eq!(
+            converged[0].3, 1536,
+            "the stop vouches up to the table's reach"
+        );
+        assert!(
+            delivered.iter().any(|d| d.0 == 1536),
+            "the sweep goes on from the table's last seam: {delivered:?}"
+        );
+        assert_eq!(
+            delivered.last().map(|d| d.1),
+            Some(3000),
+            "and reaches the block's end: {delivered:?}"
+        );
     }
 
     #[test]

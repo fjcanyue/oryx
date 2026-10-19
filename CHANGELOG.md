@@ -39,6 +39,7 @@
 - In the editor, on text written from right to left, the caret now stands where the next letter goes: at the right end of a word before its first letter, at the left end after its last, and left of the word in the spaces after it. Before, it stood at the opposite end, one word away from the letters you typed.
 - The search bar stays quick with a very long query pasted into it. Before, each key took seconds with a query of a few thousand characters, the field measuring the text once per character.
 - In the search bar and the fields, a query longer than the field now keeps its place while you move or click inside the part shown, and a letter typed in the middle stays in view. Before, the shown part started at the caret after each click or arrow key, and a letter typed there went out of view at once.
+- A code file keeps its syntax colors to its end after an undo or a redo in reading mode, and after a key typed while a big file was still being colored. Before, the lines past the first chunk stayed plain until the file was opened again, in the PDF too.
 
 ## v1.2.1
 

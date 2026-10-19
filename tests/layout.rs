@@ -74,6 +74,7 @@ fn highlight_all(doc: &mut Document) {
                 spans,
                 seam: None,
                 converged: false,
+                reach: 0,
                 speculative: false,
             },
         );
@@ -237,6 +238,7 @@ fn unhighlighted_tail_renders_in_foreground() {
             spans: spans[0..1].to_vec(),
             seam: None,
             converged: false,
+            reach: 0,
             speculative: false,
         },
     );

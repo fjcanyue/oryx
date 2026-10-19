@@ -495,13 +495,15 @@ pub fn fold(doc: &mut Document, arrival: &Arrival) {
         }
     }
     // The exact frontier only ever advances contiguously, and a
-    // converged stop vouches for the whole tail.
+    // converged stop vouches for the lines up to the stored table's
+    // reach, which the earlier sweep colored: the block's end when that
+    // sweep completed, less when a keystroke cut it short.
     if !arrival.speculative {
         if arrival.start_line <= *exact {
             *exact = (*exact).max(end).min(lines.len());
         }
         if arrival.converged {
-            *exact = lines.len();
+            *exact = (*exact).max(arrival.reach).min(lines.len());
         }
     }
 }
@@ -1424,6 +1426,7 @@ mod tests {
                 spans: eager[0..2].to_vec(),
                 seam: None,
                 converged: false,
+                reach: 0,
                 speculative: false,
             },
         );
@@ -1439,6 +1442,7 @@ mod tests {
                 spans: eager[2..4].to_vec(),
                 seam: None,
                 converged: false,
+                reach: 0,
                 speculative: false,
             },
         );
@@ -1462,6 +1466,8 @@ mod tests {
             spans: vec![Vec::new(); n],
             seam: None,
             converged,
+            // The table of a complete sweep reaches the block's end.
+            reach: if converged { 1200 } else { 0 },
             speculative,
         };
         fold(&mut doc, &arrival(0, 512, false, false));
@@ -1493,6 +1499,42 @@ mod tests {
         assert!(pending(&doc).is_empty(), "the wash is complete");
     }
 
+    /// A converged stop against a table that stops short of the
+    /// block's end, as a keystroke during the first sweep leaves it:
+    /// the frontier moves to the table's reach, no further, and the
+    /// chunks the sweep goes on with advance it from there.
+    #[test]
+    fn a_converged_stop_moves_the_frontier_to_the_table_s_reach() {
+        let text: String = (0..3000).map(|i| format!("let v{i} = {i};\n")).collect();
+        let mut doc = code_document(Some("rs"), &text);
+        let exact_of = |doc: &Document| match &doc.blocks[0].kind {
+            BlockKind::CodeBlock { exact, .. } => *exact,
+            _ => unreachable!(),
+        };
+        let arrival = |start: usize, n: usize, converged: bool, reach: usize| Arrival {
+            block: 0,
+            start_line: start,
+            spans: vec![Vec::new(); n],
+            seam: None,
+            converged,
+            reach,
+            speculative: false,
+        };
+        fold(&mut doc, &arrival(0, 512, true, 1536));
+        assert_eq!(
+            exact_of(&doc),
+            1536,
+            "the stop vouches up to the table's reach"
+        );
+        assert!(!pending(&doc).is_empty(), "the tail still wants its wash");
+        fold(&mut doc, &arrival(1536, 512, false, 0));
+        assert_eq!(
+            exact_of(&doc),
+            2048,
+            "the chunks after it advance the frontier"
+        );
+    }
+
     #[test]
     fn a_late_guess_leaves_the_exact_lines_alone() {
         use crate::style::highlight::SyntaxRole;
@@ -1513,6 +1555,7 @@ mod tests {
             spans: vec![spans.clone(); n],
             seam: None,
             converged: false,
+            reach: 0,
             speculative,
         };
         // The exact sweep colored the first 512 lines; a guess asked
