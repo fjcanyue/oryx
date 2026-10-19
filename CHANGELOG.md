@@ -10,7 +10,7 @@
 
 #### Editor
 
-- `Ctrl+U` changes the case of the selection, or of the word under the cursor, in turn: lower case, a capital on each word, upper case. The new text stays selected, so the key can be pressed again. In a markdown file, the address of a link and inline code keep their letters.
+- `Ctrl+U` changes the case of the selection, or of the word under the cursor, in turn: lower case, a capital on each word, upper case. The new text stays selected, so the key can be pressed again. In a markdown file, the address of a link, inline code, an HTML tag and a formula keep their letters.
 
 #### Selection
 

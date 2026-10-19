@@ -445,7 +445,7 @@ pub const TIPS: &[Tip] = &[
     Tip {
         kind: TipKind::Tip,
         area: Area::Editing,
-        text: r#"`Ctrl+U` changes the case of the selected text, or of the word the caret is on: lower case, then a capital on each word, then upper case. The address of a link and inline code keep their letters."#,
+        text: r#"`Ctrl+U` changes the case of the selected text, or of the word the caret is on: lower case, then a capital on each word, then upper case. The address of a link, inline code, an HTML tag and a formula keep their letters."#,
     },
     Tip {
         kind: TipKind::Tip,

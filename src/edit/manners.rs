@@ -1492,18 +1492,29 @@ fn paragraphs_around(source: &str, range: &std::ops::Range<usize>) -> std::ops::
 
 /// The ranges of a markdown text that keep their letters under the case
 /// key: inline code with its backticks, the address of a link with its
-/// parentheses, an autolink with its angle brackets, and the address of
-/// a reference definition. Inline code closes with a run of backticks
-/// of the same length in the same paragraph, as the markdown rules say,
-/// so a lone backtick is text, and an escaped backtick outside code is
-/// text too. An address runs to the parenthesis that balances its own,
-/// on its line; an autolink holds no whitespace. A length of backtick
-/// run found unclosed is not searched again in its paragraph, so a
-/// press costs about the text's length.
+/// parentheses, an autolink or an HTML tag with its angle brackets, the
+/// address of a reference definition, and a formula with its dollar
+/// signs. Inline code closes with a run of backticks of the same length
+/// in the same paragraph, as the markdown rules say, so a lone backtick
+/// is text, and an escaped backtick outside code is text too. An
+/// address runs to the parenthesis that balances its own, on its line;
+/// an autolink holds no whitespace; a tag opens with a letter or a
+/// slash and runs to the `>` on its line, its attributes inside. A
+/// formula is what the markdown parser reads as one: `$` not followed
+/// by whitespace to the next `$`, which must not follow whitespace or
+/// precede a digit (a price), or `$$` to the next `$$`, on the
+/// paragraph; an escaped dollar sign is text. A press costs about the
+/// text's length: a length of backtick run or a kind of dollar sign
+/// found unclosed is not searched again in its paragraph, and the next
+/// `>` is searched once per region.
 fn kept_pieces(text: &str) -> Vec<std::ops::Range<usize>> {
     let mut kept = Vec::new();
     for para in paragraphs(text) {
         let mut unclosed: Vec<usize> = Vec::new();
+        let mut dollar_unclosed = [false, false];
+        // The next `>` from a position, remembered until the scan passes
+        // it: None once no `>` stands before the paragraph's end.
+        let mut next_gt: Option<Option<usize>> = None;
         let mut line_start = true;
         let mut i = para.start;
         while i < para.end {
@@ -1522,7 +1533,8 @@ fn kept_pieces(text: &str) -> Vec<std::ops::Range<usize>> {
                 line_start = true;
                 i += 1;
             } else if c == '\\' {
-                // An escaped character is text, a backtick among them.
+                // An escaped character is text, a backtick or a dollar
+                // sign among them.
                 i += 1 + rest[1..].chars().next().map_or(0, char::len_utf8);
             } else if c == '`' {
                 let ticks = rest.len() - rest.trim_start_matches('`').len();
@@ -1544,6 +1556,30 @@ fn kept_pieces(text: &str) -> Vec<std::ops::Range<usize>> {
                         i += ticks;
                     }
                 }
+            } else if c == '$' {
+                let display = rest.starts_with("$$");
+                let signs = if display { 2 } else { 1 };
+                let opens = rest[signs..]
+                    .chars()
+                    .next()
+                    .is_some_and(|next| !next.is_ascii_whitespace());
+                let close = if opens && !dollar_unclosed[usize::from(display)] {
+                    formula_end(&rest[signs..], display)
+                } else {
+                    None
+                };
+                match close {
+                    Some(len) => {
+                        kept.push(i..i + signs + len);
+                        i += signs + len;
+                    }
+                    None => {
+                        if opens {
+                            dollar_unclosed[usize::from(display)] = true;
+                        }
+                        i += signs;
+                    }
+                }
             } else if let Some(after) = rest.strip_prefix("](") {
                 match address_end(after) {
                     Some(len) => {
@@ -1553,10 +1589,21 @@ fn kept_pieces(text: &str) -> Vec<std::ops::Range<usize>> {
                     None => i += 2,
                 }
             } else if c == '<' {
-                match autolink_end(&rest[1..]) {
-                    Some(len) => {
-                        kept.push(i..i + 1 + len);
-                        i += 1 + len;
+                let gt = match next_gt {
+                    Some(Some(at)) if at > i => Some(at),
+                    Some(None) => None,
+                    _ => {
+                        let found = text[i + 1..para.end].find('>').map(|k| i + 1 + k);
+                        next_gt = Some(found);
+                        found
+                    }
+                };
+                let inner = gt.map(|at| &text[i + 1..at]);
+                match inner.filter(|inner| autolink_inner(inner) || tag_inner(inner)) {
+                    Some(inner) => {
+                        let len = 1 + inner.len() + 1;
+                        kept.push(i..i + len);
+                        i += len;
                     }
                     None => i += 1,
                 }
@@ -1566,6 +1613,38 @@ fn kept_pieces(text: &str) -> Vec<std::ops::Range<usize>> {
         }
     }
     kept
+}
+
+/// The length of a formula from after its opening `$` or `$$` to the
+/// end of its closer, as the markdown parser reads it: the first `$`
+/// after the opener decides, a closer when it does not follow
+/// whitespace, for an inline formula, and when a `$` follows it, for a
+/// display one. None when the opener is text: no closer on the
+/// paragraph, a `$` inside, or a closer glued to a digit, which the
+/// page reads as a price.
+fn formula_end(after: &str, display: bool) -> Option<usize> {
+    let mut previous: Option<char> = None;
+    let mut chars = after.char_indices();
+    while let Some((i, c)) = chars.next() {
+        match c {
+            '\\' => {
+                previous = chars.next().map(|(_, escaped)| escaped);
+                continue;
+            }
+            '$' => {
+                let double = after[i + 1..].starts_with('$');
+                if display {
+                    return double.then_some(i + 2);
+                }
+                let closes = previous.is_some_and(|p| !p.is_ascii_whitespace());
+                let price = after.as_bytes().get(i + 1).is_some_and(u8::is_ascii_digit);
+                return (closes && !price).then_some(i + 1);
+            }
+            _ => {}
+        }
+        previous = Some(c);
+    }
+    None
 }
 
 /// The offset in `after` of a run of exactly `ticks` backticks, the
@@ -1608,11 +1687,9 @@ fn address_end(after: &str) -> Option<usize> {
     None
 }
 
-/// The length of an autolink from after its `<` to its `>`: an address
-/// with a scheme or an at sign and no whitespace. None otherwise.
-fn autolink_end(after: &str) -> Option<usize> {
-    let end = after.find('>')?;
-    let inner = &after[..end];
+/// Whether the text between a `<` and the next `>` is an autolink: an
+/// address with a scheme or an at sign and no whitespace.
+fn autolink_inner(inner: &str) -> bool {
     let plain = !inner.is_empty() && !inner.contains(|c: char| c.is_whitespace() || c == '<');
     let scheme = inner.split_once(':').is_some_and(|(s, _)| {
         s.len() >= 2
@@ -1620,7 +1697,15 @@ fn autolink_end(after: &str) -> Option<usize> {
             && s.chars()
                 .all(|c| c.is_ascii_alphanumeric() || "+.-".contains(c))
     });
-    (plain && (scheme || inner.contains('@'))).then_some(end + 1)
+    plain && (scheme || inner.contains('@'))
+}
+
+/// Whether the text between a `<` and the next `>` is an HTML tag: a
+/// name of letters after the `<`, or after a slash for a closing tag,
+/// then its attributes, on one line and holding no `<`.
+fn tag_inner(inner: &str) -> bool {
+    let name = inner.strip_prefix('/').unwrap_or(inner);
+    name.starts_with(|c: char| c.is_ascii_alphabetic()) && !inner.contains(['<', '\n'])
 }
 
 /// The address of a reference definition at the start of a line,
@@ -1676,15 +1761,17 @@ fn pieces_of<'s>(
 /// The pieces in a form, the kept ones as they are. A capital on each
 /// word goes on the first letter or digit after whitespace, the
 /// punctuation before it left alone, and the rest of the word is
-/// lowered. The letters change as strings, so a Greek sigma at the end
-/// of a word takes its final form.
+/// lowered. A tag is not on the page, so the text after it starts a
+/// word; inline code and an address are, and a word goes on after
+/// them. The letters change as strings, so a Greek sigma at the end of
+/// a word takes its final form.
 fn in_case(pieces: &[(&str, bool)], form: CaseForm) -> String {
     let mut out = String::new();
     let mut word_start = true;
     for (piece, kept) in pieces {
         if *kept {
             out.push_str(piece);
-            word_start = false;
+            word_start = piece.starts_with('<') && piece.ends_with('>');
             continue;
         }
         match form {
@@ -3171,6 +3258,42 @@ mod tests {
             case_of("See [The Page](https://x.y/Path) And `fooBar` Now"),
             "SEE [THE PAGE](https://x.y/Path) AND `fooBar` NOW"
         );
+    }
+
+    /// An HTML tag keeps its letters, its attributes with it, and so
+    /// does a formula as the markdown parser reads one; the dollar sign
+    /// of a price, an escaped one, a dollar with no closer and a lone
+    /// `<` are text.
+    #[test]
+    fn the_case_key_spares_tags_and_formulas() {
+        assert_eq!(
+            case_of("see <img src=\"images/Photo.png\"> here"),
+            "See <img src=\"images/Photo.png\"> Here"
+        );
+        assert_eq!(case_of("<b>bold</b> text"), "<b>Bold</b> Text");
+        assert_eq!(
+            case_of("the formula $\\Delta x$ holds"),
+            "The Formula $\\Delta x$ Holds"
+        );
+        assert_eq!(case_of("block $$\\Delta$$ done"), "Block $$\\Delta$$ Done");
+        assert_eq!(case_of("price $5-$10 each"), "Price $5-$10 Each");
+        assert_eq!(case_of("a < b and c > d"), "A < B And C > D");
+        assert_eq!(case_of("cost \\$x and $y"), "Cost \\$X And $Y");
+    }
+
+    /// A press on a table of two hundred thousand rows holding a `<`
+    /// costs the paragraph's length, not its square: the closing `>` is
+    /// searched once per region. The bound is wide for a debug build;
+    /// the scan that searched from each `<` to the paragraph's end took
+    /// seconds here.
+    #[test]
+    fn the_case_key_on_a_long_table_with_lone_angle_brackets_costs_its_length() {
+        let source = "| a < b |\n".repeat(200_000);
+        let started = std::time::Instant::now();
+        let edit = case_edit(&source, None, 2, true);
+        let took = started.elapsed();
+        assert!(edit.is_some(), "the word changes");
+        assert!(took.as_secs_f32() < 1.0, "one press took {took:?}");
     }
 
     #[test]

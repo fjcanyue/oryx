@@ -48,12 +48,28 @@ pub fn lights(text: &str) -> bool {
     (2..=LONGEST).contains(&chars) && !text.contains('\n') && !text.chars().all(char::is_whitespace)
 }
 
+/// Whether a selection may light, read on its positions before its
+/// text is built: inside one block, since a selection across blocks
+/// holds a line break, and within one span not longer in bytes than
+/// four times the character limit, which no text of that many
+/// characters fits. The text of a selection of the whole page cost
+/// 69 ms on an 8 MB page, built before the limit was read.
+pub fn within_reach(selection: &Selection) -> bool {
+    let (start, end) = (selection.start, selection.end);
+    start.block == end.block
+        && (start.span != end.span || start.byte.abs_diff(end.byte) <= 4 * LONGEST)
+}
+
 /// The other occurrences of a selection: a double-clicked word, whole,
 /// or a selected text trimmed of whitespace at its ends, wherever it
 /// appears. None when the text does not light or stands nowhere else.
 /// The set keeps the selection as made, since it lives as long as that
-/// selection stands.
+/// selection stands. A selection beyond reach on its positions is
+/// refused before its text is built, which costs the blocks it spans.
 pub fn find(doc: &Document, selection: Selection, matched: Match) -> Option<Occurrences> {
+    if !within_reach(&selection) {
+        return None;
+    }
     let text = selection::plain_text(&selection, doc);
     let text = text.trim();
     if !lights(text) {
@@ -104,6 +120,42 @@ mod tests {
         assert!(!lights("é"), "one character of two bytes");
         assert!(!lights("   "));
         assert!(!lights(""));
+    }
+
+    /// A selection is refused on its positions before its text is
+    /// built: across blocks, or longer in bytes within one span than any
+    /// text of the character limit can be.
+    #[test]
+    fn a_selection_across_blocks_or_over_the_limit_is_refused_on_its_positions() {
+        let at = |block, span, byte| ModelPos { block, span, byte };
+        let across = Selection {
+            start: at(0, 0, 0),
+            end: at(1, 0, 3),
+        };
+        assert!(!within_reach(&across), "across two blocks");
+        let long = Selection {
+            start: at(0, 0, 0),
+            end: at(0, 0, 4 * LONGEST + 1),
+        };
+        assert!(!within_reach(&long), "over the limit in one span");
+        let upward = Selection {
+            start: at(0, 0, 4 * LONGEST + 1),
+            end: at(0, 0, 0),
+        };
+        assert!(!within_reach(&upward), "the same, dragged upward");
+        let short = Selection {
+            start: at(0, 0, 0),
+            end: at(0, 0, 5),
+        };
+        assert!(within_reach(&short));
+        let spans = Selection {
+            start: at(0, 0, 0),
+            end: at(0, 2, 5),
+        };
+        assert!(
+            within_reach(&spans),
+            "across spans of one block: the text decides"
+        );
     }
 
     #[test]
