@@ -36,6 +36,7 @@
 - Columns of a table can now be aligned, each on its own, with the marks of the line under the header: `:---:` for the center, `---:` for the right. Before, the marks were ignored. The alignment is not lost when the table is copied as HTML (issue #11).
 - When the page is scrolled into a tall image and you press `Ctrl+E`, the text under the image now stays where it was on the screen. Before, the image's line went to the top of the editor and that text jumped up with it.
 - A file holding a next line character (U+0085) or another control character of the C1 set now opens, with a blank in the character's place, and so does a page whose image has one in its description. Before, Oryx closed at once when the character stood between two scripts, and an escape character in a description froze the window while every font was searched.
+- In the editor, on text written from right to left, the caret now stands where the next letter goes: at the right end of a word before its first letter, at the left end after its last, and left of the word in the spaces after it. Before, it stood at the opposite end, one word away from the letters you typed.
 
 ## v1.2.1
 
