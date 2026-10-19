@@ -17,7 +17,7 @@ Oryx is a fast editor for markdown and code, and a reader for ebooks and comics.
 
 Oryx reads CommonMark and the GitHub Flavored Markdown extensions: tables, task lists, strikethrough, footnotes, alerts and math. It also reads the extended syntax listed by the Markdown Guide: heading IDs in braces, definition lists, subscript and superscript (`H~2~O`, `x^2^`), highlight (`==highlight==`) and abbreviations, whose expansion shows when the mouse is over them. Emoji shortcodes are replaced by the emoji: `:tada:` gives :tada:. The [examples](examples/) folder is installed with Oryx and shows the syntax in real documents.
 
-Lists nest as deep as needed, and a wrapped line lines up with the text above it, not with the bullet. Tables keep the alignment of each column, shade every other row, and wrap long cells. A link to another file opens that file in Oryx.
+Lists nest as deep as needed, and a wrapped line lines up with the text above it, not with the bullet. You can align the columns of a table, each on its own, and the alignment is kept when you copy the table. Every other row is shaded, and long cells wrap. A link to another file opens that file in Oryx.
 
 The five GitHub alerts (note, tip, important, warning, caution) each have their own color and title. A YAML front matter block at the top of a file is shown as a small panel above the document.
 
