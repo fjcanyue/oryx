@@ -1728,11 +1728,11 @@ fn title_case(text: &str, word_start: &mut bool, out: &mut String) {
     }
 }
 
-/// The pieces in the next form of the cycle, from the form they are in:
-/// the first form after it that reads differently, so that a single
-/// capital letter, both a capital on each word and upper case, goes to
-/// lower case. None when no letter the key changes is there.
-fn next_case(pieces: &[(&str, bool)]) -> Option<String> {
+/// The next form of the cycle and the pieces in it, from the form they
+/// are in: the first form after it that reads differently, so that a
+/// single capital letter, both a capital on each word and upper case,
+/// goes to lower case. None when no letter the key changes is there.
+fn next_case(pieces: &[(&str, bool)]) -> Option<(CaseForm, String)> {
     let has_letter = pieces
         .iter()
         .any(|(piece, kept)| !kept && piece.chars().any(char::is_alphabetic));
@@ -1743,8 +1743,9 @@ fn next_case(pieces: &[(&str, bool)]) -> Option<String> {
     let current = CASE_CYCLE.iter().position(|f| in_case(pieces, *f) == text);
     let first = current.map_or(0, |i| i + 1);
     (0..CASE_CYCLE.len())
-        .map(|k| in_case(pieces, CASE_CYCLE[(first + k) % CASE_CYCLE.len()]))
-        .find(|t| *t != text)
+        .map(|k| CASE_CYCLE[(first + k) % CASE_CYCLE.len()])
+        .map(|form| (form, in_case(pieces, form)))
+        .find(|(_, t)| *t != text)
 }
 
 /// The next case of the selection, or of the word under the caret:
@@ -1777,12 +1778,17 @@ pub fn case_edit(
     if !had_selection && pieces.iter().any(|(_, kept)| *kept) {
         return None;
     }
-    let text = next_case(&pieces)?;
+    let (form, text) = next_case(&pieces)?;
     let inner = range.start..range.start + text.len();
     let caret = if had_selection {
         inner.end
     } else {
-        caret.min(inner.end)
+        // The caret keeps its place by its letters, not by its byte
+        // offset: a letter before it may change length in the new form
+        // (a dotless i to I, a dotted I to i with a combining dot), and
+        // the old offset would fall inside a character.
+        let before = &source[range.start..caret.clamp(range.start, range.end)];
+        inner.start + in_case(&[(before, false)], form).len()
     };
     Some(MarkEdit {
         replace: range,
@@ -3178,6 +3184,24 @@ mod tests {
             case_edit("say  there", None, 4, true).is_none(),
             "between two spaces there is no word"
         );
+    }
+
+    #[test]
+    fn the_caret_stays_after_the_same_letters_when_their_bytes_change() {
+        // The dotless i is two bytes and its capital I one.
+        let edit = case_edit("ışık", None, 2, false).expect("the word");
+        assert_eq!(edit.text, "Işık");
+        assert!(edit.text.is_char_boundary(edit.caret));
+        assert_eq!(edit.caret, 1, "after the I");
+        // The dotted capital I lowers to an i with a combining dot, three bytes.
+        let edit = case_edit("İSTANBUL", None, 2, false).expect("the word");
+        assert_eq!(edit.text, "i\u{307}stanbul");
+        assert!(edit.text.is_char_boundary(edit.caret));
+        assert_eq!(edit.caret, 3, "after the i and its dot");
+        // A sharp s becomes two letters in upper case.
+        let edit = case_edit("Straße", None, 6, false).expect("the word");
+        assert_eq!(edit.text, "STRASSE");
+        assert_eq!(edit.caret, 6, "after both letters");
     }
 
     #[test]

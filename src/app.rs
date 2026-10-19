@@ -2811,6 +2811,11 @@ impl App {
     /// The caret after an edit or an undo step: seated, blink woken,
     /// the next placed frame snapping the view to it.
     fn seat_caret_after_edit(&mut self, offset: usize) {
+        // An offset inside a character would be sliced by the next frame.
+        debug_assert!(
+            self.document.source.is_char_boundary(offset),
+            "a caret seated inside a character, at byte {offset}"
+        );
         self.caret = Some(Caret::at(offset));
         self.wake_caret();
         self.caret_snap = true;
