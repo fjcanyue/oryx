@@ -690,6 +690,19 @@ mod tests {
         assert_eq!(at.len(), 7, "the separator keeps its boundary");
     }
 
+    /// The next line character (U+0085) is a paragraph separator too,
+    /// one the shaper drops between two of its lines.
+    #[test]
+    fn a_next_line_character_does_not_break_the_shaping() {
+        let mut pixmap = Pixmap::new(400, 50).unwrap();
+        let mut fonts = FontStore::new();
+        let mut painter = Painter::new(&mut pixmap, &mut fonts, None, 1.0);
+        let width = painter.measure("abc\u{85}مق", BODY_FAMILY, 15.0, 400);
+        assert!(width > 0.0);
+        let at = painter.boundaries("abc\u{85}مق", BODY_FAMILY, 15.0, 400);
+        assert_eq!(at.len(), 7, "the character keeps its boundary");
+    }
+
     #[test]
     fn scale_reports_the_canvas_in_logical_units() {
         let mut pixmap = Pixmap::new(200, 100).unwrap();

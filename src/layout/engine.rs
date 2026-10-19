@@ -4114,7 +4114,10 @@ fn shape_segment_chunk(
     // A span text may carry embedded newlines; the buffer splits them
     // into separate lines whose glyph offsets are line-local. Each
     // line's base offset inside the chunk counts the stripped newline
-    // back in, so a model reference lands on the span's own bytes.
+    // back in, one byte, so a model reference lands on the span's own
+    // bytes. The buffer splits at every paragraph separator, and
+    // `shapable` turns the others (the carriage return, U+0085, U+2029)
+    // into blanks, so the newline is the only one it drops here.
     // The unchunked path's piece table: each piece with its offset in
     // the segment, the first of an origin span being where a model
     // reference counts from. A handful of pieces, so a scan answers.
@@ -6077,7 +6080,7 @@ fn side_text_width(fonts: &mut FontStore, cfg: &ViewConfig, text: &str, size: f3
     let attrs = Attrs::new().family(Family::Name(&cfg.body_family));
     buffer.set_text(
         &mut fonts.font_system,
-        text,
+        &crate::style::fonts::shapable(text),
         &attrs,
         Shaping::Advanced,
         None,
@@ -6106,7 +6109,7 @@ fn shape_side_text(
     let attrs = Attrs::new().family(Family::Name(family_name));
     buffer.set_text(
         &mut fonts.font_system,
-        text,
+        &crate::style::fonts::shapable(text),
         &attrs,
         Shaping::Advanced,
         None,
@@ -6909,6 +6912,41 @@ mod tests {
         let doc = markdown::parse("abc\u{2029}مق and on\n");
         let lay = lay_of(&doc);
         assert!(lay.height > 0.0);
+    }
+
+    /// A next line character (U+0085) is a paragraph separator too, and
+    /// the shaper drops it between two of its lines, which puts every
+    /// offset after it one byte off: the page shapes through
+    /// `shapable`, so each run's text is still readable.
+    #[test]
+    fn a_next_line_character_in_the_text_lays_out() {
+        let doc = markdown::parse("abc\u{85}مق and on\n");
+        let lay = lay_of(&doc);
+        assert!(lay.height > 0.0);
+        for run in &lay.runs {
+            assert!(!lay.run_text(&doc, run).is_empty());
+        }
+    }
+
+    /// The label of an image shown without its picture is shaped like
+    /// the text: a separator between two directions does not end the
+    /// layout, and a control character measures as the space it is
+    /// shown as, not as a glyph searched through every font.
+    #[test]
+    fn an_image_label_is_shaped_through_shapable() {
+        for label in ["abc\u{2029}مق", "abc\u{85}مق"] {
+            let doc = markdown::parse(format!("See ![{label}](nothing.png) here.\n"));
+            let lay = lay_of(&doc);
+            assert!(lay.height > 0.0);
+        }
+        let mut fonts = FontStore::new();
+        let cfg = ViewConfig::default();
+        let with_escape = side_text_width(&mut fonts, &cfg, "x\u{1b}y", 15.0);
+        let with_space = side_text_width(&mut fonts, &cfg, "x y", 15.0);
+        assert!(
+            (with_escape - with_space).abs() < 0.01,
+            "the escape measures as a space: {with_escape} against {with_space}"
+        );
     }
 
     fn lay_of(doc: &Document) -> LayoutDoc {

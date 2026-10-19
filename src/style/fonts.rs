@@ -127,9 +127,16 @@ fn family_for(class: ScriptClass) -> Option<&'static str> {
 /// file for longer. A line or paragraph separator (U+2028, U+2029)
 /// becomes an em space, three bytes like itself: the shaper splits a
 /// line at one into bidi paragraphs and asserts that they share a
-/// direction, which a pasted query mixing scripts fails.
+/// direction, which a pasted query mixing scripts fails. A C1 control
+/// (U+0080 to U+009F) becomes a no-break space, two bytes like itself:
+/// none has a glyph, and U+0085 is a paragraph separator too, one the
+/// shaper drops between two of its lines, which would put every offset
+/// after it one byte off.
 pub fn shapable(text: &str) -> std::borrow::Cow<'_, str> {
-    if !text.bytes().any(is_control_byte) && !text.contains(['\u{2028}', '\u{2029}']) {
+    if !text.bytes().any(is_control_byte)
+        && !text.contains(['\u{2028}', '\u{2029}'])
+        && !text.chars().any(is_c1_control)
+    {
         return std::borrow::Cow::Borrowed(text);
     }
     std::borrow::Cow::Owned(
@@ -139,12 +146,19 @@ pub fn shapable(text: &str) -> std::borrow::Cow<'_, str> {
                     ' '
                 } else if matches!(c, '\u{2028}' | '\u{2029}') {
                     '\u{2003}'
+                } else if is_c1_control(c) {
+                    '\u{a0}'
                 } else {
                     c
                 }
             })
             .collect(),
     )
+}
+
+/// A control of the C1 set, U+0080 to U+009F: two bytes, no glyph.
+fn is_c1_control(c: char) -> bool {
+    ('\u{80}'..='\u{9f}').contains(&c)
 }
 
 /// A byte no text shows: the C0 controls but the tab, and DEL.
@@ -319,6 +333,14 @@ mod tests {
         let text = "a\u{2028}b\u{2029}مق";
         let shaped = shapable(text);
         assert_eq!(&*shaped, "a\u{2003}b\u{2003}مق");
+        assert_eq!(shaped.len(), text.len(), "every offset still maps");
+    }
+
+    #[test]
+    fn the_c1_controls_shape_as_a_no_break_space_of_the_same_length() {
+        let text = "a\u{85}b\u{80}c\u{9f}مق";
+        let shaped = shapable(text);
+        assert_eq!(&*shaped, "a\u{a0}b\u{a0}c\u{a0}مق");
         assert_eq!(shaped.len(), text.len(), "every offset still maps");
     }
 

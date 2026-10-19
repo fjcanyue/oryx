@@ -35,6 +35,7 @@
 - On KDE Plasma 6.8, the window is no longer see-through. KWin 6.8 now applies the opacity channel of every window, one that declares none included, and Oryx left that channel empty, which reads as fully transparent. Oryx now marks every pixel as fully opaque.
 - Columns of a table can now be aligned, each on its own, with the marks of the line under the header: `:---:` for the center, `---:` for the right. Before, the marks were ignored. The alignment is not lost when the table is copied as HTML (issue #11).
 - When the page is scrolled into a tall image and you press `Ctrl+E`, the text under the image now stays where it was on the screen. Before, the image's line went to the top of the editor and that text jumped up with it.
+- A file holding a next line character (U+0085) or another control character of the C1 set now opens, with a blank in the character's place, and so does a page whose image has one in its description. Before, Oryx closed at once when the character stood between two scripts, and an escape character in a description froze the window while every font was searched.
 
 ## v1.2.1
 
