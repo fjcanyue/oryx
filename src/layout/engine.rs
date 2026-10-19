@@ -27,9 +27,11 @@ pub struct ViewConfig {
     pub code_size: f32,
     /// Session zoom multiplier, never persisted.
     pub zoom: f32,
-    /// Stretch prose to the content width, book typography. The app sets
-    /// it only for EPUB documents; paragraphs, list items, and quote
-    /// text justify, everything else keeps its natural width.
+    /// Stretch prose to the content width, book typography: paragraphs,
+    /// list items and quote text justify, everything else keeps its
+    /// natural width. The app sets it from the book preference on a book
+    /// and from the markdown preference on other prose, never on a code
+    /// or text file (`justify_pref` in the app).
     pub justify: bool,
     /// A comic's display state; layout reads it only when the document
     /// is a comic. The page states carry the viewport height, which the
