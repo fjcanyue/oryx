@@ -366,6 +366,8 @@ pub fn run(
         ledger: None,
         undo: None,
         rehighlight_at: None,
+        burst_end: 0,
+        resumed: false,
         seams: HashMap::new(),
         spec_band: None,
         guessed: HashMap::new(),
@@ -1086,6 +1088,10 @@ struct Stash {
     /// A parse was still streaming at the swap, so the model is
     /// partial; the return reopens from disk instead of restoring it.
     reopen: bool,
+    /// The document's seam table and the burst's end, for the return to
+    /// resume from.
+    seams: HashMap<usize, Vec<(usize, highlight::Seam)>>,
+    burst_end: usize,
 }
 
 /// The help document, parsed from the generated page.
@@ -1623,6 +1629,13 @@ struct App {
     /// When the edited block re-highlights, set by each keystroke and
     /// fired once typing rests.
     rehighlight_at: Option<Instant>,
+    /// The highest line an edit touched that no exact sweep has reached
+    /// since, shifted by each edit as a seam is; zero for none. The
+    /// resumed sweep converges only at a seam at or past it.
+    burst_end: usize,
+    /// A sweep resumed by the rest timer is running: no guess until it
+    /// is done, or a converged stop would vouch for the guess's lines.
+    resumed: bool,
     /// The live generation's seam table per block, from the exact
     /// sweep's arrivals: the (line, state) pairs a later sweep can
     /// resume from and converge against.
@@ -2276,6 +2289,11 @@ impl App {
     /// whole when no byte changed, and is rebuilt from the buffer when
     /// one did, so unsaved edits show on the page and not just on disk.
     fn leave_edit(&mut self) {
+        // A re-coloring the editor still owed is the page's now, which
+        // starts its coloring afresh below: the timer firing on the
+        // page would restart the worker with nothing and kill that
+        // coloring between chunks.
+        self.rehighlight_at = None;
         // The replace row is an editor tool; reading keeps the plain bar.
         let dropped = self.search.as_mut().and_then(|state| state.replace.take());
         if let Some(row) = dropped {
@@ -2849,6 +2867,8 @@ impl App {
                 if let Some(table) = self.seams.get_mut(&0) {
                     highlight::shift_seams(table, old_lines.clone(), new_lines.clone());
                 }
+                self.burst_end = highlight::shift_line(self.burst_end, &old_lines, &new_lines)
+                    .max(new_lines.end);
                 // The model spliced; the layout follows in place, or a
                 // restart re-measures the already-correct model.
                 let lay = self.layout.as_mut().expect("settled layout");
@@ -2877,6 +2897,8 @@ impl App {
                 if let Some(table) = self.seams.get_mut(&0) {
                     highlight::shift_seams(table, old_touched.clone(), touched.clone());
                 }
+                self.burst_end =
+                    highlight::shift_line(self.burst_end, &old_touched, &touched).max(touched.end);
                 self.document = edit::reparse(
                     load::detect(&path),
                     &current,
@@ -3834,43 +3856,25 @@ impl App {
     /// timer's due action. The sweep resumes from the nearest stored
     /// seam at or before the exact frontier, which every splice clamps
     /// to the burst's first touched line, and it converges against the
-    /// shifted table: typing anywhere re-colors about one chunk, not
-    /// the block.
+    /// shifted table past the burst's last touched line: typing
+    /// anywhere re-colors about one chunk, not the block, and a burst
+    /// of edits far apart re-colors the lines between them.
     fn rehighlight_edited(&mut self) {
-        let pending = match self.document.blocks.first().map(|b| &b.kind) {
-            Some(BlockKind::CodeBlock {
-                language,
-                lines,
-                exact,
-                ..
-            }) if !self.document.plain_file => {
-                let resume = self.seams.get(&0).map(|table| {
-                    let at = table.partition_point(|(line, _)| *line <= *exact);
-                    let (start_line, seam) = match at.checked_sub(1).and_then(|i| table.get(i)) {
-                        Some((line, seam)) => (*line, Some(seam.clone())),
-                        None => (0, None),
-                    };
-                    highlight::Resume {
-                        start_line,
-                        seam,
-                        expected: table[at..].to_vec(),
-                    }
-                });
-                vec![PendingBlock {
-                    block: 0,
-                    language: language.clone(),
-                    source: self.document.source.clone(),
-                    lines: lines.clone(),
-                    resume,
-                }]
-            }
-            _ => Vec::new(),
-        };
+        if self.document.plain_file {
+            return;
+        }
+        let pending = load::pending_from(&self.document, &self.seams, self.burst_end);
+        if pending.is_empty() {
+            return;
+        }
         // The resumed sweep converges against the stored table, which
         // therefore survives the start; its arrivals upsert their own
         // lines. A guess still in flight is dropped by the start, and
-        // the gate it holds opens again.
+        // none is asked until the sweep is done: a guess landing on
+        // lines a converged stop then vouches for would stand in place
+        // of the exact colors.
         self.spec_band = None;
+        self.resumed = true;
         let waker = self.waker.clone();
         self.highlighter.start(pending, move || waker());
     }
@@ -5800,6 +5804,8 @@ impl App {
     /// their first line, so the seam table rebuilds from its arrivals.
     fn start_highlight(&mut self, pending: Vec<PendingBlock>) {
         self.seams.clear();
+        self.burst_end = 0;
+        self.resumed = false;
         self.spec_band = None;
         self.guessed.clear();
         let waker = self.waker.clone();
@@ -5812,6 +5818,7 @@ impl App {
     /// generation recorded. Stale arrivals drop at the drain, so the
     /// table only ever learns from the live generation.
     fn cancel_highlight(&mut self) {
+        self.resumed = false;
         self.spec_band = None;
         self.guessed.clear();
         let waker = self.waker.clone();
@@ -5826,6 +5833,14 @@ impl App {
     /// (`speculation_target`).
     fn maybe_speculate(&mut self) {
         if self.document.plain_file || self.drag.is_some() || self.selecting() {
+            return;
+        }
+        // No guess while a re-coloring is owed or a resumed sweep runs:
+        // the sweep converges and vouches for the lines up to the
+        // table's reach, and a guess landed there would stand in place
+        // of the exact colors. The band keeps the colors it had,
+        // shifted by the edit, for the rest's few hundred milliseconds.
+        if self.rehighlight_at.is_some() || self.resumed {
             return;
         }
         let Some(lay) = self.layout.as_ref() else {
@@ -6049,6 +6064,19 @@ impl App {
                 .iter()
                 .map(|a| (a.block, a.start_line..a.start_line + a.spans.len())),
         );
+        // The burst's end is behind the frontier once the exact sweep
+        // has colored the lines up to it; a resumed sweep that ended
+        // lets the guesses in again.
+        let frontier = self.document.blocks.first().map_or(0, |b| match &b.kind {
+            BlockKind::CodeBlock { exact, .. } => *exact,
+            _ => 0,
+        });
+        if frontier >= self.burst_end {
+            self.burst_end = 0;
+        }
+        if !self.highlighter.is_running() {
+            self.resumed = false;
+        }
         // Recolors land in waves: the model folds immediately, but the
         // run vector rebuilds at most once per wave, so a trickling
         // wash-in pays a handful of ranged rebuilds, not hundreds.
@@ -7129,6 +7157,11 @@ impl App {
             self.parser.cancel();
             self.parse_pending = false;
         }
+        // The document's seam table and the burst it still owes a
+        // re-coloring for go with it, so that the return resumes from
+        // them instead of sweeping the file again from line 0.
+        let seams = std::mem::take(&mut self.seams);
+        let burst_end = self.burst_end;
         self.start_highlight(Vec::new());
         self.rehighlight_at = None;
         self.close_search();
@@ -7161,6 +7194,8 @@ impl App {
             cfg: self.cfg.clone(),
             theme: self.theme.clone(),
             reopen,
+            seams,
+            burst_end,
         }));
         self.document = markdown_help();
         // The page's code blocks get the exact sweep a file gets at
@@ -7261,9 +7296,18 @@ impl App {
         self.pending_band_for = None;
         self.close_search();
         // Recolors still owed name the help page's blocks, not this
-        // document's; its own sweep starts from scratch below.
+        // document's. Its seam table comes back with it, and the blocks
+        // still to color resume from it: a key after the help page
+        // re-colors from the edit, not the file from line 0.
         self.pending_recolor.clear();
-        self.start_highlight(load::pending(&self.document));
+        self.seams = stash.seams;
+        self.burst_end = stash.burst_end;
+        self.resumed = false;
+        self.spec_band = None;
+        self.guessed.clear();
+        let pending = load::pending_from(&self.document, &self.seams, self.burst_end);
+        let waker = self.waker.clone();
+        self.highlighter.start(pending, move || waker());
         if self.mode == edit::Mode::Edit {
             self.wake_caret();
         }

@@ -147,6 +147,20 @@ pub fn shift_seams(
     });
 }
 
+/// Where a line stands after an edit replaced the `old` line range with
+/// `new`, as `shift_seams` moves a seam: a line at or before the
+/// region's first line stays, a line inside it is the region's new end,
+/// a line past it moves by the line delta.
+pub fn shift_line(line: usize, old: &Range<usize>, new: &Range<usize>) -> usize {
+    if line <= old.start {
+        line
+    } else if line <= old.end {
+        new.end
+    } else {
+        (line as isize + new.end as isize - old.end as isize) as usize
+    }
+}
+
 /// One delivered chunk: its lines' spans, the seam closing it, and
 /// whether that seam matched the stored table, which stops the sweep
 /// with the tail's colors and seams standing.
@@ -199,15 +213,19 @@ pub fn spans_chunked(
         let seam = parser.seam();
         let converged = expected.iter().any(|(line, s)| *line == end && *s == seam);
         // A converged stop vouches for the lines up to the table's
-        // reach, the last line the earlier sweep colored and filed. A
-        // table that stops short of the block's end, as a keystroke
-        // during the first sweep leaves it, has a tail that sweep never
-        // reached: the sweep goes on with it from the table's last seam.
+        // reach, the last line the earlier sweep colored and filed, and
+        // never for less than this chunk. A table that stops short of
+        // the block's end, as a keystroke during the first sweep leaves
+        // it, has a tail that sweep never reached: the sweep goes on
+        // with it from the table's last seam when that seam is past
+        // this chunk, and from this chunk's own seam when the table
+        // ends here, so a table out of order ends the sweep as any
+        // other does.
         let table_end = expected
             .last()
             .map_or(0, |(line, _)| *line)
             .min(lines.len());
-        let reach = if converged { table_end } else { 0 };
+        let reach = if converged { table_end.max(end) } else { 0 };
         if !deliver(Chunk {
             start_line: start,
             spans,
@@ -221,10 +239,12 @@ pub fn spans_chunked(
             if reach >= lines.len() {
                 return true;
             }
-            let (_, last_seam) = expected.last().expect("a converged stop has a table");
-            parser = Parser::from_seam(last_seam.clone(), language);
-            start = reach;
-            continue;
+            if reach > end {
+                let (_, last_seam) = expected.last().expect("a converged stop has a table");
+                parser = Parser::from_seam(last_seam.clone(), language);
+                start = reach;
+                continue;
+            }
         }
         start = end;
     }
@@ -1581,6 +1601,55 @@ mod tests {
             Some(3000),
             "and reaches the block's end: {delivered:?}"
         );
+    }
+
+    /// A line kept across an edit, the burst's end among them, moves
+    /// as a seam does: unmoved before the edit, the region's new end
+    /// inside it, moved by the delta past it.
+    #[test]
+    fn a_line_moves_with_the_lines_of_an_edit() {
+        assert_eq!(shift_line(100, &(600..603), &(600..601)), 100);
+        assert_eq!(shift_line(600, &(600..603), &(600..601)), 600);
+        assert_eq!(
+            shift_line(602, &(600..603), &(600..601)),
+            601,
+            "a line inside the replaced lines is their new end"
+        );
+        assert_eq!(
+            shift_line(1000, &(600..603), &(600..601)),
+            998,
+            "a line past the edit moves by the delta"
+        );
+        assert_eq!(shift_line(1000, &(512..513), &(512..515)), 1002);
+    }
+
+    /// A table out of order, which no sweep of the application files
+    /// but the function takes: the sweep ends and reaches the block's
+    /// end, instead of starting again below the chunk it converged on.
+    #[test]
+    fn a_table_out_of_order_ends_the_sweep() {
+        let src = let_lines(3000);
+        let mut seams: Vec<(usize, Seam)> =
+            sweep_seams(&src, CHUNK_LINES).into_iter().take(3).collect();
+        seams.reverse();
+        assert_eq!(seams.first().map(|s| s.0), Some(1536));
+        let resume = Resume {
+            start_line: 0,
+            seam: None,
+            expected: seams,
+        };
+        let mut delivered = 0;
+        let mut last_end = 0;
+        let complete = spans_chunked("", &src, Some("rust"), CHUNK_LINES, Some(&resume), |c| {
+            delivered += 1;
+            last_end = c.start_line + c.spans.len();
+            delivered <= 20
+        });
+        assert!(
+            complete,
+            "the sweep ends by itself: {delivered} deliveries, the last to {last_end}"
+        );
+        assert_eq!(last_end, 3000, "and reaches the block's end");
     }
 
     #[test]

@@ -40,6 +40,8 @@
 - The search bar stays quick with a very long query pasted into it. Before, each key took seconds with a query of a few thousand characters, the field measuring the text once per character.
 - In the search bar and the fields, a query longer than the field now keeps its place while you move or click inside the part shown, and a letter typed in the middle stays in view. Before, the shown part started at the caret after each click or arrow key, and a letter typed there went out of view at once.
 - A code file keeps its syntax colors to its end after an undo or a redo in reading mode, and after a key typed while a big file was still being colored. Before, the lines past the first chunk stayed plain until the file was opened again, in the PDF too.
+- In the editor, the syntax colors of a code file now stay right after several edits in quick succession at different places, and after a key typed inside a long comment followed by a scroll. Before, the lines between the edits could stay plain, and the lines scrolled into view could take the colors of code, until the file was opened again.
+- A key in the editor after the help page no longer colors the whole file again, which took 25 seconds on an 8 MB file. And the code blocks of a page are all colored after a key pressed just before leaving the editor; before, the coloring stopped where it was and the PDF showed the rest plain.
 
 ## v1.2.1
 
