@@ -37,6 +37,8 @@
 - When the page is scrolled into a tall image and you press `Ctrl+E`, the text under the image now stays where it was on the screen. Before, the image's line went to the top of the editor and that text jumped up with it.
 - A file holding a next line character (U+0085) or another control character of the C1 set now opens, with a blank in the character's place, and so does a page whose image has one in its description. Before, Oryx closed at once when the character stood between two scripts, and an escape character in a description froze the window while every font was searched.
 - In the editor, on text written from right to left, the caret now stands where the next letter goes: at the right end of a word before its first letter, at the left end after its last, and left of the word in the spaces after it. Before, it stood at the opposite end, one word away from the letters you typed.
+- The search bar stays quick with a very long query pasted into it. Before, each key took seconds with a query of a few thousand characters, the field measuring the text once per character.
+- In the search bar and the fields, a query longer than the field now keeps its place while you move or click inside the part shown, and a letter typed in the middle stays in view. Before, the shown part started at the caret after each click or arrow key, and a letter typed there went out of view at once.
 
 ## v1.2.1
 

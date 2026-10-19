@@ -187,6 +187,7 @@ pub fn draw_bar(painter: &mut Painter, theme: &Theme, state: &mut GotoState, wid
         avail,
         "line:column",
         true,
+        state.view.window.start,
     );
 }
 
