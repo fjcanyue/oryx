@@ -366,22 +366,42 @@ pub(crate) fn draw_field(
     // a click at the box's edge reaches them one at a time, and the
     // window follows the caret. A text reading right to left runs from
     // the right, so the characters after the window continue left of
-    // it, and the ones before it stand right of it. Each hidden side is
-    // shaped once and its boundaries read as advances from the window's
-    // edge, one shaping for the side in place of one per character.
-    let rtl = shown
-        .chars()
-        .find_map(crate::style::fonts::strong_rtl)
-        .unwrap_or(false);
+    // it, and the ones before it stand right of it. The direction is
+    // the drawn line's own, read off its boundaries, which fall from
+    // the right when the shaper laid it right to left: the first strong
+    // character says otherwise for Arabic digits (numbers to the
+    // shaper), for Thaana or Syriac (right to left to the shaper, not
+    // to the face routing) and for a direction mark.
+    let rtl = positions
+        .first()
+        .zip(positions.last())
+        .is_some_and(|(first, last)| first > last);
     let side = if rtl { -1.0 } else { 1.0 };
+    // A hidden side is shaped once, for the width of each of its
+    // characters, and its boundaries go outward from the window's edge
+    // one character at a time, each a character's width farther than
+    // the one before. The side's own order on a line means nothing to
+    // the click, since it is not drawn: read as positions, a side that
+    // mixes directions folds back on itself, and a boundary of it can
+    // tie a drawn one and take the click.
     let advances = |painter: &mut Painter, slice: &str, from_end: bool| -> Vec<f32> {
-        let positions = painter.boundaries(slice, CODE_FAMILY, QUERY_SIZE, 400);
-        let origin = if from_end {
-            positions.last().copied().unwrap_or(0.0)
+        let widths = painter.advances(slice, CODE_FAMILY, QUERY_SIZE, 400);
+        let mut sum = 0.0;
+        let mut out = Vec::with_capacity(widths.len() + 1);
+        out.push(0.0);
+        if from_end {
+            for width in widths.iter().rev() {
+                sum += width;
+                out.push(sum);
+            }
+            out.reverse();
         } else {
-            positions.first().copied().unwrap_or(0.0)
-        };
-        positions.iter().map(|x| (x - origin).abs()).collect()
+            for width in &widths {
+                sum += width;
+                out.push(sum);
+            }
+        }
+        out
     };
     let after = advances(painter, &text[window.end..], false);
     let before = advances(painter, &text[..window.start], true);
@@ -422,13 +442,19 @@ pub fn toggle_hit(width: f32, px: f32, py: f32) -> bool {
 /// The window keeps the start it had at the last frame while the caret
 /// stays inside it, as a one-line field does: a click on a drawn letter
 /// does not shift the text, and a letter typed in the middle stays in
-/// view. When the caret leaves it, the window slides by the least: to the
+/// view. It never starts past the tail, the first start that shows the
+/// text's end, so a text that shrinks (BackSpace at its end, the undo
+/// of a paste) or a field that widens fills the field again. When the
+/// caret leaves the window, the window slides by the least: to the
 /// caret on the left, to the first start that shows the caret on the
 /// right, which for a caret at the end is the tail. A longer slice is
-/// wider, so the end of a window and a slide to the right are binary
-/// searches over the character boundaries: a dozen measures for a query
-/// of thousands of characters, where one per character cost the square
-/// of the length at every frame.
+/// wider, so the tail, the end of a window and a slide to the right are
+/// binary searches over the character boundaries: a dozen measures each
+/// for a query of thousands of characters, where one per character cost
+/// the square of the length at every frame. A longer slice can also draw
+/// narrower (a ligature, a letter's form), which a binary search does
+/// not expect, so the window's end is never short of the caret whatever
+/// the searches found.
 fn window_fit(
     painter: &mut Painter,
     query: &str,
@@ -448,11 +474,25 @@ fn window_fit(
     if fits(painter, 0, query.len()) {
         return (0..query.len(), false);
     }
+    let starts: Vec<usize> = query.char_indices().map(|(offset, _)| offset).collect();
+    let tail = {
+        let (mut lo, mut hi) = (0, starts.len());
+        while lo < hi {
+            let mid = (lo + hi) / 2;
+            if fits(painter, starts[mid], query.len()) {
+                hi = mid;
+            } else {
+                lo = mid + 1;
+            }
+        }
+        starts.get(lo).copied().unwrap_or(query.len())
+    };
     // The last frame's start, on the text as it is now.
     let mut start = previous_start.min(query.len());
     while !query.is_char_boundary(start) {
         start -= 1;
     }
+    let mut start = start.min(tail);
     if caret < start {
         start = caret;
     }
@@ -481,24 +521,22 @@ fn window_fit(
     let mut end = end_from(painter, start);
     if caret > end {
         // The caret right of the window: the first start that shows it.
-        let starts: Vec<usize> = query[start..caret]
-            .char_indices()
-            .map(|(offset, _)| start + offset)
-            .skip(1)
-            .collect();
-        let (mut lo, mut hi) = (0, starts.len());
+        let from = starts.partition_point(|s| *s <= start);
+        let to = starts.partition_point(|s| *s < caret);
+        let slide = &starts[from..to];
+        let (mut lo, mut hi) = (0, slide.len());
         while lo < hi {
             let mid = (lo + hi) / 2;
-            if fits(painter, starts[mid], caret) {
+            if fits(painter, slide[mid], caret) {
                 hi = mid;
             } else {
                 lo = mid + 1;
             }
         }
-        start = starts.get(lo).copied().unwrap_or(caret);
+        start = slide.get(lo).copied().unwrap_or(caret);
         end = end_from(painter, start);
     }
-    (start..end, start > 0)
+    (start..end.max(caret), start > 0)
 }
 
 /// A query with any capital letter matches exactly; an all-lowercase
@@ -1016,6 +1054,178 @@ mod tests {
         assert!(
             right.start > left.start && right.start < beyond && right.end >= beyond,
             "the caret right of the window: it slides by the least, {left:?} then {right:?} for {beyond}"
+        );
+    }
+
+    /// BackSpace at the end of a long query: the window slides left so
+    /// the field stays full, as a one-line field does, instead of
+    /// keeping its start and leaving the right of the field empty.
+    #[test]
+    fn backspace_at_the_end_of_a_long_query_keeps_the_field_full() {
+        use winit::keyboard::{Key, NamedKey};
+        let query: String = "abcdefghij".repeat(6);
+        let mut field = TextField::new(query);
+        let mut pixmap = Pixmap::new(400, 60).unwrap();
+        let mut fonts = FontStore::new();
+        let mut painter = Painter::new(&mut pixmap, &mut fonts, None, 1.0);
+        let theme = Theme::default_dark();
+        let mut draw = |field: &TextField, previous: usize| {
+            draw_field(
+                &mut painter,
+                &theme,
+                field,
+                0.0,
+                0.0,
+                120.0,
+                "",
+                true,
+                previous,
+            )
+            .window
+        };
+        let tail = draw(&field, 0);
+        assert!(tail.start > 0 && tail.end == 60, "the tail first: {tail:?}");
+        field.key(&Key::Named(NamedKey::Backspace), false, false);
+        let after = draw(&field, tail.start);
+        let full = draw(&field, 0);
+        assert_eq!(
+            full.end, 59,
+            "a fresh draw shows the tail of the shorter text"
+        );
+        assert_eq!(
+            after, full,
+            "after BackSpace the kept window is the tail of the shorter text"
+        );
+    }
+
+    /// The field's font draws some longer slices narrower (the probe of
+    /// 19/10/2026 on this title: the first four characters are 17 wide,
+    /// the first three 24), and the binary searches of the window
+    /// assume a slice grows with each character. Whatever they answer,
+    /// the window holds the caret: for every caret of the title, at
+    /// five widths of the field (a sweep of every width in steps of
+    /// five found the caret outside at 23 of them before the fix),
+    /// with the window kept from the frame before and from a fresh
+    /// draw. Shaping Arabic is slow in a debug build, hence the few
+    /// widths.
+    #[test]
+    fn the_window_contains_the_caret_where_a_longer_slice_is_narrower() {
+        let query = "الباب الثاني في العمران البدوي و الأمم الوحشية و القبائل";
+        let mut pixmap = Pixmap::new(400, 60).unwrap();
+        let mut fonts = FontStore::new();
+        let mut painter = Painter::new(&mut pixmap, &mut fonts, None, 1.0);
+        let ends: Vec<usize> = query
+            .char_indices()
+            .map(|(at, c)| at + c.len_utf8())
+            .collect();
+        let widths: Vec<f32> = ends
+            .iter()
+            .map(|&end| painter.measure(&query[..end], CODE_FAMILY, QUERY_SIZE, 400))
+            .collect();
+        assert!(
+            widths.windows(2).any(|w| w[1] < w[0]),
+            "the premise: a longer slice draws narrower somewhere: {widths:?}"
+        );
+        let carets: Vec<usize> = std::iter::once(0).chain(ends.iter().copied()).collect();
+        let mut outside = Vec::new();
+        for avail in (80..=240).step_by(40) {
+            let mut previous = 0;
+            for &caret in &carets {
+                let (kept, _) = window_fit(&mut painter, query, caret, avail as f32, previous);
+                if !(kept.start <= caret && caret <= kept.end) {
+                    outside.push((avail, caret, "kept", kept.clone()));
+                }
+                previous = kept.start;
+                let (fresh, _) = window_fit(&mut painter, query, caret, avail as f32, 0);
+                if !(fresh.start <= caret && caret <= fresh.end) {
+                    outside.push((avail, caret, "fresh", fresh));
+                }
+            }
+        }
+        assert!(
+            outside.is_empty(),
+            "the caret outside the window: {outside:?}"
+        );
+    }
+
+    /// Arabic-Indic digits belong to the Arabic block, but the shaper
+    /// reads them as numbers, not as a strong script, and draws a query
+    /// of them left to right. The hidden boundaries follow the drawn
+    /// line: they stand beyond its right end, not inside it.
+    #[test]
+    fn a_query_of_arabic_digits_places_its_hidden_boundaries_beyond_the_drawn_text() {
+        let query: String = "٠١٢٣٤٥٦٧٨٩".repeat(6);
+        let mut field = TextField::new(query.clone());
+        field.set_caret(0);
+        let mut pixmap = Pixmap::new(400, 60).unwrap();
+        let mut fonts = FontStore::new();
+        let mut painter = Painter::new(&mut pixmap, &mut fonts, None, 1.0);
+        let theme = Theme::default_dark();
+        let view = draw_field(&mut painter, &theme, &field, 0.0, 0.0, 120.0, "", true, 0);
+        let (window, cut) = window_fit(&mut painter, &query, 0, 120.0, 0);
+        assert!(!cut && window.start == 0 && window.end < query.len());
+        let boundaries: Vec<usize> = field.boundaries().collect();
+        let drawn = boundaries.partition_point(|b| *b <= window.end);
+        assert!(
+            view.offsets[..drawn].windows(2).all(|w| w[0] < w[1]),
+            "the premise: the digits are drawn left to right: {:?}",
+            &view.offsets[..drawn]
+        );
+        let drawn_max = view.offsets[..drawn]
+            .iter()
+            .fold(f32::MIN, |m, x| m.max(*x));
+        for (index, at) in boundaries.iter().enumerate().skip(drawn) {
+            assert!(
+                view.offsets[index] > drawn_max,
+                "byte {at} stands right of the drawn text: {} against {drawn_max}",
+                view.offsets[index]
+            );
+        }
+    }
+
+    /// A hidden side that mixes directions is not drawn, so its own
+    /// order on a line means nothing to the click: its boundaries go
+    /// outward from the window's edge one character at a time, each
+    /// farther than the one before, on the side after the window and
+    /// on the side before it.
+    #[test]
+    fn the_hidden_boundaries_of_a_mixed_side_grow_with_each_character() {
+        let mut pixmap = Pixmap::new(400, 60).unwrap();
+        let mut fonts = FontStore::new();
+        let mut painter = Painter::new(&mut pixmap, &mut fonts, None, 1.0);
+        let theme = Theme::default_dark();
+        // The side after the window: the caret at the start.
+        let query = format!("{}abc مقدمة def ghi", "abcdefghij".repeat(3));
+        let mut field = TextField::new(query.clone());
+        field.set_caret(0);
+        let view = draw_field(&mut painter, &theme, &field, 0.0, 0.0, 120.0, "", true, 0);
+        let (window, _) = window_fit(&mut painter, &query, 0, 120.0, 0);
+        assert!(
+            window.end < 30,
+            "the window stops in the Latin head: {window:?}"
+        );
+        let boundaries: Vec<usize> = field.boundaries().collect();
+        let drawn = boundaries.partition_point(|b| *b <= window.end);
+        let after = &view.offsets[drawn - 1..];
+        assert!(
+            after.windows(2).all(|w| w[0] < w[1]),
+            "each boundary after the window stands right of the one before: {after:?}"
+        );
+        // The side before the window: the caret at the end.
+        let query = format!("abc مقدمة def {}", "abcdefghij".repeat(4));
+        let field = TextField::new(query.clone());
+        let view = draw_field(&mut painter, &theme, &field, 0.0, 0.0, 120.0, "", true, 0);
+        let (window, _) = window_fit(&mut painter, &query, query.len(), 120.0, 0);
+        assert!(
+            window.start > 20,
+            "the window is the Latin tail: {window:?}"
+        );
+        let boundaries: Vec<usize> = field.boundaries().collect();
+        let first_drawn = boundaries.partition_point(|b| *b < window.start);
+        let before = &view.offsets[..=first_drawn];
+        assert!(
+            before.windows(2).all(|w| w[0] < w[1]),
+            "each boundary before the window stands left of the one after it: {before:?}"
         );
     }
 

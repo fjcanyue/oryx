@@ -9,7 +9,6 @@
 use cosmic_text::{Attrs, Buffer, Family, Metrics, Shaping, Weight};
 
 use crate::style::fonts::{line_width, shapable};
-use crate::ui::selection::boundary_x;
 use tiny_skia::{FillRule, Mask, Path, PathBuilder, Pixmap, Transform};
 
 use crate::style::fonts::FontStore;
@@ -326,7 +325,16 @@ impl<'a> Painter<'a> {
 
     /// The x of each character boundary of one line, in logical units,
     /// in the order of the text and ending past the last character: a
-    /// field's caret, selection and click stand on these.
+    /// field's caret, selection and click stand on these. One pass over
+    /// the glyphs, so a field holding a pasted text of a hundred
+    /// thousand characters draws in the time of its shaping. The rules
+    /// are those of `boundary_x` for a line of the page: a boundary at
+    /// a glyph's start is the glyph's edge (its left edge, or its right
+    /// edge for a right-to-left glyph; the outermost edge of a cluster
+    /// drawn as several glyphs), a boundary inside a glyph's cluster (a
+    /// ligature such as fi) splits the glyph's width evenly per
+    /// character, mirrored for right to left, and a character the
+    /// shaper gave no glyph takes the next boundary in reading order.
     pub fn boundaries(&mut self, text: &str, family: &str, size: f32, weight: u16) -> Vec<f32> {
         let buffer = self.shape(text, family, size * self.scale, weight);
         let run = buffer.layout_runs().next();
@@ -340,11 +348,61 @@ impl<'a> Painter<'a> {
             line_width(glyphs)
         };
         let end = if end.is_finite() { end } else { 0.0 };
-        text.char_indices()
-            .map(|(at, _)| boundary_x(glyphs, text, at).unwrap_or(end))
-            .chain(std::iter::once(end))
-            .map(|x| x / self.scale)
-            .collect()
+        let char_of = char_index_by_byte(text);
+        let count = text.chars().count();
+        let mut at: Vec<Option<f32>> = vec![None; count + 1];
+        for glyph in glyphs {
+            let rtl = glyph.level.is_rtl();
+            let edge = if rtl { glyph.x + glyph.w } else { glyph.x };
+            let (from, to) = (char_of[glyph.start], char_of[glyph.end]);
+            at[from] = Some(match at[from] {
+                Some(seen) if rtl => seen.max(edge),
+                Some(seen) => seen.min(edge),
+                None => edge,
+            });
+            let total = (to - from).max(1) as f32;
+            for (within, slot) in at[from + 1..to].iter_mut().enumerate() {
+                if slot.is_none() {
+                    let frac = (within + 1) as f32 / total;
+                    *slot = Some(if rtl {
+                        glyph.x + glyph.w * (1.0 - frac)
+                    } else {
+                        glyph.x + glyph.w * frac
+                    });
+                }
+            }
+        }
+        let mut next = end;
+        let mut out = vec![0.0; count + 1];
+        for index in (0..=count).rev() {
+            if let Some(x) = at[index] {
+                next = x;
+            }
+            out[index] = next / self.scale;
+        }
+        out
+    }
+
+    /// The width of each character of one line, in logical units, in
+    /// the order of the text: a glyph over several characters (a
+    /// ligature, a letter and its marks) shares its width evenly among
+    /// them, and a character the shaper gave no glyph is zero wide. One
+    /// pass over the glyphs. A field reads these for the characters it
+    /// does not draw, whose order on a line of their own means nothing.
+    pub fn advances(&mut self, text: &str, family: &str, size: f32, weight: u16) -> Vec<f32> {
+        let buffer = self.shape(text, family, size * self.scale, weight);
+        let run = buffer.layout_runs().next();
+        let glyphs = run.as_ref().map_or(&[][..], |r| r.glyphs);
+        let char_of = char_index_by_byte(text);
+        let mut widths = vec![0.0; text.chars().count()];
+        for glyph in glyphs {
+            let (from, to) = (char_of[glyph.start], char_of[glyph.end]);
+            let share = glyph.w / (to - from).max(1) as f32;
+            for width in widths.iter_mut().take(to).skip(from) {
+                *width += share;
+            }
+        }
+        widths.iter().map(|w| w / self.scale).collect()
     }
 
     /// Where a capital's ink lands below the top of a drawn line, as
@@ -475,6 +533,22 @@ impl<'a> Painter<'a> {
         buffer.shape_until_scroll(&mut self.fonts.font_system, false);
         buffer
     }
+}
+
+/// The index of the character at each byte of `text`, the character
+/// count at the byte past its end: a glyph's byte range maps to the
+/// characters it covers in one lookup.
+fn char_index_by_byte(text: &str) -> Vec<usize> {
+    let mut map = vec![0; text.len() + 1];
+    let mut index = 0;
+    for (at, c) in text.char_indices() {
+        for slot in &mut map[at..at + c.len_utf8()] {
+            *slot = index;
+        }
+        index += 1;
+    }
+    map[text.len()] = index;
+    map
 }
 
 /// The width of a buffer's first line, which is the whole text: the
@@ -701,6 +775,36 @@ mod tests {
         assert!(width > 0.0);
         let at = painter.boundaries("abc\u{85}مق", BODY_FAMILY, 15.0, 400);
         assert_eq!(at.len(), 7, "the character keeps its boundary");
+    }
+
+    /// The boundaries of a line are read in one pass over its glyphs:
+    /// a field holding a pasted text of a hundred thousand characters
+    /// draws in the time of its shaping, where a scan of every glyph
+    /// per character cost the square of the length. The bound is wide
+    /// for a debug build; the old way took about fifty seconds here.
+    #[test]
+    fn the_boundaries_of_a_long_line_cost_one_pass() {
+        let mut pixmap = Pixmap::new(400, 50).unwrap();
+        let mut fonts = FontStore::new();
+        let mut painter = Painter::new(&mut pixmap, &mut fonts, None, 1.0);
+        let text: String = "lorem ipsum dolor sit amet "
+            .chars()
+            .cycle()
+            .take(100_000)
+            .collect();
+        painter.measure("warm", BODY_FAMILY, 15.0, 400);
+        let started = std::time::Instant::now();
+        let at = painter.boundaries(&text, BODY_FAMILY, 15.0, 400);
+        let took = started.elapsed();
+        assert_eq!(at.len(), 100_001);
+        assert!(
+            at.windows(2).all(|w| w[0] <= w[1]),
+            "rising from left to right"
+        );
+        assert!(
+            took.as_secs_f32() < 5.0,
+            "the boundaries of 100,000 characters took {took:?}"
+        );
     }
 
     #[test]
