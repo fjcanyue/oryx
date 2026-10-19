@@ -990,13 +990,20 @@ fn kept_layout(
 /// guesses colored) asks for nothing either, or two cold blocks near
 /// the view alternate without end (issue #9). A band covered in part is
 /// asked whole, as after a jump to the end and a scroll back up.
+/// Nothing while a re-coloring is owed or a resumed sweep runs
+/// (`resting`): the lines below a keystroke keep the colors they had,
+/// shifted by the edit, until the sweep corrects them. A cold guess
+/// there would flash its colors below the caret for a frame or two,
+/// and one landing past the seam the sweep converges on would stand in
+/// place of the exact colors.
 fn speculation_target(
     doc: &Document,
     visible: &[(usize, std::ops::Range<usize>)],
     in_flight: bool,
     guessed: &HashMap<usize, Vec<std::ops::Range<usize>>>,
+    resting: bool,
 ) -> Option<(usize, std::ops::Range<usize>)> {
-    if in_flight {
+    if in_flight || resting {
         return None;
     }
     for (block, lines) in visible {
@@ -5835,14 +5842,6 @@ impl App {
         if self.document.plain_file || self.drag.is_some() || self.selecting() {
             return;
         }
-        // No guess while a re-coloring is owed or a resumed sweep runs:
-        // the sweep converges and vouches for the lines up to the
-        // table's reach, and a guess landed there would stand in place
-        // of the exact colors. The band keeps the colors it had,
-        // shifted by the edit, for the rest's few hundred milliseconds.
-        if self.rehighlight_at.is_some() || self.resumed {
-            return;
-        }
         let Some(lay) = self.layout.as_ref() else {
             return;
         };
@@ -5857,6 +5856,7 @@ impl App {
             &visible,
             self.spec_band.is_some(),
             &self.guessed,
+            self.rehighlight_at.is_some() || self.resumed,
         ) else {
             return;
         };
@@ -9436,7 +9436,7 @@ mod tests {
         let doc = two_cold_blocks();
         let visible = [(0, 0..1), (1, 0..1)];
         assert_eq!(
-            super::speculation_target(&doc, &visible, false, &Guessed::new()),
+            super::speculation_target(&doc, &visible, false, &Guessed::new(), false),
             Some((0, 0..1))
         );
     }
@@ -9448,7 +9448,21 @@ mod tests {
         // The first block's guess is out: the second waits for it, or
         // the second would drop the first before it lands.
         assert_eq!(
-            super::speculation_target(&doc, &visible, true, &Guessed::new()),
+            super::speculation_target(&doc, &visible, true, &Guessed::new(), false),
+            None
+        );
+    }
+
+    /// A keystroke lowers the frontier to its line, and the lines below
+    /// keep the colors they had: no guess over them while the
+    /// re-coloring is owed or its sweep runs, or the cold colors would
+    /// flash below the caret until the sweep corrects them.
+    #[test]
+    fn nothing_is_asked_while_a_re_coloring_is_owed() {
+        let doc = one_cold_block();
+        let visible = [(0, 0..10)];
+        assert_eq!(
+            super::speculation_target(&doc, &visible, false, &Guessed::new(), true),
             None
         );
     }
@@ -9459,7 +9473,7 @@ mod tests {
         let visible = [(0, 0..1), (1, 0..1)];
         let landed = landed(&[(0, 0..1)]);
         assert_eq!(
-            super::speculation_target(&doc, &visible, false, &landed),
+            super::speculation_target(&doc, &visible, false, &landed, false),
             Some((1, 0..1))
         );
     }
@@ -9472,7 +9486,7 @@ mod tests {
         // Both landed: nothing to ask. Issue #9 asked for the first
         // again, without end.
         assert_eq!(
-            super::speculation_target(&doc, &visible, false, &landed),
+            super::speculation_target(&doc, &visible, false, &landed, false),
             None
         );
     }
@@ -9484,17 +9498,17 @@ mod tests {
         let landed = landed(&[(0, 6..10)]);
         // A scroll back up shows lines the guess never colored.
         assert_eq!(
-            super::speculation_target(&doc, &[(0, 0..4)], false, &landed),
+            super::speculation_target(&doc, &[(0, 0..4)], false, &landed, false),
             Some((0, 0..4))
         );
         // A band inside the landed guess asks for nothing.
         assert_eq!(
-            super::speculation_target(&doc, &[(0, 7..10)], false, &landed),
+            super::speculation_target(&doc, &[(0, 7..10)], false, &landed, false),
             None
         );
         // A band the guess covers in part is asked whole.
         assert_eq!(
-            super::speculation_target(&doc, &[(0, 3..8)], false, &landed),
+            super::speculation_target(&doc, &[(0, 3..8)], false, &landed, false),
             Some((0, 3..8))
         );
     }
@@ -9529,7 +9543,7 @@ mod tests {
         }
         let visible = [(0, 0..1), (1, 0..1)];
         assert_eq!(
-            super::speculation_target(&doc, &visible, false, &Guessed::new()),
+            super::speculation_target(&doc, &visible, false, &Guessed::new(), false),
             None
         );
     }
