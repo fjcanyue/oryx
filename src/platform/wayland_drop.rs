@@ -7,8 +7,9 @@
 //! libwayland is built for. The thread must end before the display is
 //! freed: it waits on the display's descriptor and on a stop pipe, and
 //! the app drops its handle, which closes the pipe and waits for the
-//! thread, before anything of the window is dropped. The thread's
-//! objects then drop on a live display.
+//! thread, before anything of the window is dropped. On the stop the
+//! thread's objects then drop on a live display; on a failure of the
+//! display they are forgotten, as the process is ending.
 
 use std::collections::HashMap;
 use std::ffi::c_void;
@@ -106,7 +107,8 @@ pub fn start(display: *mut c_void, surface: *mut c_void, wake: Waker) -> Option<
                 drops: shared,
                 wake,
             };
-            serve(&conn, &mut queue, &mut state, &stop_end);
+            let end = serve(&conn, &mut queue, &mut state, &stop_end);
+            finish(end, (queue, state, conn));
         })
         .ok()?;
     Some(Drops {
@@ -118,15 +120,21 @@ pub fn start(display: *mut c_void, surface: *mut c_void, wake: Waker) -> Option<
 
 /// The thread's loop: the pending events dispatched, the requests
 /// flushed, then a wait for the display's data or the stop. It returns
-/// on the stop and on a failure of the display, the read cancelled.
-fn serve(conn: &Connection, queue: &mut EventQueue<State>, state: &mut State, stop: &UnixStream) {
+/// on the stop and on a failure of the display, saying which, the read
+/// cancelled.
+fn serve(
+    conn: &Connection,
+    queue: &mut EventQueue<State>,
+    state: &mut State,
+    stop: &UnixStream,
+) -> End {
     loop {
         if queue.dispatch_pending(state).is_err() {
-            return;
+            return End::Failed;
         }
         if let Err(err) = conn.flush() {
             if !would_block(&err) {
-                return;
+                return End::Failed;
             }
         }
         // None: events were queued meanwhile, dispatched at the next turn.
@@ -137,18 +145,40 @@ fn serve(conn: &Connection, queue: &mut EventQueue<State>, state: &mut State, st
             Wake::Display => {
                 if let Err(err) = guard.read() {
                     if !would_block(&err) {
-                        return;
+                        return End::Failed;
                     }
                 }
             }
             // The guard's drop cancels the read.
-            Wake::Stop | Wake::Failed => return,
+            Wake::Stop => return End::Stop,
+            Wake::Failed => return End::Failed,
         }
     }
 }
 
 fn would_block(err: &WaylandError) -> bool {
     matches!(err, WaylandError::Io(e) if e.kind() == ErrorKind::WouldBlock)
+}
+
+/// How the thread's loop ended: on the stop, or on a failure of the
+/// display.
+#[derive(Debug, PartialEq, Eq)]
+enum End {
+    Stop,
+    Failed,
+}
+
+/// What the thread does with its queue and its objects at the end. On
+/// the stop the display is alive and they drop. On a failure the
+/// process is ending and the display may be in any state: a queue
+/// still holding undispatched events would make libwayland print a
+/// warning on the error output, so they are forgotten, a few kilobytes
+/// the system takes back.
+fn finish<T>(end: End, held: T) {
+    match end {
+        End::Stop => drop(held),
+        End::Failed => std::mem::forget(held),
+    }
 }
 
 /// What ended the wait on the display's descriptor and the stop pipe.
@@ -433,6 +463,26 @@ mod tests {
         let (stop, _app_end) = UnixStream::pair().expect("a pair");
         far.write_all(b"event").expect("written");
         assert_eq!(wake(display.as_fd(), stop.as_fd()), Wake::Display);
+    }
+
+    /// On a failure of the display the process is ending and the
+    /// display may be in any state: the objects are forgotten, not
+    /// dropped. On the stop the display is alive and they drop.
+    #[test]
+    fn a_failure_of_the_display_forgets_the_objects_and_the_stop_drops_them() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        struct Held(Arc<AtomicBool>);
+        impl Drop for Held {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::SeqCst);
+            }
+        }
+        let dropped = Arc::new(AtomicBool::new(false));
+        finish(End::Stop, Held(Arc::clone(&dropped)));
+        assert!(dropped.load(Ordering::SeqCst), "the stop drops the objects");
+        let dropped = Arc::new(AtomicBool::new(false));
+        finish(End::Failed, Held(Arc::clone(&dropped)));
+        assert!(!dropped.load(Ordering::SeqCst), "a failure forgets them");
     }
 
     #[test]

@@ -1503,10 +1503,14 @@ fn paragraphs_around(source: &str, range: &std::ops::Range<usize>) -> std::ops::
 /// formula is what the markdown parser reads as one: `$` not followed
 /// by whitespace to the next `$`, which must not follow whitespace or
 /// precede a digit (a price), or `$$` to the next `$$`, on the
-/// paragraph; an escaped dollar sign is text. A press costs about the
-/// text's length: a length of backtick run or a kind of dollar sign
-/// found unclosed is not searched again in its paragraph, and the next
-/// `>` is searched once per region.
+/// paragraph; an escaped dollar sign is text, and so is a `$` whose
+/// closer is missing, the search going on from the `$` that could not
+/// close, which may open. A press costs about the text's length: a
+/// length of backtick run found unclosed, or a kind of dollar sign
+/// with none left on the paragraph, is not searched again in its
+/// paragraph, each `$` is visited once, the next `>` is searched once
+/// per region, and an autolink candidate is refused on its first
+/// whitespace.
 fn kept_pieces(text: &str) -> Vec<std::ops::Range<usize>> {
     let mut kept = Vec::new();
     for para in paragraphs(text) {
@@ -1563,21 +1567,21 @@ fn kept_pieces(text: &str) -> Vec<std::ops::Range<usize>> {
                     .chars()
                     .next()
                     .is_some_and(|next| !next.is_ascii_whitespace());
-                let close = if opens && !dollar_unclosed[usize::from(display)] {
-                    formula_end(&rest[signs..], display)
+                if !opens || dollar_unclosed[usize::from(display)] {
+                    i += signs;
                 } else {
-                    None
-                };
-                match close {
-                    Some(len) => {
-                        kept.push(i..i + signs + len);
-                        i += signs + len;
-                    }
-                    None => {
-                        if opens {
-                            dollar_unclosed[usize::from(display)] = true;
+                    match formula_end(&rest[signs..], display) {
+                        Formula::Closed(len) => {
+                            kept.push(i..i + signs + len);
+                            i += signs + len;
                         }
-                        i += signs;
+                        // The scan goes on from the `$` that could not
+                        // close: it may open a formula of its own.
+                        Formula::Opener(at) => i += signs + at,
+                        Formula::None => {
+                            dollar_unclosed[usize::from(display)] = true;
+                            i += signs;
+                        }
                     }
                 }
             } else if let Some(after) = rest.strip_prefix("](") {
@@ -1615,14 +1619,30 @@ fn kept_pieces(text: &str) -> Vec<std::ops::Range<usize>> {
     kept
 }
 
-/// The length of a formula from after its opening `$` or `$$` to the
-/// end of its closer, as the markdown parser reads it: the first `$`
-/// after the opener decides, a closer when it does not follow
-/// whitespace, for an inline formula, and when a `$` follows it, for a
-/// display one. None when the opener is text: no closer on the
-/// paragraph, a `$` inside, or a closer glued to a digit, which the
-/// page reads as a price.
-fn formula_end(after: &str, display: bool) -> Option<usize> {
+/// How the text after an opening `$` or `$$` reads.
+enum Formula {
+    /// A formula: the length from after the opener to the end of its
+    /// closer.
+    Closed(usize),
+    /// The opener is text, and the `$` at this offset could not close
+    /// it but may open a formula of its own: the scan goes on from it.
+    Opener(usize),
+    /// The opener is text, and no `$` of its kind is left on the
+    /// paragraph.
+    None,
+}
+
+/// Where the formula opened by a `$` or a `$$` ends, as the markdown
+/// parser reads it (pulldown-cmark 0.13.4, `src/firstpass.rs` and
+/// `src/parse.rs`): for an inline formula, a `$` closes when it does
+/// not follow whitespace and no digit follows it, which the page reads
+/// as a price; a `$` that cannot close ends the search from this
+/// opener, which is then text, and may open a formula of its own; a
+/// `$` that can neither close nor open is text and the search goes on
+/// past it. For a display formula, the next `$$` closes, a lone `$`
+/// inside being text. None when no `$` of the kind is left on the
+/// paragraph.
+fn formula_end(after: &str, display: bool) -> Formula {
     let mut previous: Option<char> = None;
     let mut chars = after.char_indices();
     while let Some((i, c)) = chars.next() {
@@ -1631,20 +1651,30 @@ fn formula_end(after: &str, display: bool) -> Option<usize> {
                 previous = chars.next().map(|(_, escaped)| escaped);
                 continue;
             }
-            '$' => {
-                let double = after[i + 1..].starts_with('$');
-                if display {
-                    return double.then_some(i + 2);
+            '$' if display => {
+                if after[i + 1..].starts_with('$') {
+                    return Formula::Closed(i + 2);
                 }
+            }
+            '$' => {
                 let closes = previous.is_some_and(|p| !p.is_ascii_whitespace());
                 let price = after.as_bytes().get(i + 1).is_some_and(u8::is_ascii_digit);
-                return (closes && !price).then_some(i + 1);
+                if closes && !price {
+                    return Formula::Closed(i + 1);
+                }
+                let opens = after[i + 1..]
+                    .chars()
+                    .next()
+                    .is_some_and(|next| !next.is_ascii_whitespace());
+                if opens {
+                    return Formula::Opener(i);
+                }
             }
             _ => {}
         }
         previous = Some(c);
     }
-    None
+    Formula::None
 }
 
 /// The offset in `after` of a run of exactly `ticks` backticks, the
@@ -1688,16 +1718,28 @@ fn address_end(after: &str) -> Option<usize> {
 }
 
 /// Whether the text between a `<` and the next `>` is an autolink: an
-/// address with a scheme or an at sign and no whitespace.
+/// address with a scheme or an at sign and no whitespace. The candidate
+/// is refused on its first whitespace or `<` before any other look,
+/// and the scheme is sought in its first 32 bytes, the longest the
+/// markdown rules allow: on a paragraph of many `<` with a `>` near
+/// its end, each candidate runs to that `>`, and a scan of each to its
+/// end cost the square of the paragraph's length.
 fn autolink_inner(inner: &str) -> bool {
-    let plain = !inner.is_empty() && !inner.contains(|c: char| c.is_whitespace() || c == '<');
-    let scheme = inner.split_once(':').is_some_and(|(s, _)| {
-        s.len() >= 2
-            && s.starts_with(|c: char| c.is_ascii_alphabetic())
-            && s.chars()
-                .all(|c| c.is_ascii_alphanumeric() || "+.-".contains(c))
-    });
-    plain && (scheme || inner.contains('@'))
+    if inner.is_empty() || inner.contains(|c: char| c.is_whitespace() || c == '<') {
+        return false;
+    }
+    let scheme = inner
+        .bytes()
+        .take(33)
+        .position(|b| b == b':')
+        .is_some_and(|colon| {
+            let s = &inner[..colon];
+            s.len() >= 2
+                && s.starts_with(|c: char| c.is_ascii_alphabetic())
+                && s.chars()
+                    .all(|c| c.is_ascii_alphanumeric() || "+.-".contains(c))
+        });
+    scheme || inner.contains('@')
 }
 
 /// Whether the text between a `<` and the next `>` is an HTML tag: a
@@ -3281,6 +3323,36 @@ mod tests {
         assert_eq!(case_of("cost \\$x and $y"), "Cost \\$X And $Y");
     }
 
+    /// A `$` that opens but meets no closer is text, and the search
+    /// goes on from the `$` that could not close, which may open: the
+    /// page reads the later formula, so the key keeps it. A kind of
+    /// dollar sign is given up only when none is left on the paragraph.
+    #[test]
+    fn a_formula_after_a_dollar_that_cannot_close_is_kept() {
+        assert_eq!(
+            case_of("spend $a then $delta x$ here"),
+            "Spend $A Then $delta x$ Here"
+        );
+        assert_eq!(
+            case_of("pay $5-$10 for $mass x$ now"),
+            "Pay $5-$10 For $mass x$ Now"
+        );
+        assert_eq!(
+            case_of("prices $5, $6, and $big x$ today"),
+            "Prices $5, $6, And $big x$ Today"
+        );
+        assert_eq!(
+            case_of("a $x$5 and $big y$ here"),
+            "A $X$5 And $big y$ Here"
+        );
+        assert_eq!(case_of("see $x and $y$ now"), "See $X And $y$ Now");
+        assert_eq!(
+            case_of("one $x then $ and y$ end"),
+            "One $x then $ and y$ End"
+        );
+        assert_eq!(case_of("none $x and $y and z"), "None $X And $Y And Z");
+    }
+
     /// A press on a table of two hundred thousand rows holding a `<`
     /// costs the paragraph's length, not its square: the closing `>` is
     /// searched once per region. The bound is wide for a debug build;
@@ -3294,6 +3366,17 @@ mod tests {
         let took = started.elapsed();
         assert!(edit.is_some(), "the word changes");
         assert!(took.as_secs_f32() < 1.0, "one press took {took:?}");
+        // A `>` near the end makes each `<` a candidate up to it: the
+        // candidate is refused on its first space, not scanned whole.
+        let source = format!("{source}| c > d |\n");
+        let started = std::time::Instant::now();
+        let edit = case_edit(&source, None, 2, true);
+        let took = started.elapsed();
+        assert!(edit.is_some(), "the word changes");
+        assert!(
+            took.as_secs_f32() < 1.0,
+            "one press with a `>` took {took:?}"
+        );
     }
 
     #[test]

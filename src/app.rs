@@ -1451,6 +1451,13 @@ fn startup_theme(name: Option<&str>) -> Theme {
 }
 
 struct App {
+    /// Files dropped on the window under Wayland, where winit delivers
+    /// no drop event; the drop thread fills it and wakes the loop.
+    /// Declared before the window: the fields drop in this order, so an
+    /// unwind ends the thread before the window frees the display
+    /// (`run` ends it first on a plain exit).
+    #[cfg(target_os = "linux")]
+    drops: Option<wayland_drop::Drops>,
     gfx: Option<Gfx>,
     document: Document,
     /// The file shown in the document area, None on an empty launch.
@@ -1532,10 +1539,6 @@ struct App {
     /// The wheel's fraction of a zoom notch not yet spent, while the
     /// chord key is held.
     wheel_zoom: f32,
-    /// Files dropped on the window under Wayland, where winit delivers
-    /// no drop event; the drop thread fills it and wakes the loop.
-    #[cfg(target_os = "linux")]
-    drops: Option<wayland_drop::Drops>,
     /// Emulated mouse events are dropped until then after a touch pan.
     mute_mouse_until: Option<Instant>,
     /// The reader zoom captured when a pinch began.
@@ -2334,11 +2337,17 @@ impl App {
     /// whole when no byte changed, and is rebuilt from the buffer when
     /// one did, so unsaved edits show on the page and not just on disk.
     fn leave_edit(&mut self) {
-        // A re-coloring the editor still owed is the page's now, which
-        // starts its coloring afresh below: the timer firing on the
-        // page would restart the worker with nothing and kill that
-        // coloring between chunks.
-        self.rehighlight_at = None;
+        // A re-coloring the editor still owed: a markdown page starts
+        // its coloring afresh below, so its timer is dropped (firing on
+        // the page, it would restart the worker with nothing and kill
+        // that coloring between chunks). A code file keeps its document
+        // and gets its resumed sweep now; dropped, the re-coloring
+        // never came, and the frontier stayed at the edit.
+        if self.edit_park.is_some() {
+            self.rehighlight_at = None;
+        } else if self.rehighlight_at.take().is_some() {
+            self.rehighlight_edited();
+        }
         // The replace row is an editor tool; reading keeps the plain bar.
         let dropped = self.search.as_mut().and_then(|state| state.replace.take());
         if let Some(row) = dropped {
@@ -5913,6 +5922,11 @@ impl App {
             &self.document,
             self.scroll_y - view_h..self.scroll_y + 2.0 * view_h,
         );
+        // A resumed sweep whose last fold still saw the worker running
+        // leaves the flag set: it is read here, so it is cleared here.
+        if self.resumed && !self.highlighter.is_running() {
+            self.resumed = false;
+        }
         let Some((block, band)) = speculation_target(
             &self.document,
             &visible,
@@ -7364,10 +7378,14 @@ impl App {
         self.pending_recolor.clear();
         self.seams = stash.seams;
         self.burst_end = stash.burst_end;
-        self.resumed = false;
         self.spec_band = None;
         self.guessed.clear();
         let pending = load::pending_from(&self.document, &self.seams, self.burst_end);
+        // A sweep resumed from the table converges against it, so no
+        // guess is asked while it runs, as after the timer's firing: a
+        // guess landing first would be vouched for by the converged
+        // stop.
+        self.resumed = !pending.is_empty();
         let waker = self.waker.clone();
         self.highlighter.start(pending, move || waker());
         if self.mode == edit::Mode::Edit {
