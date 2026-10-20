@@ -548,6 +548,15 @@ fn math_becomes_a_picture_or_stays_text() {
     );
 }
 
+/// The plain reading of a display formula shows an escaped reserved
+/// character as the page does.
+#[test]
+fn the_copy_of_a_display_formula_reads_its_escaped_characters() {
+    let doc = markdown::parse("$$\n15\\% \\# x\\_1\n$$\n");
+    let plain = html_of(&doc);
+    assert_eq!(plain.texts("p"), ["15% # x_1".to_string()]);
+}
+
 #[test]
 fn a_cut_selection_slices_only_the_end_blocks() {
     let doc = markdown::parse("first paragraph\n\nmiddle one\n\nlast paragraph\n");

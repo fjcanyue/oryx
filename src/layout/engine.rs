@@ -3825,7 +3825,7 @@ fn shape_block_lines(
     let mut model: Vec<bool> = Vec::new();
     for (si, span) in spans.iter().enumerate() {
         if span.math && span.text(source) != "\n" {
-            for (text, script) in math_scripts(&tex_symbols(span.text(source))) {
+            for (text, script) in math_scripts(span.text(source)) {
                 let mut piece = span.clone();
                 piece.set_text(text);
                 let mut style = span_style(fonts, theme, cfg, base, &piece);
@@ -4830,8 +4830,14 @@ static TEX_SYMBOLS: &[(&str, &str)] = &[
     ("zeta", "\u{03B6}"),
 ];
 
-/// Replaces common TeX commands with their Unicode symbols; unknown
-/// commands stay literal.
+/// The reserved characters of TeX, which show themselves when escaped
+/// (`\%`), as noad reads them.
+const TEX_RESERVED: &str = "#$%&_{}";
+
+/// The text a TeX literal shows where noad does not typeset it (a table
+/// cell, the copy, the search): a command with a known symbol becomes
+/// the symbol, an escaped reserved character its character, and the
+/// rest stays literal.
 fn tex_symbols(tex: &str) -> String {
     let chars: Vec<char> = tex.chars().collect();
     let mut out = String::with_capacity(tex.len());
@@ -4849,6 +4855,10 @@ fn tex_symbols(tex: &str) -> String {
                     i = end;
                     continue;
                 }
+            } else if let Some(&c) = chars.get(i + 1).filter(|c| TEX_RESERVED.contains(**c)) {
+                out.push(c);
+                i += 2;
+                continue;
             }
         }
         out.push(chars[i]);
@@ -4857,21 +4867,24 @@ fn tex_symbols(tex: &str) -> String {
     out
 }
 
-/// Splits a TeX literal into script segments: `^` and `_` bind the next
-/// character or braced group, as in TeX. Anything unmatched stays literal.
 /// The display text a math literal renders as, scripts flattened: the
 /// text the screen shows, which model copy and search read.
 pub fn math_display(tex: &str) -> String {
-    math_scripts(&tex_symbols(tex.trim()))
+    math_scripts(tex.trim())
         .into_iter()
         .map(|(text, _)| text)
         .collect()
 }
 
+/// Splits a TeX literal into script segments: `^` and `_` bind the next
+/// character, an escaped character or a braced group, as in TeX, and a
+/// backslash escapes the character after it, so the `_` of `x\_1` is a
+/// character. Anything unmatched stays literal. Each segment's text
+/// goes through `tex_symbols`.
 fn math_scripts(tex: &str) -> Vec<(String, Script)> {
     fn flush(normal: &mut String, out: &mut Vec<(String, Script)>) {
         if !normal.is_empty() {
-            out.push((std::mem::take(normal), Script::Normal));
+            out.push((tex_symbols(&std::mem::take(normal)), Script::Normal));
         }
     }
     let chars: Vec<char> = tex.chars().collect();
@@ -4880,16 +4893,34 @@ fn math_scripts(tex: &str) -> Vec<(String, Script)> {
     let mut i = 0;
     while i < chars.len() {
         let c = chars[i];
+        if c == '\\' {
+            normal.push(c);
+            if let Some(&next) = chars.get(i + 1) {
+                normal.push(next);
+                i += 2;
+            } else {
+                i += 1;
+            }
+            continue;
+        }
         if c == '^' || c == '_' {
             let script = if c == '^' { Script::Sup } else { Script::Sub };
             match chars.get(i + 1) {
                 Some('{') => {
                     if let Some(close) = chars[i + 2..].iter().position(|&ch| ch == '}') {
                         flush(&mut normal, &mut out);
-                        out.push((chars[i + 2..i + 2 + close].iter().collect(), script));
+                        let group: String = chars[i + 2..i + 2 + close].iter().collect();
+                        out.push((tex_symbols(&group), script));
                         i += close + 3;
                         continue;
                     }
+                }
+                Some('\\') if i + 2 < chars.len() => {
+                    flush(&mut normal, &mut out);
+                    let escaped: String = chars[i + 1..i + 3].iter().collect();
+                    out.push((tex_symbols(&escaped), script));
+                    i += 3;
+                    continue;
                 }
                 Some(&arg) => {
                     flush(&mut normal, &mut out);
@@ -7235,6 +7266,31 @@ mod tests {
         assert_eq!(tex_symbols(r"\foo{x}"), r"\foo{x}");
         assert_eq!(tex_symbols("no commands"), "no commands");
         assert_eq!(tex_symbols(r"trailing \"), r"trailing \");
+    }
+
+    /// An escaped reserved character shows its character in the text
+    /// fallback, as noad shows it on the page (Task 280): the `_` of
+    /// `x\_1` is a character, not a subscript.
+    #[test]
+    fn escaped_reserved_characters_show_their_character() {
+        assert_eq!(tex_symbols(r"15\%"), "15%");
+        assert_eq!(tex_symbols(r"a \# b \& c \$5 \{x\}"), "a # b & c $5 {x}");
+        assert_eq!(math_display(r"x\_1"), "x_1");
+        assert_eq!(math_display(r"15\%"), "15%");
+        assert_eq!(math_scripts(r"x\_1"), [seg("x_1", Script::Normal)]);
+        assert_eq!(
+            math_scripts(r"a_\%"),
+            [seg("a", Script::Normal), seg("%", Script::Sub)],
+            "an escaped character as a script's argument"
+        );
+        assert_eq!(
+            math_scripts(r"\sum_{i=1}^{n}"),
+            [
+                seg("\u{2211}", Script::Normal),
+                seg("i=1", Script::Sub),
+                seg("n", Script::Sup)
+            ]
+        );
     }
 
     #[test]

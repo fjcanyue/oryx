@@ -709,6 +709,15 @@ fn table_columns_header_and_stripes() {
 /// The marks of the separator row align the column: `:---:` centers the
 /// cell's lines in the column, `---:` puts them against its right edge,
 /// `:---` and `---` leave them at the left. The example of SYNTAX.md.
+/// A formula in a table cell goes through the text fallback, which
+/// reads an escaped reserved character as noad does on the page.
+#[test]
+fn a_formula_in_a_cell_shows_its_escaped_characters() {
+    let (doc, l) = lay2("| cell |\n|---|\n| $15\\%$ and $x\\_1$ |\n", 800.0);
+    find_text(&l, &doc, "15%");
+    find_text(&l, &doc, "x_1");
+}
+
 #[test]
 fn table_columns_follow_their_alignment_marks() {
     let (doc, l) = lay2(
