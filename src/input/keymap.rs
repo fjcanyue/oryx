@@ -29,6 +29,7 @@ pub enum Command {
     FindNext,
     FindPrev,
     Replace,
+    Regex,
     GoToLine,
     LineUp,
     LineDown,
@@ -77,7 +78,7 @@ pub enum Command {
 impl Command {
     /// Every variant. One test checks each entry has a row in the table,
     /// another that every command a row binds is listed here.
-    pub const ALL: [Command; 66] = [
+    pub const ALL: [Command; 67] = [
         Command::OpenFile,
         Command::Reload,
         Command::Refetch,
@@ -100,6 +101,7 @@ impl Command {
         Command::FindNext,
         Command::FindPrev,
         Command::Replace,
+        Command::Regex,
         Command::GoToLine,
         Command::LineUp,
         Command::LineDown,
@@ -188,7 +190,10 @@ enum Binding {
     /// Alt plus a character, case-insensitive, any shift state.
     Alt(&'static str),
     /// Alt alone plus a key by its place on the keyboard, tried last:
-    /// the digit chords, on layouts where a digit needs Shift.
+    /// the digit chords, on layouts where a digit needs Shift. The
+    /// bullet list's row holds on Linux and Windows only: a Mac layout
+    /// has `-` on a plain key, matched by the keycap, and Option on the
+    /// key at the minus's place types a character of its own there.
     AltCode(KeyCode),
     /// Ctrl alone plus a key by its place on the keyboard, tried last,
     /// once no character chord claims the press. The zoom keys live
@@ -361,12 +366,11 @@ pub const SHORTCUTS: &[Shortcut] = &[
             (Binding::Named(NamedKey::F3), Command::FindNext),
         ],
     },
-    // Handled by the open search bar itself, so no command binding.
     Shortcut {
         keys: "Alt+R",
         action: "Regex matching on/off",
         section: "Find",
-        bindings: &[],
+        bindings: &[(Binding::Alt("r"), Command::Regex)],
     },
     Shortcut {
         keys: "Ctrl+H",
@@ -451,7 +455,7 @@ pub const SHORTCUTS: &[Shortcut] = &[
         section: "Edit",
         bindings: &[
             (Binding::Alt("-"), Command::BulletList),
-            (Binding::AltCode(KeyCode::Minus), Command::BulletList),
+            (Binding::NotMac(&Binding::AltCode(KeyCode::Minus)), Command::BulletList),
         ],
     },
     Shortcut {
@@ -663,9 +667,10 @@ pub struct Press<'a> {
 /// modifier are tried first, so Ctrl+Shift+C never falls through to
 /// Ctrl+C and Ctrl+Left never falls through to plain Left; the key's
 /// place on the keyboard is tried last, once no character chord has
-/// claimed the press, and with the row's modifier alone. A letter
-/// chord is matched with `latin_key`, so a layout that types another
-/// script keeps its letter chords.
+/// claimed the press, with the row's modifier alone, and never for a
+/// plain letter, which is a chord by its letter wherever it sits. A
+/// letter chord is matched with `latin_key`, so a layout that types
+/// another script keeps its letter chords.
 pub fn command(press: Press) -> Option<Command> {
     command_on(press, cfg!(target_os = "macos"))
 }
@@ -688,17 +693,22 @@ fn command_on(press: Press, macos: bool) -> Option<Command> {
     if ctrl && alt && character {
         return None;
     }
-    // Option on a Mac gives a key a character of its own. With Shift,
-    // or when that character is a plain ASCII one the layout keeps
-    // there (`}` under `)` on a French Mac), the press types it.
-    // Otherwise a chord is matched by the keycap, as the Mac's menus
-    // do, so `Alt+-` holds wherever a layout puts the minus key.
+    // Option on a Mac gives a key a character of its own. With Shift
+    // the press types it. Otherwise a chord is matched by the keycap,
+    // as the Mac's menus do, so `Alt+-` holds wherever a layout puts
+    // the minus key, and a row by place does not take a plain ASCII
+    // character the layout keeps under Option (`}` under `)` on a
+    // French Mac): the press types it.
     let option = macos && alt && !ctrl && character;
-    if option && (shift || matches!(typed, Key::Character(c) if c.is_ascii())) {
+    if option && shift {
         return None;
     }
     let latin = latin_key(if option { keycap } else { typed }, code);
     let key = &latin;
+    let plain_option = option && matches!(typed, Key::Character(c) if c.is_ascii());
+    let letter =
+        matches!(key, Key::Character(c) if c.len() == 1 && c.as_bytes()[0].is_ascii_alphabetic());
+    let by_place = !plain_option && !letter;
     let bindings = || {
         SHORTCUTS
             .iter()
@@ -722,8 +732,12 @@ fn command_on(press: Press, macos: bool) -> Option<Command> {
     };
     let physical = || {
         bindings().find(|(binding, _)| match binding {
-            Binding::CtrlCode(c) => ctrl && !shift && !alt && code == PhysicalKey::Code(*c),
-            Binding::AltCode(c) => alt && !shift && !ctrl && code == PhysicalKey::Code(*c),
+            Binding::CtrlCode(c) => {
+                by_place && ctrl && !shift && !alt && code == PhysicalKey::Code(*c)
+            }
+            Binding::AltCode(c) => {
+                by_place && alt && !shift && !ctrl && code == PhysicalKey::Code(*c)
+            }
             _ => false,
         })
     };
@@ -1207,6 +1221,150 @@ mod tests {
             on("\u{2db}", "x", KeyCode::KeyX, true),
             None,
             "Option+Shift+X types, no task list"
+        );
+    }
+
+    /// After the read of Task 316: the bullet list's row by place holds
+    /// on Linux and Windows only, a plain Option character wins over a
+    /// row by place and not over a chord by the keycap, and a row by
+    /// place takes no plain letter.
+    #[test]
+    fn the_rows_by_place_leave_the_mac_dash_a_plain_option_character_and_a_letter() {
+        let mac = |typed: &str, keycap: &str, code: KeyCode| {
+            super::command_on(
+                Press {
+                    typed: &chr(typed),
+                    keycap: &chr(keycap),
+                    code: PhysicalKey::Code(code),
+                    ctrl: false,
+                    shift: false,
+                    alt: true,
+                },
+                true,
+            )
+        };
+        assert_eq!(
+            mac("\u{bf}", "\u{df}", KeyCode::Minus),
+            None,
+            "German Mac: Option with the ß key types an inverted question mark"
+        );
+        assert_eq!(
+            mac("\u{201c}", "[", KeyCode::Minus),
+            None,
+            "Dvorak Mac: Option+[ types a quotation mark"
+        );
+        assert_eq!(
+            resolve(
+                &chr(")"),
+                PhysicalKey::Code(KeyCode::Minus),
+                false,
+                false,
+                true
+            ),
+            Some(Command::BulletList),
+            "elsewhere the key at the US minus still makes a bullet list"
+        );
+        assert_eq!(
+            mac("-", "-", KeyCode::NumpadSubtract),
+            Some(Command::BulletList),
+            "the keypad's minus with Option"
+        );
+        assert_eq!(
+            mac("1", "1", KeyCode::Numpad1),
+            Some(Command::NumberedList),
+            "the keypad's 1 with Option"
+        );
+        assert_eq!(
+            mac("!", "1", KeyCode::Digit1),
+            Some(Command::NumberedList),
+            "Ukrainian Mac: Option+1 types ! and is the numbered list"
+        );
+        assert_eq!(
+            mac(">", ".", KeyCode::Period),
+            Some(Command::Quote),
+            "Czech Mac: Option+. types > and is the quote"
+        );
+        assert_eq!(
+            mac("|", ":", KeyCode::Period),
+            None,
+            "Italian Mac: Option with the : key types |"
+        );
+        assert_eq!(
+            mac("}", ")", KeyCode::Minus),
+            None,
+            "French Mac: Option with the ) key still types a closing brace"
+        );
+        assert_eq!(
+            mac("\u{f7}", ":", KeyCode::Period),
+            Some(Command::Quote),
+            "French Mac: the quote by place on the : key"
+        );
+        let ctrl =
+            |c: &str, code: KeyCode| resolve(&chr(c), PhysicalKey::Code(code), true, false, false);
+        assert_eq!(
+            ctrl("w", KeyCode::Comma),
+            None,
+            "Dvorak: Ctrl+W is a letter chord, bound to nothing"
+        );
+        assert_eq!(ctrl("\u{431}", KeyCode::Comma), Some(Command::Settings));
+        assert_eq!(
+            ctrl(";", KeyCode::Comma),
+            Some(Command::Settings),
+            "AZERTY: Ctrl with the ; key, by place"
+        );
+        assert_eq!(
+            ctrl("z", KeyCode::Slash),
+            Some(Command::Undo),
+            "Dvorak: Ctrl+Z by its letter"
+        );
+    }
+
+    /// Alt+R is a row of the keymap, so the rules of Option apply to it.
+    #[test]
+    fn alt_r_toggles_the_regex_by_the_keymap() {
+        let none = PhysicalKey::Unidentified(NativeKeyCode::Unidentified);
+        assert_eq!(
+            resolve(&chr("r"), none, false, false, true),
+            Some(Command::Regex)
+        );
+        assert_eq!(
+            resolve(&chr("R"), none, false, true, true),
+            Some(Command::Regex),
+            "Shift makes no difference elsewhere"
+        );
+        assert!(Command::Regex.live_under_a_field());
+        let mac = |typed: &str, keycap: &str, code: KeyCode, shift: bool| {
+            super::command_on(
+                Press {
+                    typed: &chr(typed),
+                    keycap: &chr(keycap),
+                    code: PhysicalKey::Code(code),
+                    ctrl: false,
+                    shift,
+                    alt: true,
+                },
+                true,
+            )
+        };
+        assert_eq!(
+            mac("\u{ae}", "r", KeyCode::KeyR, false),
+            Some(Command::Regex),
+            "US Mac: Option+R"
+        );
+        assert_eq!(
+            mac("\u{2030}", "r", KeyCode::KeyR, true),
+            None,
+            "US Mac: Option+Shift+R types a per mille sign"
+        );
+        assert_eq!(
+            mac("\u{ae}", "r", KeyCode::KeyO, false),
+            Some(Command::Regex),
+            "Dvorak Mac: the key printed R"
+        );
+        assert_eq!(
+            mac("\u{3c0}", "p", KeyCode::KeyR, false),
+            None,
+            "Dvorak Mac: the key printed P at the US R place types pi"
         );
     }
 

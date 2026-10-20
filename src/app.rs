@@ -2010,6 +2010,7 @@ impl App {
             Command::FindNext => self.step_search(true),
             Command::FindPrev => self.step_search(false),
             Command::Replace => self.open_replace(),
+            Command::Regex => self.toggle_search_regex(),
             // The page states fit whole pages, so the vertical keys turn
             // them; the strip scrolls freely but its page keys snap to
             // page tops, so a page turn always means the drawn page.
@@ -5103,12 +5104,9 @@ impl App {
         if self.search.is_none() {
             return false;
         }
-        // Alt chords belong to the desktop, except the bar's own toggle.
+        // Alt chords belong to the desktop; the bar's own `Alt+R` is a
+        // row of the keymap, run as a command.
         if alt {
-            if matches!(key, Key::Character(s) if s.eq_ignore_ascii_case("r")) {
-                self.toggle_search_regex();
-                return true;
-            }
             return false;
         }
         match key {
@@ -9161,11 +9159,8 @@ impl ApplicationHandler for App {
                     alt,
                 });
                 // A character typed with Alt held (Option on a Mac) is
-                // typing when no chord claims the key: the keymap's, or
-                // the search bar's own Alt+R.
-                let claimed = resolved.is_some()
-                    || (self.search.is_some()
-                        && matches!(&latin, Key::Character(c) if c.eq_ignore_ascii_case("r")));
+                // typing when no chord of the keymap claims the key.
+                let claimed = resolved.is_some();
                 let alt = alt
                     && !keymap::alt_typing(
                         &logical_key,
