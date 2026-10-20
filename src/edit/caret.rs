@@ -37,11 +37,16 @@ pub enum Motion {
     WordRight,
 }
 
-/// A character of a word: a letter, a digit, an underscore, or a
-/// combining mark, which belongs to the letter before it.
+/// A character of a word: a letter, a digit, an underscore, a
+/// combining mark, which belongs to the letter before it, or a zero
+/// width joiner or non-joiner, which Persian, Kurdish, Urdu and the
+/// Indic scripts write inside a word to shape its letters.
 pub(crate) fn word_char(c: char) -> bool {
     use unicode_properties::{GeneralCategoryGroup, UnicodeGeneralCategory};
-    c.is_alphanumeric() || c == '_' || c.general_category_group() == GeneralCategoryGroup::Mark
+    c.is_alphanumeric()
+        || c == '_'
+        || matches!(c, '\u{200c}' | '\u{200d}')
+        || c.general_category_group() == GeneralCategoryGroup::Mark
 }
 
 /// The last position a caret may stand on: the text's end, or the byte
@@ -1927,6 +1932,18 @@ mod tests {
         assert_eq!(word_left(text, 8), 6, "back over the symbol");
         assert_eq!(word_left(text, 4), 0);
         assert_eq!(word_left(text, 0), 0);
+    }
+
+    /// The zero width joiner and non-joiner stand inside a Persian,
+    /// Kurdish, Urdu or Indic word, so a word is whole across them.
+    #[test]
+    fn the_joiners_belong_to_the_word() {
+        assert!(word_char('\u{200c}'), "the zero width non-joiner");
+        assert!(word_char('\u{200d}'), "the zero width joiner");
+        let text = "\u{645}\u{6cc}\u{200c}\u{631}\u{648}\u{645} x";
+        assert_eq!(word_right(text, 0), 13, "the Persian word is one hop");
+        assert_eq!(word_left(text, 13), 0);
+        assert_eq!(word_left(text, 9), 0, "from inside the second half");
     }
 
     #[test]

@@ -3393,6 +3393,13 @@ mod tests {
     }
 
     #[test]
+    fn the_word_at_the_caret_is_whole_across_a_joiner() {
+        let source = "\u{645}\u{6cc}\u{200c}\u{631}\u{648}\u{645} x";
+        assert_eq!(word_at(source, 9), Some(0..13), "from the second half");
+        assert_eq!(word_at(source, 2), Some(0..13), "from the first half");
+    }
+
+    #[test]
     fn the_caret_stays_after_the_same_letters_when_their_bytes_change() {
         // The dotless i is two bytes and its capital I one.
         let edit = case_edit("ışık", None, 2, false).expect("the word");
