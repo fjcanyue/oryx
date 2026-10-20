@@ -215,7 +215,7 @@ Oryx keeps a copy of the note while you type. If Oryx closes without asking, aft
 
 ## Themes
 
-Oryx comes with 33 themes, 11 of them made for Oryx. A theme is a TOML file that sets 51 colors, so every markdown element can have its own color.
+Oryx comes with 34 themes, 12 of them made for Oryx. A theme is a TOML file that sets 51 colors, so every markdown element can have its own color.
 
 `Ctrl+T` opens the list of themes. The arrow keys move through the list and show each theme on your document, `Enter` keeps the selected theme, and `Escape` goes back to the one you had.
 
@@ -225,7 +225,7 @@ The theme editor changes any of the 51 colors with a color picker, and the docum
 
 <p align="center"><img src="images/features-theme-editor.png" alt="The theme editor in Oryx" width="800"></p>
 
-The 11 original themes are `oryx-light` and its dark twin `oryx-dark`, `oryx-hero`, `oryx-sand`, `oryx-night`, `inkstone`, `ember`, `meadow`, `slate`, `be-vendible`, and `black-and-white`, made for printing. The others adapt the palettes of well-known editor themes, credited in the [README](README.md#credits).
+The 12 original themes are `oryx-light` and its dark twin `oryx-dark`, `oryx-hero`, `oryx-sand`, `oryx-night`, `inkstone`, `ember`, `meadow`, `slate`, `be-vendible`, `black-and-white`, made for printing, and `on-the-field`. The others adapt the palettes of well-known editor themes, credited in the [README](README.md#credits).
 
 > [!TIP]
 > To make a theme from a picture or a website you like, give an existing theme file to an AI model like Claude or Gemini, describe or link what you like, and ask it for an Oryx theme.

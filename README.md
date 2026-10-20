@@ -63,7 +63,7 @@ Oryx also reads the extended syntax of the Markdown Guide, which GitHub does not
 
 ### Themes and PDF export
 
-Oryx comes with 33 themes, 11 of them made for Oryx. Each theme sets 51 colors, so every markdown element can have its own color. `Ctrl+T` opens the list of themes: navigating the themes shows a live preview on the open document, `Enter` keeps it and `Escape` cancels. The theme editor lets you create new themes and edit existing ones, also with a live preview.
+Oryx comes with 34 themes, 12 of them made for Oryx. Each theme sets 51 colors, so every markdown element can have its own color. `Ctrl+T` opens the list of themes: navigating the themes shows a live preview on the open document, `Enter` keeps it and `Escape` cancels. The theme editor lets you create new themes and edit existing ones, also with a live preview.
 
 `Ctrl+P` exports the document to PDF. The PDF is made by the same engine that draws the page, so it has the same layout, fonts, syntax colors and math, and the headings are converted to PDF outlines. Oryx avoids cutting a line, an image or a table row across two pages, and does not leave a heading alone at the bottom of a page. The export has its own theme, fonts and page size, set with `Ctrl+Shift+P`, so you can read in a dark theme and export in a light one without switching each time. A `black-and-white` theme exists, in case you prefer to have monochrome PDFs.
 

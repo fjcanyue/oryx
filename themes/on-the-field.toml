@@ -1,0 +1,64 @@
+[surface]
+background = "#FBFCF8"
+foreground = "#01160A"
+
+[headings]
+h1 = "#022D13"
+h2 = "#047037"
+h3 = "#0B6650"
+h4 = "#1D5E7A"
+h5 = "#4D5C54"
+h6 = "#66736B"
+
+[text]
+body = "#01160A"
+bold = "#022D13"
+italic = "#3F5A4A"
+strike = "#A3ADA6"
+inline_code = "#047037"
+inline_code_bg = "#EAF1E1"
+link = "#047037"
+math = "#0B6650"
+
+[blocks]
+code_bg = "#F2F7EB"
+code_border = "#D9E3CF"
+quote_bg = "#F6F9F1"
+quote_bar = "#A5ED64"
+table_border = "#D9E3CF"
+table_header_bg = "#E8F0DD"
+table_row_alt_bg = "#F6F9F1"
+rule = "#CFE0C6"
+frontmatter_bg = "#F2F7EB"
+frontmatter_fg = "#4D5C54"
+
+[syntax]
+keyword = "#047037"
+string = "#5E6B0F"
+number = "#9A5B13"
+function = "#0B6650"
+type = "#1D5E7A"
+comment = "#6B786F"
+operator = "#3E4A43"
+variable = "#01160A"
+punctuation = "#56635B"
+
+[alerts]
+note = "#1D5E7A"
+tip = "#047037"
+important = "#5B4E8C"
+warning = "#8A5A00"
+caution = "#B42318"
+
+[ui]
+sidebar_bg = "#EEF4E6"
+sidebar_fg = "#2F3D35"
+sidebar_dir = "#022D13"
+scrollbar = "#CBD6C1"
+scrollbar_hover = "#A9B7A0"
+selection_bg = "#D7F5B8"
+overlay_bg = "#F2F7EB"
+overlay_fg = "#01160A"
+overlay_highlight = "#D7F5B8"
+search_match_bg = "#A5ED6680"
+search_current_bg = "#04703766"

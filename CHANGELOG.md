@@ -16,6 +16,10 @@
 
 - A selection of several words on one line, made with the mouse or the keyboard, now highlights its other occurrences, as a double-clicked word does. The highlight comes when the mouse button is released, or after a short pause in the keys.
 
+#### Themes
+
+- A new theme, `on-the-field`, a light page in greens.
+
 ### Fixes
 
 - The AppImage now carries the keyboard libraries of X11, and the deb and the rpm declare them. Before, on a system without `libxkbcommon-x11`, Oryx stopped at once with an error trace. On such a system, Oryx now says which package to install.
