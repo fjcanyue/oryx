@@ -4,6 +4,6 @@
 # opening of a phase, on the maintainer's word.
 channel = "1.99.0"
 components = ["clippy", "rustfmt"]
-# The two cross targets of `make check` and of the Windows build, so a
-# fresh checkout has them.
-targets = ["x86_64-pc-windows-gnu", "aarch64-apple-darwin"]
+# The cross targets of `make check` and of the Windows build are not
+# named here: a checkout that never builds them would download them.
+# The Makefile asks for them, with the line that adds them.

@@ -1799,6 +1799,47 @@ fn the_arch_script_leaves_no_work_folder_behind_a_failure() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// The toolchain file names the compiler alone. The two cross targets
+/// of `make check` and of the Windows build are asked for by the
+/// Makefile, with the line that adds them, the way `make audit` asks for
+/// its tool, so a checkout that never builds them downloads nothing.
+#[test]
+fn the_toolchain_file_names_no_target_and_the_makefile_asks_for_them() {
+    let toolchain = std::fs::read_to_string(repo().join("rust-toolchain.toml")).unwrap();
+    assert!(toolchain.contains("channel = "), "the compiler is named");
+    assert!(!toolchain.contains("targets ="), "the file names no target");
+    let makefile = std::fs::read_to_string(repo().join("Makefile")).unwrap();
+    let guard = |target: &str| {
+        format!(
+            "@rustup target list --installed | grep -qx {target} || {{ echo \"the target {target} is not installed: rustup target add {target}\"; exit 1; }}"
+        )
+    };
+    let check = makefile
+        .split("check:")
+        .nth(1)
+        .unwrap()
+        .split("\n\n")
+        .next()
+        .unwrap();
+    for target in ["x86_64-pc-windows-gnu", "aarch64-apple-darwin"] {
+        assert!(
+            check.contains(&guard(target)),
+            "the check asks for {target}"
+        );
+    }
+    let release = makefile
+        .split("release:")
+        .nth(1)
+        .unwrap()
+        .split("\n\n")
+        .next()
+        .unwrap();
+    assert!(
+        release.contains(&guard("x86_64-pc-windows-gnu")),
+        "the Windows build asks for its target"
+    );
+}
+
 #[test]
 fn the_makefile_builds_the_arch_package_after_the_channels() {
     let makefile = std::fs::read_to_string(repo().join("Makefile")).unwrap();
