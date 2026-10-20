@@ -43,6 +43,7 @@
 - In the editor, the syntax colors of a code file now stay right after several edits in quick succession at different places, and after a key typed inside a long comment followed by a scroll. Before, the lines between the edits could stay plain, and the lines scrolled into view could take the colors of code, until the file was opened again.
 - A key in the editor after the help page no longer colors the whole file again, which took 25 seconds on an 8 MB file. And the code blocks of a page are all colored after a key pressed just before leaving the editor; before, the coloring stopped where it was and the PDF showed the rest plain.
 - In the editor, the lines below the caret no longer flash the colors of code for a moment after a key typed inside a long comment or string. Before, a quick coloring from a cold start landed there, and the right colors came a frame or two later.
+- On Wayland, closing Oryx while a big file is still loading no longer prints `Io error: Cannot allocate memory (os error 12)` in the terminal. Before, the part of Oryx that receives files dropped on the window was still reading the display after the window had closed it.
 
 ## v1.2.1
 

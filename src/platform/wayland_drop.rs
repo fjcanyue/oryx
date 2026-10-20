@@ -4,37 +4,71 @@
 //! on every seat, accepts `text/uri-list` drops over the window's own
 //! surface and hands the paths to the app through its waker. The queue
 //! runs on its own thread and shares the display's socket the way
-//! libwayland is built for; the thread lives as long as the process.
+//! libwayland is built for. The thread must end before the display is
+//! freed: it waits on the display's descriptor and on a stop pipe, and
+//! the app drops its handle, which closes the pipe and waits for the
+//! thread, before anything of the window is dropped. The thread's
+//! objects then drop on a live display.
 
 use std::collections::HashMap;
 use std::ffi::c_void;
-use std::io::Read;
-use std::os::fd::AsFd;
+use std::io::{ErrorKind, Read};
+use std::os::fd::{AsFd, BorrowedFd};
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
+use std::thread::JoinHandle;
 use std::time::Duration;
 
-use wayland_backend::client::{Backend, ObjectId};
+use rustix::event::{poll, PollFd, PollFlags};
+use wayland_backend::client::{Backend, ObjectId, WaylandError};
 use wayland_client::protocol::wl_data_device::{self, WlDataDevice};
 use wayland_client::protocol::wl_data_device_manager::{DndAction, WlDataDeviceManager};
 use wayland_client::protocol::wl_data_offer::{self, WlDataOffer};
 use wayland_client::protocol::wl_registry::{self, WlRegistry};
 use wayland_client::protocol::wl_seat::{self, WlSeat};
 use wayland_client::protocol::wl_surface::WlSurface;
-use wayland_client::{event_created_child, Connection, Dispatch, Proxy, QueueHandle};
+use wayland_client::{event_created_child, Connection, Dispatch, EventQueue, Proxy, QueueHandle};
 
 use crate::doc::images::Waker;
 
 const URI_LIST: &str = "text/uri-list";
 
-/// The paths dropped since the last take, shared with the drop thread.
-#[derive(Clone, Default)]
-pub struct Drops(Arc<Mutex<Vec<PathBuf>>>);
+/// The drop thread's handle: the paths dropped since the last take,
+/// and the thread itself, which ends when the handle is dropped.
+pub struct Drops {
+    dropped: Dropped,
+    /// The app's end of the stop pipe; closing it wakes the thread.
+    stop: Option<UnixStream>,
+    thread: Option<JoinHandle<()>>,
+}
 
 impl Drops {
     /// The dropped paths in drop order, emptied.
     pub fn take(&self) -> Vec<PathBuf> {
+        self.dropped.take()
+    }
+}
+
+/// The handle is dropped before the window: the thread ends while the
+/// display is alive, so its queue and its objects drop on a live
+/// display. A thread inside a drop's read ends after the read's
+/// timeout, five seconds at most.
+impl Drop for Drops {
+    fn drop(&mut self) {
+        self.stop.take();
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
+/// The paths dropped since the last take, shared with the drop thread.
+#[derive(Clone, Default)]
+struct Dropped(Arc<Mutex<Vec<PathBuf>>>);
+
+impl Dropped {
+    fn take(&self) -> Vec<PathBuf> {
         std::mem::take(&mut self.0.lock().expect("drops lock"))
     }
 }
@@ -42,19 +76,20 @@ impl Drops {
 /// Starts the drop thread on winit's display for the window owning
 /// `surface`; None when the thread cannot start. `display` and
 /// `surface` are the raw handles winit exposes, valid for the window's
-/// life, which is the process's.
+/// life, and the handle returned is dropped before the window.
 pub fn start(display: *mut c_void, surface: *mut c_void, wake: Waker) -> Option<Drops> {
     // SAFETY: winit opened this display through libwayland and keeps it
-    // open for the process's life; the connection made here never
-    // disconnects it.
+    // open while the window lives; the connection made here never
+    // disconnects it, and the thread ends before the window is dropped.
     let backend = unsafe { Backend::from_foreign_display(display.cast()) };
     let conn = Connection::from_backend(backend);
     // SAFETY: the pointer is winit's live wl_surface proxy for the
     // window, whose id alone is read here.
     let surface = unsafe { ObjectId::from_ptr(WlSurface::interface(), surface.cast()) }.ok()?;
-    let drops = Drops::default();
-    let shared = drops.clone();
-    std::thread::Builder::new()
+    let (stop, stop_end) = UnixStream::pair().ok()?;
+    let dropped = Dropped::default();
+    let shared = dropped.clone();
+    let thread = std::thread::Builder::new()
         .name("wayland-drops".to_string())
         .spawn(move || {
             let mut queue = conn.new_event_queue();
@@ -71,24 +106,79 @@ pub fn start(display: *mut c_void, surface: *mut c_void, wake: Waker) -> Option<
                 drops: shared,
                 wake,
             };
-            while queue.blocking_dispatch(&mut state).is_ok() {}
-            // The connection failed, and the main thread learns it at
-            // the same moment and closes the display. Dropping the
-            // queue and the state would call into libwayland on a
-            // display being freed, which crashed the process on its
-            // way out (18/09/2026).
-            retire((queue, state));
+            serve(&conn, &mut queue, &mut state, &stop_end);
         })
         .ok()?;
-    Some(drops)
+    Some(Drops {
+        dropped,
+        stop: Some(stop),
+        thread: Some(thread),
+    })
 }
 
-/// Ends a thread's work without running a destructor: `held` is
-/// forgotten, and the thread sleeps for what is left of the process.
-fn retire<T>(held: T) -> ! {
-    std::mem::forget(held);
+/// The thread's loop: the pending events dispatched, the requests
+/// flushed, then a wait for the display's data or the stop. It returns
+/// on the stop and on a failure of the display, the read cancelled.
+fn serve(conn: &Connection, queue: &mut EventQueue<State>, state: &mut State, stop: &UnixStream) {
     loop {
-        std::thread::park();
+        if queue.dispatch_pending(state).is_err() {
+            return;
+        }
+        if let Err(err) = conn.flush() {
+            if !would_block(&err) {
+                return;
+            }
+        }
+        // None: events were queued meanwhile, dispatched at the next turn.
+        let Some(guard) = conn.prepare_read() else {
+            continue;
+        };
+        match wake(guard.connection_fd(), stop.as_fd()) {
+            Wake::Display => {
+                if let Err(err) = guard.read() {
+                    if !would_block(&err) {
+                        return;
+                    }
+                }
+            }
+            // The guard's drop cancels the read.
+            Wake::Stop | Wake::Failed => return,
+        }
+    }
+}
+
+fn would_block(err: &WaylandError) -> bool {
+    matches!(err, WaylandError::Io(e) if e.kind() == ErrorKind::WouldBlock)
+}
+
+/// What ended the wait on the display's descriptor and the stop pipe.
+#[derive(Debug, PartialEq, Eq)]
+enum Wake {
+    Display,
+    Stop,
+    Failed,
+}
+
+/// Waits until the display has data, or the stop pipe is closed or
+/// written, whichever comes first; the stop wins a tie.
+fn wake(display: BorrowedFd<'_>, stop: BorrowedFd<'_>) -> Wake {
+    let mut fds = [
+        PollFd::new(&display, PollFlags::IN | PollFlags::ERR),
+        PollFd::new(&stop, PollFlags::IN),
+    ];
+    loop {
+        match poll(&mut fds, None) {
+            Ok(_) => break,
+            Err(rustix::io::Errno::INTR) => continue,
+            Err(_) => return Wake::Failed,
+        }
+    }
+    if !fds[1].revents().is_empty() {
+        Wake::Stop
+    } else if !fds[0].revents().is_empty() {
+        Wake::Display
+    } else {
+        Wake::Failed
     }
 }
 
@@ -106,7 +196,7 @@ struct State {
     /// The offer of the drag over the window, when it carries a list of
     /// files; accepted at enter, read at drop.
     dragging: Option<WlDataOffer>,
-    drops: Drops,
+    drops: Dropped,
     wake: Waker,
 }
 
@@ -328,27 +418,30 @@ mod tests {
         assert!(parse_uri_list("file://").is_empty());
     }
 
-    /// What the drop thread holds when its loop ends is never dropped:
-    /// its destructors call into libwayland, and the main thread is
-    /// closing the display at that moment.
     #[test]
-    fn a_retired_thread_drops_nothing() {
-        use std::sync::atomic::{AtomicBool, Ordering};
-        struct Held(Arc<AtomicBool>);
-        impl Drop for Held {
-            fn drop(&mut self) {
-                self.0.store(true, Ordering::SeqCst);
-            }
-        }
-        let dropped = Arc::new(AtomicBool::new(false));
-        let held = Held(Arc::clone(&dropped));
-        let (started, wait) = std::sync::mpsc::channel();
-        std::thread::spawn(move || {
-            started.send(()).expect("the test waits");
-            retire(held)
-        });
-        wait.recv().expect("the thread started");
-        std::thread::sleep(Duration::from_millis(50));
-        assert!(!dropped.load(Ordering::SeqCst), "nothing is dropped");
+    fn the_wait_ends_on_the_stop() {
+        let (display, _far) = UnixStream::pair().expect("a pair");
+        let (stop, app_end) = UnixStream::pair().expect("a pair");
+        drop(app_end);
+        assert_eq!(wake(display.as_fd(), stop.as_fd()), Wake::Stop);
+    }
+
+    #[test]
+    fn the_wait_ends_when_the_display_has_data() {
+        use std::io::Write;
+        let (display, mut far) = UnixStream::pair().expect("a pair");
+        let (stop, _app_end) = UnixStream::pair().expect("a pair");
+        far.write_all(b"event").expect("written");
+        assert_eq!(wake(display.as_fd(), stop.as_fd()), Wake::Display);
+    }
+
+    #[test]
+    fn the_stop_wins_when_both_are_ready() {
+        use std::io::Write;
+        let (display, mut far) = UnixStream::pair().expect("a pair");
+        let (stop, app_end) = UnixStream::pair().expect("a pair");
+        far.write_all(b"event").expect("written");
+        drop(app_end);
+        assert_eq!(wake(display.as_fd(), stop.as_fd()), Wake::Stop);
     }
 }

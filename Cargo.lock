@@ -2354,6 +2354,7 @@ dependencies = [
  "resvg",
  "rfd",
  "roxmltree",
+ "rustix 1.1.4",
  "serde",
  "softbuffer",
  "subsetter",

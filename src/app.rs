@@ -432,6 +432,13 @@ pub fn run(
         app.cfg.direction = app.positions.direction(key);
     }
     let ended = event_loop.run_app(&mut app);
+    // The drop thread ends here, while the window and its display are
+    // alive: dropped with the app below, it would read the display the
+    // app frees at that moment.
+    #[cfg(target_os = "linux")]
+    {
+        app.drops = None;
+    }
     // Without a display no window can explain the ending, so the
     // terminal gets it in plain words, from the frame that failed or
     // from winit, which leaves its loop with the error's number.
