@@ -1441,8 +1441,11 @@ impl Walker {
             BlockKind::Summary { group, .. } => self.details[*group as usize].parent,
             _ => self.details_stack.last().copied(),
         };
-        let centered = self.center.contains(&Some(true))
-            || (self.center.iter().all(|c| c.is_none()) && self.lone_image(&kind));
+        // The word of the innermost block that carries one places the
+        // block, as the model says; with no word said, a lone image is
+        // centered.
+        let word = self.center.iter().rev().find_map(|word| *word);
+        let centered = word.unwrap_or_else(|| self.lone_image(&kind));
         self.blocks.push(Block {
             quote_depth: self.quote_depth,
             alert: None,
@@ -1675,6 +1678,33 @@ mod tests {
         let (blocks, _, _) =
             walk("<html><body><div align=\"left\"><p><img src=\"a.png\"/></p></div></body></html>");
         assert!(!blocks[0].centered, "an enclosing block says left");
+    }
+
+    /// The word of the innermost block that carries one places a block,
+    /// as the model says: a paragraph placed left by its own class or
+    /// attribute inside a centered division stays at the left.
+    #[test]
+    fn a_blocks_own_word_wins_inside_a_centered_division() {
+        let (blocks, _, _) = walk_styled(
+            ".c { text-align: center } .l { text-align: left }",
+            "<html><body><div class=\"c\"><p class=\"l\">Title</p><p>Second</p></div></body></html>",
+        );
+        assert!(!blocks[0].centered, "the paragraph's class says left");
+        assert!(
+            blocks[1].centered,
+            "a paragraph with no word of its own takes the division's"
+        );
+        let (blocks, _, _) = walk(
+            "<html><body><div align=\"center\"><p align=\"right\">Title</p></div></body></html>",
+        );
+        assert!(!blocks[0].centered, "the paragraph's attribute says right");
+        let (blocks, _, _) = walk(
+            "<html><body><div align=\"left\"><p align=\"center\">Title</p></div></body></html>",
+        );
+        assert!(
+            blocks[0].centered,
+            "a centered paragraph inside a left division"
+        );
     }
 
     #[test]
