@@ -23,7 +23,10 @@
 ### Fixes
 
 - The AppImage now carries the keyboard libraries of X11, and the deb and the rpm declare them. Before, on a system without `libxkbcommon-x11`, Oryx stopped at once with an error trace. On such a system, Oryx now says which package to install.
-- On a keyboard layout that types another script, such as Cyrillic or Greek, or an accented letter on a letter key, such as BÉPO, a letter shortcut now holds by the place of its key: `Ctrl` with the key of C is `Ctrl+C`. Before, no letter shortcut matched on such a layout, in the dialogs and the search bar too (issue #8).
+- On a keyboard layout that types another script, such as Cyrillic or Greek, or an accented letter on a letter key, such as BÉPO, a letter shortcut now holds by the place of its key: `Ctrl` with the key of C is `Ctrl+C`. `Ctrl+,` holds by its key too, and on a Mac `Cmd+[` and `Cmd+]`. Before, no letter shortcut matched on such a layout, in the dialogs and the search bar too (issue #8).
+- On a Mac, a character typed with Option stays a character: `Option+Shift+-` types an em dash, and on a French or German Mac, Option with the `)` key or the `ß` key types `}` or `\`. Before, these keys made a bullet list.
+- On a Mac, the list and quote shortcuts with Option hold by the key printed on the keycap: `Option+-` is the bullet list on a French or German Mac too, where the minus key sits elsewhere.
+- On Windows, the left `Ctrl+Alt` with a key no longer runs a shortcut. Before, on a German layout, `Ctrl+Alt+2` set a heading and `Ctrl+Alt+0` reset the zoom.
 - The help page no longer keeps a processor core busy once its syntax section is on screen. Before, the coloring of its code blocks was started again and again, and the load stayed until the page was left (issue #9).
 - On a big file, a jump to the end while the file is still being laid out no longer puts the blocks kept in memory out of step with the page. Before, the first block kept after the jump was filed as the next of the last one kept before it, and the view could read the wrong geometry until it moved again.
 - In the Outline tab, a long title written from right to left now shows its beginning, cut at its end with an ellipsis. Before, the title was drawn whole and the edge of the sidebar cut its beginning, so the rows of several chapters read the same.

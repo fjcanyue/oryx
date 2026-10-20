@@ -64,6 +64,7 @@ use winit::event::{
 };
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{Key, ModifiersState, NamedKey};
+use winit::platform::modifier_supplement::KeyEventExtModifierSupplement;
 use winit::window::{CursorIcon, Window, WindowId};
 
 /// How often owed recolors land while highlights wash in.
@@ -9108,17 +9109,19 @@ impl ApplicationHandler for App {
             }
             WindowEvent::ModifiersChanged(m) => self.modifiers = m.state(),
             WindowEvent::KeyboardInput {
-                event:
-                    KeyEvent {
-                        logical_key,
-                        physical_key,
-                        state: ElementState::Pressed,
-                        repeat,
-                        ..
-                    },
+                event,
                 is_synthetic,
                 ..
-            } => {
+            } if event.state == ElementState::Pressed => {
+                // The keycap, the key's own character with no modifier,
+                // is what a chord with Option is matched by on a Mac.
+                let keycap = event.key_without_modifiers();
+                let KeyEvent {
+                    logical_key,
+                    physical_key,
+                    repeat,
+                    ..
+                } = event;
                 self.fling = None;
                 // A synthetic press reports a key that was already held
                 // when focus arrived, not a keystroke. On Windows the
@@ -9149,7 +9152,14 @@ impl ApplicationHandler for App {
                 let ctrl = chord_key(self.modifiers);
                 let shift = self.modifiers.shift_key();
                 let alt = self.modifiers.alt_key();
-                let resolved = keymap::command(&logical_key, physical_key, ctrl, shift, alt);
+                let resolved = keymap::command(keymap::Press {
+                    typed: &logical_key,
+                    keycap: &keycap,
+                    code: physical_key,
+                    ctrl,
+                    shift,
+                    alt,
+                });
                 // A character typed with Alt held (Option on a Mac) is
                 // typing when no chord claims the key: the keymap's, or
                 // the search bar's own Alt+R.

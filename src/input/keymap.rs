@@ -187,13 +187,13 @@ enum Binding {
     AltNamed(NamedKey),
     /// Alt plus a character, case-insensitive, any shift state.
     Alt(&'static str),
-    /// Alt plus a key by its place on the keyboard, tried last: the
-    /// digit chords, on layouts where a digit needs Shift.
+    /// Alt alone plus a key by its place on the keyboard, tried last:
+    /// the digit chords, on layouts where a digit needs Shift.
     AltCode(KeyCode),
-    /// Ctrl plus a key by its place on the keyboard, tried last, once
-    /// no character chord claims the press. The zoom keys live here so
-    /// that a layout printing something else on the `0`, `-` or `=`
-    /// keys still zooms with them, the way browsers do.
+    /// Ctrl alone plus a key by its place on the keyboard, tried last,
+    /// once no character chord claims the press. The zoom keys live
+    /// here so that a layout printing something else on the `0`, `-`
+    /// or `=` keys still zooms with them, the way browsers do.
     CtrlCode(KeyCode),
     /// A chord that holds on macOS only, where the Mac's own habits
     /// take a key: `Option+Left` moves by a word in every Mac app, so
@@ -315,6 +315,8 @@ pub const SHORTCUTS: &[Shortcut] = &[
             ),
             (Binding::Mac(&Binding::Ctrl("[")), Command::Back),
             (Binding::Mac(&Binding::Ctrl("]")), Command::Forward),
+            (Binding::Mac(&Binding::CtrlCode(KeyCode::BracketLeft)), Command::Back),
+            (Binding::Mac(&Binding::CtrlCode(KeyCode::BracketRight)), Command::Forward),
         ],
     },
     Shortcut {
@@ -575,7 +577,10 @@ pub const SHORTCUTS: &[Shortcut] = &[
         keys: "Ctrl+,",
         action: "Settings: fonts, sizes, interface scale, line numbers, word count and autosave",
         section: "View",
-        bindings: &[(Binding::Ctrl(","), Command::Settings)],
+        bindings: &[
+            (Binding::Ctrl(","), Command::Settings),
+            (Binding::CtrlCode(KeyCode::Comma), Command::Settings),
+        ],
     },
     Shortcut {
         keys: "Ctrl+Plus / Ctrl+Minus",
@@ -639,39 +644,60 @@ pub const SHORTCUTS: &[Shortcut] = &[
     },
 ];
 
-/// Resolves a key event against the table. Chords that require a
+/// A key press as the window reports it.
+#[derive(Clone, Copy)]
+pub struct Press<'a> {
+    /// What the press types, with the modifiers applied: a character,
+    /// or a named key.
+    pub typed: &'a Key,
+    /// The key's own character, with no modifier: the keycap.
+    pub keycap: &'a Key,
+    /// The key's place on the keyboard.
+    pub code: PhysicalKey,
+    pub ctrl: bool,
+    pub shift: bool,
+    pub alt: bool,
+}
+
+/// Resolves a key press against the table. Chords that require a
 /// modifier are tried first, so Ctrl+Shift+C never falls through to
 /// Ctrl+C and Ctrl+Left never falls through to plain Left; the key's
 /// place on the keyboard is tried last, once no character chord has
-/// claimed the press. A letter chord is matched with `latin_key`, so
-/// a layout that types another script keeps its letter chords.
-pub fn command(
-    key: &Key,
-    code: PhysicalKey,
-    ctrl: bool,
-    shift: bool,
-    alt: bool,
-) -> Option<Command> {
-    command_on(key, code, ctrl, shift, alt, cfg!(target_os = "macos"))
+/// claimed the press, and with the row's modifier alone. A letter
+/// chord is matched with `latin_key`, so a layout that types another
+/// script keeps its letter chords.
+pub fn command(press: Press) -> Option<Command> {
+    command_on(press, cfg!(target_os = "macos"))
 }
 
 /// `command` for a named platform, so a test can ask for the Mac's
 /// chords from anywhere.
-fn command_on(
-    key: &Key,
-    code: PhysicalKey,
-    ctrl: bool,
-    shift: bool,
-    alt: bool,
-    macos: bool,
-) -> Option<Command> {
-    // Ctrl and Alt both held is how Windows reports an AltGr character
-    // typed with the left keys: the character stands and no chord runs.
-    let latin = if ctrl && alt {
-        key.clone()
-    } else {
-        latin_key(key, code)
-    };
+fn command_on(press: Press, macos: bool) -> Option<Command> {
+    let Press {
+        typed,
+        keycap,
+        code,
+        ctrl,
+        shift,
+        alt,
+    } = press;
+    let character = matches!(typed, Key::Character(_));
+    // Ctrl and Alt both held with a character key is the left Ctrl+Alt
+    // of Windows, the AltGr of a layout: the character stands and no
+    // row runs, by the character or by the key's place.
+    if ctrl && alt && character {
+        return None;
+    }
+    // Option on a Mac gives a key a character of its own. With Shift,
+    // or when that character is a plain ASCII one the layout keeps
+    // there (`}` under `)` on a French Mac), the press types it.
+    // Otherwise a chord is matched by the keycap, as the Mac's menus
+    // do, so `Alt+-` holds wherever a layout puts the minus key.
+    let option = macos && alt && !ctrl && character;
+    if option && (shift || matches!(typed, Key::Character(c) if c.is_ascii())) {
+        return None;
+    }
+    let latin = latin_key(if option { keycap } else { typed }, code);
     let key = &latin;
     let bindings = || {
         SHORTCUTS
@@ -696,8 +722,8 @@ fn command_on(
     };
     let physical = || {
         bindings().find(|(binding, _)| match binding {
-            Binding::CtrlCode(c) => ctrl && code == PhysicalKey::Code(*c),
-            Binding::AltCode(c) => alt && code == PhysicalKey::Code(*c),
+            Binding::CtrlCode(c) => ctrl && !shift && !alt && code == PhysicalKey::Code(*c),
+            Binding::AltCode(c) => alt && !shift && !ctrl && code == PhysicalKey::Code(*c),
             _ => false,
         })
     };
@@ -845,10 +871,45 @@ mod tests {
         Key::Character(s.into())
     }
 
+    /// A press on Linux or Windows, where Alt leaves the character: the
+    /// keycap is the character typed.
+    fn resolve(
+        key: &Key,
+        code: PhysicalKey,
+        ctrl: bool,
+        shift: bool,
+        alt: bool,
+    ) -> Option<Command> {
+        resolve_on(key, code, ctrl, shift, alt, false)
+    }
+
+    /// `resolve` for a named platform, the keycap still the character
+    /// typed; a Mac press with Option builds its own `Press`.
+    fn resolve_on(
+        key: &Key,
+        code: PhysicalKey,
+        ctrl: bool,
+        shift: bool,
+        alt: bool,
+        macos: bool,
+    ) -> Option<Command> {
+        super::command_on(
+            Press {
+                typed: key,
+                keycap: key,
+                code,
+                ctrl,
+                shift,
+                alt,
+            },
+            macos,
+        )
+    }
+
     /// The table predates the Alt modifier and the physical key; the
     /// shadow keeps the older assertions readable.
     fn command(key: &Key, ctrl: bool, shift: bool) -> Option<Command> {
-        super::command(
+        resolve(
             key,
             PhysicalKey::Unidentified(NativeKeyCode::Unidentified),
             ctrl,
@@ -863,7 +924,7 @@ mod tests {
     #[test]
     fn the_zoom_chords_match_by_physical_key_on_other_layouts() {
         let on = |c: &str, code: KeyCode, ctrl: bool| {
-            super::command(&chr(c), PhysicalKey::Code(code), ctrl, false, false)
+            resolve(&chr(c), PhysicalKey::Code(code), ctrl, false, false)
         };
         assert_eq!(on("à", KeyCode::Digit0, true), Some(Command::ZoomReset));
         assert_eq!(on("0", KeyCode::Digit0, true), Some(Command::ZoomReset));
@@ -890,7 +951,7 @@ mod tests {
     #[test]
     fn the_letter_chords_hold_on_a_cyrillic_layout_by_the_key() {
         let on = |c: &str, code: KeyCode, ctrl: bool, shift: bool| {
-            super::command(&chr(c), PhysicalKey::Code(code), ctrl, shift, false)
+            resolve(&chr(c), PhysicalKey::Code(code), ctrl, shift, false)
         };
         assert_eq!(on("с", KeyCode::KeyC, true, false), Some(Command::CopyText));
         assert_eq!(on("м", KeyCode::KeyV, true, false), Some(Command::Paste));
@@ -945,7 +1006,7 @@ mod tests {
     #[test]
     fn ascii_characters_on_letter_keys_keep_their_chords() {
         let on = |c: &str, code: KeyCode, ctrl: bool, alt: bool| {
-            super::command(&chr(c), PhysicalKey::Code(code), ctrl, false, alt)
+            resolve(&chr(c), PhysicalKey::Code(code), ctrl, false, alt)
         };
         assert_eq!(
             on(",", KeyCode::KeyM, true, false),
@@ -970,14 +1031,183 @@ mod tests {
     }
 
     /// Ctrl and Alt both held is how Windows reports an AltGr character
-    /// typed with the left keys: the character stands and no chord runs.
+    /// typed with the left keys: the character stands and no row runs,
+    /// by the character or by the key's place. A named key keeps its
+    /// rows.
     #[test]
     fn an_altgr_character_under_ctrl_and_alt_is_no_chord() {
-        let on = |c: &str, code: KeyCode| {
-            super::command(&chr(c), PhysicalKey::Code(code), true, false, true)
+        let on = |c: &str, code: KeyCode, shift: bool| {
+            resolve(&chr(c), PhysicalKey::Code(code), true, shift, true)
         };
-        assert_eq!(on("€", KeyCode::KeyE), None, "German Ctrl+Alt+E");
-        assert_eq!(on("ś", KeyCode::KeyS), None, "Polish Ctrl+Alt+S");
+        assert_eq!(on("€", KeyCode::KeyE, false), None, "German Ctrl+Alt+E");
+        assert_eq!(on("ś", KeyCode::KeyS, false), None, "Polish Ctrl+Alt+S");
+        assert_eq!(on("x", KeyCode::KeyX, false), None, "US: no task list");
+        assert_eq!(
+            on("1", KeyCode::Digit1, false),
+            None,
+            "US: no list, no heading"
+        );
+        assert_eq!(on("S", KeyCode::KeyS, true), None, "US: no save as");
+        assert_eq!(
+            resolve(
+                &Key::Named(NamedKey::ArrowUp),
+                PhysicalKey::Code(KeyCode::ArrowUp),
+                true,
+                false,
+                true
+            ),
+            Some(Command::MoveLineUp),
+            "a named key keeps its row"
+        );
+    }
+
+    /// The settings chord holds by the key's place, as the zoom and the
+    /// heading chords do: `Ctrl` with the key at the US comma opens the
+    /// settings on a layout where that key prints a letter. On a Mac,
+    /// back and forward hold by the bracket keys the same way.
+    #[test]
+    fn the_settings_and_the_mac_brackets_hold_by_the_key_on_other_layouts() {
+        let on = |c: &str, code: KeyCode, ctrl: bool| {
+            resolve(&chr(c), PhysicalKey::Code(code), ctrl, false, false)
+        };
+        assert_eq!(
+            on("б", KeyCode::Comma, true),
+            Some(Command::Settings),
+            "Russian"
+        );
+        assert_eq!(
+            on("ת", KeyCode::Comma, true),
+            Some(Command::Settings),
+            "Hebrew"
+        );
+        assert_eq!(on(",", KeyCode::Comma, true), Some(Command::Settings));
+        assert_eq!(
+            on("б", KeyCode::Comma, false),
+            None,
+            "no chord without Ctrl"
+        );
+        let mac = |c: &str, code: KeyCode| {
+            resolve_on(&chr(c), PhysicalKey::Code(code), true, false, false, true)
+        };
+        assert_eq!(
+            mac("х", KeyCode::BracketLeft),
+            Some(Command::Back),
+            "Russian Mac"
+        );
+        assert_eq!(mac("ъ", KeyCode::BracketRight), Some(Command::Forward));
+    }
+
+    /// A physical row holds with its own modifier alone. With Shift, or
+    /// with Ctrl and Alt both held, the press types its character: the
+    /// em dash of Option+Shift+minus on a Mac, and the characters the
+    /// left Ctrl+Alt types on a German Windows layout.
+    #[test]
+    fn a_physical_row_holds_with_its_own_modifier_alone() {
+        let on = |c: &str, code: KeyCode, ctrl: bool, shift: bool, alt: bool, mac: bool| {
+            resolve_on(&chr(c), PhysicalKey::Code(code), ctrl, shift, alt, mac)
+        };
+        assert_eq!(
+            on("\u{b2}", KeyCode::Digit2, true, false, true, false),
+            None,
+            "German Windows: Ctrl+Alt+2 types ²"
+        );
+        assert_eq!(
+            on("}", KeyCode::Digit0, true, false, true, false),
+            None,
+            "German Windows: Ctrl+Alt+0 types a closing brace"
+        );
+        assert_eq!(
+            on("\\", KeyCode::Minus, true, false, true, false),
+            None,
+            "German Windows: Ctrl+Alt+ß types a backslash"
+        );
+        assert_eq!(
+            on("\u{2014}", KeyCode::Minus, false, true, true, true),
+            None,
+            "Mac: Option+Shift+minus types an em dash"
+        );
+        assert_eq!(
+            on("_", KeyCode::Minus, false, true, true, false),
+            None,
+            "elsewhere Alt+Shift+minus is no chord"
+        );
+    }
+
+    /// Option on a Mac: a chord by the keycap, as the Mac's menus match
+    /// one; the typed character with Shift, or when it is a plain one
+    /// the layout keeps under Option.
+    #[test]
+    fn on_the_mac_option_chords_by_the_keycap_and_types_the_rest() {
+        let on = |typed: &str, keycap: &str, code: KeyCode, shift: bool| {
+            super::command_on(
+                Press {
+                    typed: &chr(typed),
+                    keycap: &chr(keycap),
+                    code: PhysicalKey::Code(code),
+                    ctrl: false,
+                    shift,
+                    alt: true,
+                },
+                true,
+            )
+        };
+        assert_eq!(
+            on("\u{2013}", "-", KeyCode::Minus, false),
+            Some(Command::BulletList),
+            "US: Option+minus types an en dash, and is the bullet list"
+        );
+        assert_eq!(
+            on("\u{2014}", "-", KeyCode::Equal, false),
+            Some(Command::BulletList),
+            "French: the minus key sits at the US equal place"
+        );
+        assert_eq!(
+            on("\u{2013}", "-", KeyCode::Slash, false),
+            Some(Command::BulletList),
+            "German: the minus key sits at the US slash place"
+        );
+        assert_eq!(
+            on("\u{a1}", "1", KeyCode::Digit1, false),
+            Some(Command::NumberedList)
+        );
+        assert_eq!(
+            on("\u{2248}", "x", KeyCode::KeyX, false),
+            Some(Command::TaskList)
+        );
+        assert_eq!(
+            on("\u{2265}", ".", KeyCode::Period, false),
+            Some(Command::Quote)
+        );
+        assert_eq!(
+            on("\u{2026}", "&", KeyCode::Digit1, false),
+            Some(Command::NumberedList),
+            "AZERTY Mac: the 1 key prints &, and the row by place holds"
+        );
+        assert_eq!(
+            on("}", ")", KeyCode::Minus, false),
+            None,
+            "French: Option with the ) key types a closing brace"
+        );
+        assert_eq!(
+            on("\\", "\u{df}", KeyCode::Minus, false),
+            None,
+            "German: Option with the ß key types a backslash"
+        );
+        assert_eq!(
+            on("@", "l", KeyCode::KeyL, false),
+            None,
+            "German: Option+L types @"
+        );
+        assert_eq!(
+            on("\u{2014}", "-", KeyCode::Minus, true),
+            None,
+            "US: Option+Shift+minus types an em dash"
+        );
+        assert_eq!(
+            on("\u{2db}", "x", KeyCode::KeyX, true),
+            None,
+            "Option+Shift+X types, no task list"
+        );
     }
 
     #[test]
@@ -1008,7 +1238,7 @@ mod tests {
     #[test]
     fn on_the_mac_cmd_with_a_cyrillic_letter_copies() {
         assert_eq!(
-            command_on(
+            resolve_on(
                 &chr("с"),
                 PhysicalKey::Code(KeyCode::KeyC),
                 true,
@@ -1039,18 +1269,22 @@ mod tests {
             KeyCode::Period => ".",
             KeyCode::Backquote => "`",
             KeyCode::Slash => "/",
+            KeyCode::Comma => ",",
+            KeyCode::BracketLeft => "[",
+            KeyCode::BracketRight => "]",
             other => panic!("{other:?} has no US character in this table"),
         };
         let none = PhysicalKey::Unidentified(NativeKeyCode::Unidentified);
         let mut seen = 0;
         for (binding, cmd) in SHORTCUTS.iter().flat_map(|row| row.bindings.iter()) {
-            let (code, ctrl, alt) = match binding.on(cfg!(target_os = "macos")).unwrap_or(binding) {
-                Binding::CtrlCode(code) => (code, true, false),
-                Binding::AltCode(code) => (code, false, true),
+            let (code, ctrl, alt, macos) = match (binding.on(false), binding.on(true)) {
+                (Some(Binding::CtrlCode(code)), _) => (code, true, false, false),
+                (Some(Binding::AltCode(code)), _) => (code, false, true, false),
+                (None, Some(Binding::CtrlCode(code))) => (code, true, false, true),
                 _ => continue,
             };
             seen += 1;
-            let by_char = super::command(&chr(us(code)), none, ctrl, false, alt);
+            let by_char = resolve_on(&chr(us(code)), none, ctrl, false, alt, macos);
             assert_eq!(
                 by_char,
                 Some(*cmd),
@@ -1063,7 +1297,7 @@ mod tests {
     #[test]
     fn the_list_chords_take_alt_with_the_character_or_the_digit_key() {
         let none = PhysicalKey::Unidentified(NativeKeyCode::Unidentified);
-        let alt = |key: &Key, code: PhysicalKey| super::command(key, code, false, false, true);
+        let alt = |key: &Key, code: PhysicalKey| resolve(key, code, false, false, true);
         assert_eq!(alt(&chr("-"), none), Some(Command::BulletList));
         assert_eq!(
             alt(&chr(")"), PhysicalKey::Code(KeyCode::Minus)),
@@ -1072,7 +1306,7 @@ mod tests {
         );
         assert_eq!(alt(&chr("x"), none), Some(Command::TaskList));
         assert_eq!(
-            super::command(&chr("X"), none, false, true, true),
+            resolve(&chr("X"), none, false, true, true),
             Some(Command::TaskList),
             "shift makes no difference"
         );
@@ -1089,14 +1323,14 @@ mod tests {
         );
         assert_eq!(alt(&chr("."), none), Some(Command::Quote));
         assert_eq!(
-            super::command(&chr(">"), none, false, true, true),
+            resolve(&chr(">"), none, false, true, true),
             Some(Command::Quote),
             "a layout with > on a plain key"
         );
         assert_eq!(
-            alt(&chr(";"), PhysicalKey::Code(KeyCode::Period)),
+            alt(&chr(":"), PhysicalKey::Code(KeyCode::Period)),
             Some(Command::Quote),
-            "AZERTY: the period key prints ; unshifted"
+            "AZERTY: the key at the US period place prints : unshifted"
         );
     }
 
@@ -1106,7 +1340,7 @@ mod tests {
         assert_eq!(command(&chr("6"), true, false), Some(Command::Heading(6)));
         assert_eq!(command(&chr("7"), true, false), None);
         assert_eq!(
-            super::command(
+            resolve(
                 &chr("é"),
                 PhysicalKey::Code(KeyCode::Digit2),
                 true,
@@ -1129,15 +1363,15 @@ mod tests {
         let up = Key::Named(NamedKey::ArrowUp);
         let down = Key::Named(NamedKey::ArrowDown);
         assert_eq!(
-            super::command(&up, none, false, false, true),
+            resolve(&up, none, false, false, true),
             Some(Command::MoveLineUp)
         );
         assert_eq!(
-            super::command(&down, none, false, false, true),
+            resolve(&down, none, false, false, true),
             Some(Command::MoveLineDown)
         );
         assert_eq!(
-            super::command(&up, none, false, false, false),
+            resolve(&up, none, false, false, false),
             Some(Command::LineUp)
         );
     }
@@ -1169,15 +1403,15 @@ mod tests {
     fn ctrl_slash_toggles_a_comment_by_character_or_key() {
         assert_eq!(command(&chr("/"), true, false), Some(Command::Comment));
         assert_eq!(
-            super::command(
-                &chr(":"),
+            resolve(
+                &chr("!"),
                 PhysicalKey::Code(KeyCode::Slash),
                 true,
                 false,
                 false
             ),
             Some(Command::Comment),
-            "AZERTY: the slash key prints : unshifted"
+            "AZERTY: the key at the US slash place prints ! unshifted"
         );
     }
 
@@ -1195,9 +1429,9 @@ mod tests {
     #[test]
     fn on_the_mac_back_and_forward_are_cmd_brackets_and_option_arrows_are_free() {
         let none = PhysicalKey::Unidentified(NativeKeyCode::Unidentified);
-        let mac = |key: &Key, ctrl: bool, alt: bool| command_on(key, none, ctrl, false, alt, true);
+        let mac = |key: &Key, ctrl: bool, alt: bool| resolve_on(key, none, ctrl, false, alt, true);
         let elsewhere =
-            |key: &Key, ctrl: bool, alt: bool| command_on(key, none, ctrl, false, alt, false);
+            |key: &Key, ctrl: bool, alt: bool| resolve_on(key, none, ctrl, false, alt, false);
         assert_eq!(mac(&chr("["), true, false), Some(Command::Back));
         assert_eq!(mac(&chr("]"), true, false), Some(Command::Forward));
         let left = Key::Named(NamedKey::ArrowLeft);
@@ -1232,23 +1466,23 @@ mod tests {
         let left = Key::Named(NamedKey::ArrowLeft);
         let none = PhysicalKey::Unidentified(NativeKeyCode::Unidentified);
         assert_eq!(
-            command_on(&left, none, false, false, true, false),
+            resolve_on(&left, none, false, false, true, false),
             Some(Command::Back),
             "Alt+Left returns from a jump"
         );
         let right = Key::Named(NamedKey::ArrowRight);
         assert_eq!(
-            command_on(&right, none, false, false, true, false),
+            resolve_on(&right, none, false, false, true, false),
             Some(Command::Forward),
             "Alt+Right goes forward again"
         );
         assert_eq!(
-            command_on(&right, none, false, false, false, false),
+            resolve_on(&right, none, false, false, false, false),
             Some(Command::PaneRight),
             "plain Right keeps the pane switch"
         );
         assert_eq!(
-            super::command(&left, none, false, false, false),
+            resolve(&left, none, false, false, false),
             Some(Command::PaneLeft),
             "plain Left keeps the pane switch"
         );
@@ -1458,7 +1692,7 @@ mod tests {
         assert_eq!(command(&chr("i"), true, false), Some(Command::Italic));
         assert_eq!(command(&chr("`"), true, false), Some(Command::Code));
         assert_eq!(
-            super::command(
+            resolve(
                 &chr("²"),
                 PhysicalKey::Code(KeyCode::Backquote),
                 true,
