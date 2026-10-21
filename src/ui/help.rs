@@ -390,6 +390,11 @@ pub const TIPS: &[Tip] = &[
     Tip {
         kind: TipKind::Tip,
         area: Area::Selecting,
+        text: r#"Select a few words on one line, with the mouse or with `Shift` and the arrows. Oryx highlights every other place where the same words appear."#,
+    },
+    Tip {
+        kind: TipKind::Tip,
+        area: Area::Selecting,
         text: r#"Hold `Shift` and click to extend a selection to that point. In the editor it selects from the caret to the click, which is handy for a long stretch of text: click where it starts, scroll, and `Shift`+click where it ends."#,
     },
     Tip {

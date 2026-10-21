@@ -2,59 +2,61 @@
 
 ## v1.2.2
 
+This is a maintenance release: mostly fixes, and a few additions. Keyboard shortcuts now work on Cyrillic, Greek and other non-Latin layouts, and on a Mac the Option key types its characters as usual. Right-to-left text works better in the editor, in the search bar and in the outline of a book. New in this release: a key to change the case of a selection, a highlight of the other occurrences of a selected phrase, and the alignment of table columns. Syntax colors no longer disappear after an undo or a quick edit. The search bar is fast again with a very long query: a few milliseconds per key instead of seconds. The help page no longer uses a full processor core, and the window is no longer transparent on KDE Plasma 6.8.
+
 ### New features
 
 #### Books
 
-- In a book, an image alone on its line is now centered, the cover too, unless the book's stylesheet places it. Before, such an image stood at the left.
+- Images, including the cover, are now center-aligned, unless the book's stylesheet places them. Before, they were left-aligned.
 
 #### Editor
 
-- `Ctrl+U` changes the case of the selection, or of the word under the cursor, in turn: lower case, a capital on each word, upper case. The new text stays selected, so the key can be pressed again. In a markdown file, the address of a link, inline code, an HTML tag and a formula keep their letters.
+- `Ctrl+U` changes the case of the selected text, or of the word under the cursor: lower case, then Capitalized Words, then UPPER CASE, one press after the other. The text stays selected between presses. In a markdown file, link addresses, inline code, HTML tags and formulas are unaffected.
 
 #### Selection
 
-- A selection of several words on one line, made with the mouse or the keyboard, now highlights its other occurrences, as a double-clicked word does. The highlight comes when the mouse button is released, or after a short pause in the keys.
+- When you select several words on one line, with the mouse or the keyboard, the other occurrences of the same text are now highlighted, as for a double-clicked word. The highlight appears when you release the mouse button, or after a short pause in typing.
 
 #### Themes
 
-- A new theme, `on-the-field`, a light page in greens.
+- A new theme, `on-the-field`: a light page in green tones.
 
 ### Fixes
 
-- The AppImage now carries the keyboard libraries of X11, and the deb and the rpm declare them. Before, on a system without `libxkbcommon-x11`, Oryx stopped at once with an error trace. On such a system, Oryx now says which package to install.
-- On a keyboard layout that types another script, such as Cyrillic or Greek, or an accented letter on a letter key, such as BÉPO, a letter shortcut now holds by the place of its key: `Ctrl` with the key of C is `Ctrl+C`. `Ctrl+,` holds by its key too, and on a Mac `Cmd+[` and `Cmd+]`. Before, no letter shortcut matched on such a layout, in the dialogs and the search bar too (issue #8).
-- On a Mac, a character typed with Option stays a character: `Option+Shift+-` types an em dash, and on a French Mac Option with the `)` key types `}`. Before, these keys made a bullet list.
-- On a Mac, the list shortcuts with Option hold by the key printed on the keycap: `Option+-` is the bullet list on a French or German Mac too, where the minus key sits elsewhere.
-- `Ctrl+Alt` with a character key no longer runs a shortcut: on Linux, with the left `Ctrl+Alt` of Windows, and with `Cmd+Option` on a Mac. Before, on a German Windows layout `Ctrl+Alt+2` set a heading and `Ctrl+Alt+0` reset the zoom, and on Linux `Ctrl+Alt+S` saved.
-- A double click on a Persian, Kurdish, Urdu or Indic word now selects the whole word, and the word keys (`Ctrl+Left`, `Ctrl+Backspace`), the case key and the highlight of the other occurrences take it whole too. Before, the zero width joiner these words carry inside them cut the word in two.
-- In a book, a paragraph that its own style places at the left inside a centered division now stays at the left. Before, the division's centering won.
-- In a formula inside a table cell, and in the copied text of a formula, an escaped character (`\%`, `\#`, `\_`) now shows the character, as it does in a paragraph. Before, the backslash showed, and the `_` of `x\_1` became a subscript.
-- The help page no longer keeps a processor core busy once its syntax section is on screen. Before, the coloring of its code blocks was started again and again, and the load stayed until the page was left (issue #9).
-- On a big file, a jump to the end while the file is still being laid out no longer puts the blocks kept in memory out of step with the page. Before, the first block kept after the jump was filed as the next of the last one kept before it, and the view could read the wrong geometry until it moved again.
-- In the Outline tab, a long title written from right to left now shows its beginning, cut at its end with an ellipsis. Before, the title was drawn whole and the edge of the sidebar cut its beginning, so the rows of several chapters read the same.
-- The Outline tab now highlights a chapter once its heading is in the top half of the window, the first chapter in view at the start of a book, and the last chapter in view once the page is at its end. Before, the chapter above the window stayed highlighted while the next heading showed near the top, a click on a short last chapter left the chapter before it highlighted, and no chapter was highlighted at the cover of a book.
-- An image inside a paragraph, shown without its picture, now sizes its box to a label written from right to left. Before, the box took the smallest width and the label ran over the words before it.
-- In the search bar and in the fields of the theme dialogs, the caret, the selection and a click now stand at their place in text written from right to left. Before, they stood at the mirror of it.
-- A line or paragraph separator pasted into the search bar or a field is now dropped, like a control character. Before, it closed Oryx at once.
-- In a formula, `\%` now shows a percent sign, and `\#`, `\&`, `\$` and `\_` show their character, as in KaTeX. Before, each was shown as written, in the color of an unknown command. A bare `%` still starts a comment, as in TeX.
-- The words that fit after an inline formula now stay on its line, and the next line starts at the margin. Before, the text after a formula went whole to the next line unless all of it fit beside the formula, and that next line started with a space. With justification on, a line that goes on after a formula now ends at the margin.
-- With justification on, the Latin words at the end of a line written from right to left are now drawn once each. Before, the first of them was drawn over the others, with the text of the whole line stacked on it.
-- In the editor, on a line written from right to left that holds a number, a Latin word or colored markup, Home and End now go to the ends of the line, and a click beside the line to the end on that side. Before, the line was taken to be its last words only, so Home did not move or went to those words, and a click beside the line landed at them too.
-- After an editing key on a selection made with the mouse, `Ctrl+B` or `Ctrl+U` among them, moving the mouse no longer extends the selection. Before, the key left the drag's state on, as if the button were still held, and the layout and the parsing of the file waited until the selection was gone.
-- On KDE Plasma 6.8, the window is no longer see-through. KWin 6.8 now applies the opacity channel of every window, one that declares none included, and Oryx left that channel empty, which reads as fully transparent. Oryx now marks every pixel as fully opaque.
-- Columns of a table can now be aligned, each on its own, with the marks of the line under the header: `:---:` for the center, `---:` for the right. Before, the marks were ignored. The alignment is not lost when the table is copied as HTML (issue #11).
-- When the page is scrolled into a tall image and you press `Ctrl+E`, the text under the image now stays where it was on the screen. Before, the image's line went to the top of the editor and that text jumped up with it.
-- A file holding a next line character (U+0085) or another control character of the C1 set now opens, with a blank in the character's place, and so does a page whose image has one in its description. Before, Oryx closed at once when the character stood between two scripts, and an escape character in a description froze the window while every font was searched.
-- In the editor, on text written from right to left, the caret now stands where the next letter goes: at the right end of a word before its first letter, at the left end after its last, and left of the word in the spaces after it. Before, it stood at the opposite end, one word away from the letters you typed.
-- The search bar stays quick with a very long query pasted into it. Before, each key took seconds with a query of a few thousand characters, the field measuring the text once per character.
-- In the search bar and the fields, a query longer than the field now keeps its place while you move or click inside the part shown, and a letter typed in the middle stays in view. Before, the shown part started at the caret after each click or arrow key, and a letter typed there went out of view at once.
-- A code file keeps its syntax colors to its end after an undo or a redo in reading mode, and after a key typed while a big file was still being colored. Before, the lines past the first chunk stayed plain until the file was opened again, in the PDF too.
-- In the editor, the syntax colors of a code file now stay right after several edits in quick succession at different places, and after a key typed inside a long comment followed by a scroll. Before, the lines between the edits could stay plain, and the lines scrolled into view could take the colors of code, until the file was opened again.
-- A key in the editor after the help page no longer colors the whole file again, which took 25 seconds on an 8 MB file. And the code blocks of a page, or a code file, are all colored after a key pressed just before leaving the editor; before, the coloring stopped where it was, and the PDF showed the rest plain or in the colors from before the key.
-- In the editor, the lines below the caret no longer flash the colors of code for a moment after a key typed inside a long comment or string. Before, a quick coloring from a cold start landed there, and the right colors came a frame or two later.
-- On Wayland, closing Oryx while a big file is still loading no longer prints `Io error: Cannot allocate memory (os error 12)` in the terminal. Before, the part of Oryx that receives files dropped on the window was still reading the display after the window had closed it.
-- The Outline tab now stays quick to hover with long chapter titles. Before, each frame measured a long title once per character cut from it: 72 ms a frame on a book with long Arabic titles, 12 now.
+- On Linux, the AppImage now includes the X11 keyboard libraries, and the deb and rpm packages declare them. Before, on a system without `libxkbcommon-x11`, Oryx crashed at start with an error trace. Now it tells you which package to install.
+- Shortcuts now work on non-Latin keyboard layouts, such as Cyrillic, Greek or Arabic, and on layouts with accented letters on letter keys, such as BÉPO: `Ctrl` with the key at the place of C is `Ctrl+C`. The same goes for `Ctrl+,` and, on a Mac, for `Cmd+[` and `Cmd+]`. Before, letter shortcuts did not work on these layouts, in the dialogs and the search bar either (issue #8).
+- On a Mac, a character typed with Option is now typed as a character: `Option+Shift+-` gives an em dash, and on a French Mac `Option` with the `)` key gives `}`. Before, these keys created a bullet list.
+- On a Mac, the list shortcuts with Option now follow the key printed on the keycap: `Option+-` makes a bullet list on a French or German Mac too, where the minus key is in another place.
+- `Ctrl+Alt` with a character key no longer triggers a shortcut: on Linux, with the left `Ctrl+Alt` on Windows, and with `Cmd+Option` on a Mac. Before, on a German Windows layout, `Ctrl+Alt+2` set a heading and `Ctrl+Alt+0` reset the zoom, and on Linux `Ctrl+Alt+S` saved the file.
+- A double click on a Persian, Kurdish, Urdu or Indic word now selects the whole word. The word keys (`Ctrl+Left`, `Ctrl+Backspace`), the case key and the occurrence highlight also take the whole word. Before, the invisible joiner inside these words split the word in two.
+- In a book, a paragraph left-aligned by its own style inside a centered block now stays left-aligned. Before, the block's centering was applied to it.
+- In a formula inside a table cell, and in copied text, an escaped character (`\%`, `\#`, `\_`) now shows the character, as in a paragraph. Before, the backslash was shown, and `x\_1` was read as a subscript.
+- The help page no longer keeps a processor core busy once its syntax section is on screen. Before, the coloring of its code blocks was restarted again and again until the page was closed (issue #9).
+- On a big file, jumping to the end while the file is still being laid out no longer confuses the page layout. Before, the view could show the wrong geometry until it moved again.
+- In the Outline tab, a long right-to-left title now shows its beginning and is cut at its end with an ellipsis. Before, the edge of the sidebar cut its beginning, and several chapters looked the same.
+- In the Outline tab, a chapter is now highlighted as soon as its heading is in the top half of the window. At the start of a book it is the first chapter in view, and at the end of the book the last one. Before, the previous chapter stayed highlighted while the next heading was near the top, and no chapter was highlighted on the cover of a book.
+- An image without a picture now sizes its placeholder to a right-to-left description. Before, the box was too narrow and the text overlapped the words before it.
+- In the search bar and in the fields of the theme dialogs, the caret, the selection and clicks are now at the right place in right-to-left text. Before, they were mirrored.
+- A line or paragraph separator pasted into the search bar or a field is now dropped, like other control characters. Before, it crashed Oryx.
+- In a formula, `\%` now shows a percent sign, and `\#`, `\&`, `\$` and `\_` show their character, as in KaTeX. Before, they were shown as written, in the color of an unknown command. A bare `%` still starts a comment, as in TeX.
+- The words that fit after an inline formula now stay on the same line, and the next line starts at the margin. Before, all the text after a formula moved to the next line, which started with a space. With justification on, a line that continues after a formula now ends at the margin.
+- With justification on, Latin words at the end of a right-to-left line are now drawn correctly. Before, the first word was drawn over the others.
+- In the editor, on a right-to-left line that contains a number, a Latin word or markup, `Home` and `End` now go to the ends of the line, and a click beside the line goes to the nearest end. Before, only the last words of the line counted: `Home` did not move or landed on them, and a click beside the line landed there too.
+- After an editing key on a mouse selection, such as `Ctrl+B` or `Ctrl+U`, moving the mouse no longer extends the selection. Before, Oryx behaved as if the mouse button were still held, and the file was not laid out again until the selection was cleared.
+- On KDE Plasma 6.8, the window is no longer transparent. KWin 6.8 applies the opacity channel of every window, and Oryx left it empty, which means fully transparent. Oryx now marks every pixel as opaque.
+- Table columns can now be aligned, each on its own, with the marks under the header: `:---:` for center, `---:` for right. Before, the marks were ignored. The alignment is kept when the table is copied as HTML (issue #11).
+- When the page is scrolled into a tall image and you press `Ctrl+E`, the text under the image now stays where it was on the screen. Before, it jumped up.
+- A file that contains a next line character (U+0085) or another control character of the C1 set now opens, with a blank in its place. So does a page whose image description contains one. Before, Oryx crashed when the character stood between two scripts, and an escape character in a description froze the window.
+- In the editor, in right-to-left text, the caret is now where the next letter will go: at the right end of a word before its first letter, at the left end after its last letter. Before, it was at the opposite end, one word away from what you typed.
+- The search bar is now fast with a very long query. Before, each key took seconds with a query of a few thousand characters.
+- In the search bar and the fields, a query longer than the field now stays in place while you move or click inside the visible part, and a letter typed in the middle stays visible. Before, the visible part jumped to the caret after each click or arrow key, and a typed letter disappeared from view.
+- A code file now keeps its syntax colors to the end after an undo or a redo in reading mode, and after a key typed while a big file was still being colored. Before, the lines after the first chunk stayed plain until the file was reopened, in the PDF too.
+- In the editor, the syntax colors of a code file now stay correct after several quick edits in different places, and after a key typed inside a long comment followed by a scroll. Before, the lines between the edits could stay plain, and lines scrolled into view could show code colors inside a comment, until the file was reopened.
+- A key pressed in the editor after the help page no longer recolors the whole file, which took 25 seconds on an 8 MB file. The code blocks of a page, or a code file, are now fully colored after a key pressed just before leaving the editor. Before, the coloring stopped where it was, and the PDF showed the rest plain or with old colors.
+- In the editor, the lines below the cursor no longer flash with code colors for a moment after a key typed inside a long comment or string. Before, a quick coloring landed there first, and the right colors came a frame or two later.
+- On Wayland, closing Oryx while a big file is still loading no longer prints `Io error: Cannot allocate memory (os error 12)` in the terminal. Before, the part of Oryx that receives dropped files was still reading from the display after the window had closed it.
+- The Outline tab is now fast to hover with long chapter titles: 12 ms per frame on a book with long Arabic titles, instead of 72. Before, each frame measured a long title once per removed character.
 
 ## v1.2.1
 
