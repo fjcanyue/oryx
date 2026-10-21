@@ -142,10 +142,10 @@ The first table is about time. "First screen" is the time from reading the file 
 
 | File | First screen | Rest read | Rest laid out | Code colors | PDF export |
 |---|---|---|---|---|---|
-| 1 MB markdown | 40 ms | 31 ms | 0.18 s | 0.65 s | 0.95 s |
-| 1 MB source code | 40 ms | 0 ms | 0.11 s | 2.7 s | 0.84 s |
-| 8 MB markdown | 40 ms | 256 ms | 1.5 s | 5.7 s | 8.8 s |
-| 8 MB source code | 40 ms | 0 ms | 0.85 s | 24.2 s | 7.7 s |
+| 1 MB markdown | 40 ms | 31 ms | 0.19 s | 0.70 s | 0.97 s |
+| 1 MB source code | 40 ms | 0 ms | 0.11 s | 3.0 s | 0.87 s |
+| 8 MB markdown | 40 ms | 260 ms | 1.6 s | 6.0 s | 9.0 s |
+| 8 MB source code | 40 ms | 0 ms | 0.86 s | 25.4 s | 8.2 s |
 
 The second table is about memory. "Once loaded" is what the file takes once all of this is done. "Highest" is the most it takes on the way there. "PDF export" is what an export adds while it runs.
 
@@ -160,13 +160,13 @@ Books open the same way: the first chapters show at once, and the rest loads in 
 
 | Book | Format | Opens in |
 |---|---|---|
-| *The Adventures of Sherlock Holmes* | EPUB | 4 ms |
-| A book of 300 chapters (1.6 MB) | FB2 | 27 ms |
-| A book of 300 chapters (1.6 MB) | MOBI | 14 ms |
-| A comic of 40 pages | CBZ | 1 ms |
-| The same comic | CBR | 7 ms |
+| *The Adventures of Sherlock Holmes* | EPUB | 5 ms |
+| A book of 300 chapters (1.6 MB) | FB2 | 15 ms |
+| A book of 300 chapters (1.6 MB) | MOBI | 9 ms |
+| A comic of 40 pages | CBZ | under 1 ms |
+| The same comic | CBR | 5 ms |
 
-The 211 pages of *The Adventures of Sherlock Holmes* export to PDF in 0.8 s.
+The 211 pages of *The Adventures of Sherlock Holmes* export to PDF in 0.6 s.
 
 My goal is to make Oryx one of the fastest markdown editors and renderers. I benchmark Oryx performance against itself but also against other tools to improve it. The Oryx self-test files and the measures are in the repository:
 
