@@ -14,6 +14,10 @@ This is a maintenance release: mostly fixes, and a few additions. Keyboard short
 
 - `Ctrl+U` changes the case of the selected text, or of the word under the cursor: lower case, then Capitalized Words, then UPPER CASE, one press after the other. The text stays selected between presses. In a markdown file, link addresses, inline code, HTML tags and formulas are unaffected.
 
+#### Examples
+
+- The examples folder now has `markdown-challenge.md`, an 8 MB markdown file of real text: Wikipedia articles with formulas and tables, and public-domain books. Open it in Oryx, then in your other markdown editor.
+
 #### Selection
 
 - When you select several words on one line, with the mouse or the keyboard, the other occurrences of the same text are now highlighted, as for a double-clicked word. The highlight appears when you release the mouse button, or after a short pause in typing.

@@ -156,6 +156,8 @@ The second table is about memory. "Once loaded" is what the file takes once all 
 | 8 MB markdown | 172 MB | 255 MB | +34 MB |
 | 8 MB source code | 88 MB | 95 MB | +11 MB |
 
+The [examples](examples/) folder ships an 8 MB markdown file of real text, `markdown-challenge.md`, to try a big file yourself.
+
 Books open the same way: the first chapters show at once, and the rest loads in the background. The third table gives the time before the first chapters of a book, or the first pages of a comic, show.
 
 | Book | Format | Opens in |
@@ -206,7 +208,7 @@ Bug reports and ideas are welcome in the [issues](https://github.com/wmahfoudh/o
 
 Five fonts are built into Oryx: DejaVu Sans for text, Courier Prime for code, STIX Two Math for math, Amiri for Arabic and David Libre for Hebrew. DejaVu is under the DejaVu Fonts License, the other four under the SIL Open Font License. The settings (`Ctrl+,`) can switch the text and code fonts to any font installed on your system.
 
-The sample book in [examples](examples/) is the [Standard Ebooks](https://standardebooks.org) edition of *The Adventures of Sherlock Holmes*, in the public domain and dedicated with CC0 by its producers.
+The sample book in [examples](examples/) is the [Standard Ebooks](https://standardebooks.org) edition of *The Adventures of Sherlock Holmes*, in the public domain and dedicated with CC0 by its producers. The 8 MB file in the same folder is made of Wikipedia articles, under CC BY-SA 4.0, and of public-domain books from Project Gutenberg; its last section lists them.
 
 <details>
 <summary><b>Adapted theme palettes</b> (all MIT, with thanks to their authors)</summary>
