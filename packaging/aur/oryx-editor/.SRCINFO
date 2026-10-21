@@ -1,6 +1,6 @@
 pkgbase = oryx-editor
 	pkgdesc = Fast editor for markdown and code, reader for ebooks and comics
-	pkgver = 1.2.1
+	pkgver = 1.2.2
 	pkgrel = 1
 	url = https://github.com/wmahfoudh/oryx
 	arch = x86_64
@@ -13,7 +13,7 @@ pkgbase = oryx-editor
 	depends = hicolor-icon-theme
 	depends = libxkbcommon-x11
 	conflicts = oryx
-	source = oryx-editor-1.2.1.tar.gz::https://github.com/wmahfoudh/oryx/archive/refs/tags/v1.2.1.tar.gz
-	sha256sums = 79ab55fb380f4b1aa4961a72d4336cb27af313f6f72211dd471bfbd64aa84750
+	source = oryx-editor-1.2.2.tar.gz::https://github.com/wmahfoudh/oryx/archive/refs/tags/v1.2.2.tar.gz
+	sha256sums = 9e0c6633e05ca48ba2ac2e0ad4f714486f760cd3d4ad6e4f2d425067931ef121
 
 pkgname = oryx-editor
