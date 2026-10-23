@@ -341,6 +341,28 @@ fn draw_mark(painter: &mut Painter, x: f32, y: f32, color: Rgba) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_dialog_answers_by_the_place_of_the_key() {
+        use winit::keyboard::{KeyCode, PhysicalKey};
+        // On a Cyrillic layout the key at D types a Cyrillic letter: the
+        // dialog reads the key's place, as the shortcuts do.
+        let latin = |typed: &str, code: KeyCode| {
+            crate::input::keymap::latin_key(&Key::Character(typed.into()), PhysicalKey::Code(code))
+        };
+        assert_eq!(
+            decide_with(&latin("\u{432}", KeyCode::KeyD), "s"),
+            Decision::Discard
+        );
+        assert_eq!(
+            decide_with(&latin("\u{44b}", KeyCode::KeyS), "s"),
+            Decision::Save
+        );
+        assert_eq!(
+            decide_with(&latin("\u{44b}", KeyCode::KeyS), "r"),
+            Decision::Hold
+        );
+    }
     use crate::paint::painter::Painter;
     use crate::style::fonts::FontStore;
     use crate::style::theme::Theme;

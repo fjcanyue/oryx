@@ -3,7 +3,9 @@
 # VERSION in the environment. Both packages install the same tree as the
 # AUR package and the Flatpak. No install scripts: the distributions'
 # own triggers refresh the desktop caches. The library floor matches the
-# Ubuntu 22.04 build root: glibc 2.35 and libssl 3.
+# Ubuntu 22.04 build root: glibc 2.35 and libssl 3. Both declare the
+# keyboard libraries of X11, which winit loads at run time, so the
+# linker does not list them.
 name: oryx-editor
 arch: amd64
 platform: linux
@@ -43,6 +45,10 @@ overrides:
     depends:
       - libc6 (>= 2.35)
       - libssl3 (>= 3.0.0)
+      - libxkbcommon0
+      - libxkbcommon-x11-0
   rpm:
     depends:
       - libssl.so.3()(64bit)
+      - libxkbcommon.so.0()(64bit)
+      - libxkbcommon-x11.so.0()(64bit)

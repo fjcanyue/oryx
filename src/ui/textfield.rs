@@ -167,20 +167,24 @@ impl TextField {
         }
     }
 
-    /// Pixel offset of the caret from the start of the text, measured by
-    /// the caller so the field stays free of the font system.
-    pub fn caret_offset(&self, mut measure: impl FnMut(&str) -> f32) -> f32 {
-        measure(&self.text[..self.caret])
+    /// Pixel offset of the caret, read from the offsets of the character
+    /// boundaries. An owner computes those while drawing, where the font
+    /// system is at hand (`Painter::boundaries` on the drawn text), and
+    /// keeps them for hit testing, since a click carries no painter. On
+    /// right-to-left text they fall from the right, so the field stays
+    /// free of the direction as of the fonts.
+    pub fn caret_offset(&self, offsets: &[f32]) -> f32 {
+        self.offset_of(self.caret, offsets)
     }
 
-    /// Pixel offset of every character boundary, in order and ending past
-    /// the last character. An owner computes this while drawing, where the
-    /// font system is at hand, and keeps it for hit testing, since a click
-    /// carries no painter.
-    pub fn offsets(&self, mut measure: impl FnMut(&str) -> f32) -> Vec<f32> {
-        self.boundaries()
-            .map(|index| measure(&self.text[..index]))
-            .collect()
+    /// Pixel offset of the character boundary at byte `at`. A cache that
+    /// does not match the current text answers the end.
+    pub fn offset_of(&self, at: usize, offsets: &[f32]) -> f32 {
+        let index = self.text[..self.snap(at)].chars().count();
+        if offsets.len() != self.text.chars().count() + 1 {
+            return offsets.last().copied().unwrap_or(0.0);
+        }
+        offsets[index]
     }
 
     /// The byte index whose boundary sits nearest `x`, against offsets from
@@ -287,7 +291,12 @@ impl TextField {
     }
 
     fn insert_text(&mut self, text: &str) -> Edit {
-        let clean: String = text.chars().filter(|c| !c.is_control()).collect();
+        // A field is one line: a line or paragraph separator, which is
+        // not a control character, leaves with them.
+        let clean: String = text
+            .chars()
+            .filter(|c| !c.is_control() && !matches!(c, '\u{2028}' | '\u{2029}'))
+            .collect();
         if clean.is_empty() {
             return Edit::Handled;
         }
@@ -471,6 +480,29 @@ mod tests {
         f
     }
 
+    /// The offsets of the boundaries as a painter would answer them for
+    /// left-to-right text: ten pixels per character, from the left.
+    fn offsets(f: &TextField) -> Vec<f32> {
+        f.boundaries().map(|at| measure(&f.text()[..at])).collect()
+    }
+
+    /// The offsets of right-to-left text fall from the right: the caret
+    /// reads its boundary, whatever the direction.
+    #[test]
+    fn caret_offset_reads_the_boundary_of_its_caret() {
+        let f = field_at("hello", 2);
+        assert_eq!(f.caret_offset(&offsets(&f)), 20.0);
+        let falling = [50.0, 40.0, 30.0, 20.0, 10.0, 0.0];
+        assert_eq!(f.caret_offset(&falling), 30.0);
+        assert_eq!(f.offset_of(5, &falling), 0.0, "the end at the left");
+        assert_eq!(f.offset_of(0, &falling), 50.0, "the start at the right");
+        assert_eq!(
+            f.offset_of(2, &[0.0, 10.0]),
+            10.0,
+            "a stale cache answers its end"
+        );
+    }
+
     #[test]
     fn ctrl_arrows_jump_words_and_ctrl_home_and_end_reach_the_ends() {
         let mut f = field_at("hello big world", 7);
@@ -575,7 +607,7 @@ mod tests {
     #[test]
     fn a_drag_selects_from_the_press() {
         let mut f = TextField::new("hello world");
-        let at = f.offsets(measure);
+        let at = offsets(&f);
         f.click(21.0, &at, Instant::now());
         f.drag_to(71.0, &at);
         assert_eq!(f.selected_text(), "llo w");
@@ -848,6 +880,17 @@ mod tests {
         assert_eq!(f.caret(), 3);
     }
 
+    /// A line or paragraph separator is not a control character, and a
+    /// field is one line: the text library asserts the direction of
+    /// each paragraph against the first, so a pasted one would panic.
+    #[test]
+    fn insert_strips_line_and_paragraph_separators() {
+        let mut f = TextField::new("");
+        f.insert("a\u{2028}b\u{2029}c");
+        assert_eq!(f.text(), "abc");
+        assert_eq!(f.caret(), 3);
+    }
+
     #[test]
     fn insert_replaces_a_selection() {
         let mut f = TextField::new("hello");
@@ -871,14 +914,15 @@ mod tests {
     #[test]
     fn caret_offset_measures_the_text_before_the_caret() {
         let f = field_at("hello", 2);
-        assert_eq!(f.caret_offset(measure), 20.0);
-        assert_eq!(TextField::new("hello").caret_offset(measure), 50.0);
+        assert_eq!(f.caret_offset(&offsets(&f)), 20.0);
+        let whole = TextField::new("hello");
+        assert_eq!(whole.caret_offset(&offsets(&whole)), 50.0);
     }
 
     #[test]
     fn caret_at_finds_the_nearest_boundary_and_clamps() {
         let f = TextField::new("hello");
-        let at = f.offsets(measure);
+        let at = offsets(&f);
         assert_eq!(at, vec![0.0, 10.0, 20.0, 30.0, 40.0, 50.0]);
         assert_eq!(f.caret_at(0.0, &at), 0);
         assert_eq!(f.caret_at(-30.0, &at), 0, "before the start");
@@ -891,11 +935,11 @@ mod tests {
     fn caret_at_round_trips_through_caret_offset() {
         let text = "h\u{e9}llo\u{1F98C}";
         let f = TextField::new(text);
-        let at = f.offsets(measure);
+        let at = offsets(&f);
         for (index, _) in text.char_indices().chain([(text.len(), ' ')]) {
             let mut probe = TextField::new(text);
             probe.set_caret(index);
-            let x = probe.caret_offset(measure);
+            let x = probe.caret_offset(&at);
             assert_eq!(f.caret_at(x, &at), index, "at byte {index}");
         }
     }
@@ -918,7 +962,7 @@ mod tests {
     #[test]
     fn a_click_places_the_caret_a_second_selects_the_word_a_third_everything() {
         let mut f = TextField::new("hello big world");
-        let at = f.offsets(measure);
+        let at = offsets(&f);
         let start = Instant::now();
         f.click(71.0, &at, start);
         assert_eq!(f.caret(), 7);
@@ -932,14 +976,14 @@ mod tests {
         assert_eq!(f.caret(), 7);
 
         let mut g = TextField::new("hello");
-        let at = g.offsets(measure);
+        let at = offsets(&g);
         g.click(21.0, &at, start);
         g.click(41.0, &at, start + Duration::from_millis(900));
         assert_eq!(g.selection(), None, "too slow to be a double click");
         assert_eq!(g.caret(), 4);
 
         let mut h = TextField::new("hello world");
-        let at = h.offsets(measure);
+        let at = offsets(&h);
         h.click(51.0, &at, start);
         h.click(51.0, &at, start + Duration::from_millis(100));
         assert_eq!(
@@ -949,7 +993,7 @@ mod tests {
         );
 
         let mut s = TextField::new("a  b");
-        let at = s.offsets(measure);
+        let at = offsets(&s);
         s.click(20.0, &at, start);
         s.click(20.0, &at, start + Duration::from_millis(100));
         assert_eq!(s.selected_text(), "  ", "between words, the gap");

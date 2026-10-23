@@ -18,7 +18,9 @@ use base64::Engine;
 
 use crate::doc::images::MediaCache;
 use crate::doc::mermaid::{self, MermaidPresentation};
-use crate::doc::model::{AlertKind, Block, BlockKind, Document, Marker, Span, SpanScript};
+use crate::doc::model::{
+    AlertKind, Block, BlockKind, ColumnAlign, Document, Marker, Span, SpanScript,
+};
 use crate::layout::{alert_color, alert_title, layout, math_display, role_color, ViewConfig};
 use crate::paint::{band, paper};
 use crate::style::fonts::FontStore;
@@ -318,7 +320,11 @@ impl Writer<'_> {
                 }
                 let _ = write!(self.out, "<pre>{}</pre>", escape(&text));
             }
-            BlockKind::Table { header, rows } => {
+            BlockKind::Table {
+                header,
+                rows,
+                aligns,
+            } => {
                 let border = self.css(self.theme.blocks.table_border);
                 let mut chain = 0usize;
                 let mut head = String::new();
@@ -331,16 +337,24 @@ impl Writer<'_> {
                         continue;
                     }
                     let tag = if r == 0 { "th" } else { "td" };
-                    let extra = if r == 0 { ";text-align:left" } else { "" };
                     let out = if r == 0 { &mut head } else { &mut body };
                     out.push_str("<tr>");
                     let mut base = first;
-                    for cell in row {
+                    for (c, cell) in row.iter().enumerate() {
                         let inner = self.spans_html(cell, base, cut).unwrap_or_default();
                         base += cell.len();
+                        // A header cell without a mark stays at the left,
+                        // where a browser would center it.
+                        let align = match aligns.get(c) {
+                            Some(ColumnAlign::Left) => ";text-align:left",
+                            Some(ColumnAlign::Center) => ";text-align:center",
+                            Some(ColumnAlign::Right) => ";text-align:right",
+                            _ if r == 0 => ";text-align:left",
+                            _ => "",
+                        };
                         let _ = write!(
                             out,
-                            "<{tag} style=\"border:1px solid {border};padding:4px 8px{extra}\">{inner}</{tag}>"
+                            "<{tag} style=\"border:1px solid {border};padding:4px 8px{align}\">{inner}</{tag}>"
                         );
                     }
                     out.push_str("</tr>");

@@ -30,7 +30,7 @@ Oryx is a markdown editor and reader, made for a keyboard workflow. It also edit
 
 Every package is on the [releases page](https://github.com/wmahfoudh/oryx/releases). Pick the one for your system:
 
-- **Windows**: the Microsoft Store (badge above), the MSI installer, or the zip to install in your user folder without administrator rights.
+- **Windows**: the Microsoft Store (badge above), `winget install Steerania.Oryx`, the MSI installer, or the zip to install in your user folder without administrator rights.
 - **macOS**: `brew install --cask wmahfoudh/tap/oryx`, or the `.dmg`. The app is not signed, so macOS asks you to approve it once ([how](INSTALL.md#macos)).
 - **Debian and Ubuntu**: `sudo apt install ./oryx-editor_*_amd64.deb`
 - **Fedora and openSUSE**: `sudo dnf install ./oryx-editor-*.x86_64.rpm` (on openSUSE, `zypper` in place of `dnf`)
@@ -63,7 +63,7 @@ Oryx also reads the extended syntax of the Markdown Guide, which GitHub does not
 
 ### Themes and PDF export
 
-Oryx comes with 33 themes, 11 of them made for Oryx. Each theme sets 51 colors, so every markdown element can have its own color. `Ctrl+T` opens the list of themes: navigating the themes shows a live preview on the open document, `Enter` keeps it and `Escape` cancels. The theme editor lets you create new themes and edit existing ones, also with a live preview.
+Oryx comes with 34 themes, 12 of them made for Oryx. Each theme sets 51 colors, so every markdown element can have its own color. `Ctrl+T` opens the list of themes: navigating the themes shows a live preview on the open document, `Enter` keeps it and `Escape` cancels. The theme editor lets you create new themes and edit existing ones, also with a live preview.
 
 `Ctrl+P` exports the document to PDF. The PDF is made by the same engine that draws the page, so it has the same layout, fonts, syntax colors and math, and the headings are converted to PDF outlines. Oryx avoids cutting a line, an image or a table row across two pages, and does not leave a heading alone at the bottom of a page. The export has its own theme, fonts and page size, set with `Ctrl+Shift+P`, so you can read in a dark theme and export in a light one without switching each time. A `black-and-white` theme exists, in case you prefer to have monochrome PDFs.
 
@@ -142,10 +142,10 @@ The first table is about time. "First screen" is the time from reading the file 
 
 | File | First screen | Rest read | Rest laid out | Code colors | PDF export |
 |---|---|---|---|---|---|
-| 1 MB markdown | 40 ms | 31 ms | 0.18 s | 0.65 s | 0.95 s |
-| 1 MB source code | 40 ms | 0 ms | 0.11 s | 2.7 s | 0.84 s |
-| 8 MB markdown | 40 ms | 256 ms | 1.5 s | 5.7 s | 8.8 s |
-| 8 MB source code | 40 ms | 0 ms | 0.85 s | 24.2 s | 7.7 s |
+| 1 MB markdown | 40 ms | 31 ms | 0.19 s | 0.70 s | 0.97 s |
+| 1 MB source code | 40 ms | 0 ms | 0.11 s | 3.0 s | 0.87 s |
+| 8 MB markdown | 40 ms | 260 ms | 1.6 s | 6.0 s | 9.0 s |
+| 8 MB source code | 40 ms | 0 ms | 0.86 s | 25.4 s | 8.2 s |
 
 The second table is about memory. "Once loaded" is what the file takes once all of this is done. "Highest" is the most it takes on the way there. "PDF export" is what an export adds while it runs.
 
@@ -156,17 +156,19 @@ The second table is about memory. "Once loaded" is what the file takes once all 
 | 8 MB markdown | 172 MB | 255 MB | +34 MB |
 | 8 MB source code | 88 MB | 95 MB | +11 MB |
 
+The [examples](examples/) folder ships an 8 MB markdown file of real text, `markdown-challenge.md`, to try a big file yourself.
+
 Books open the same way: the first chapters show at once, and the rest loads in the background. The third table gives the time before the first chapters of a book, or the first pages of a comic, show.
 
 | Book | Format | Opens in |
 |---|---|---|
-| *The Adventures of Sherlock Holmes* | EPUB | 4 ms |
-| A book of 300 chapters (1.6 MB) | FB2 | 27 ms |
-| A book of 300 chapters (1.6 MB) | MOBI | 14 ms |
-| A comic of 40 pages | CBZ | 1 ms |
-| The same comic | CBR | 7 ms |
+| *The Adventures of Sherlock Holmes* | EPUB | 5 ms |
+| A book of 300 chapters (1.6 MB) | FB2 | 15 ms |
+| A book of 300 chapters (1.6 MB) | MOBI | 9 ms |
+| A comic of 40 pages | CBZ | under 1 ms |
+| The same comic | CBR | 5 ms |
 
-The 211 pages of *The Adventures of Sherlock Holmes* export to PDF in 0.8 s.
+The 211 pages of *The Adventures of Sherlock Holmes* export to PDF in 0.6 s.
 
 My goal is to make Oryx one of the fastest markdown editors and renderers. I benchmark Oryx performance against itself but also against other tools to improve it. The Oryx self-test files and the measures are in the repository:
 
@@ -206,7 +208,7 @@ Bug reports and ideas are welcome in the [issues](https://github.com/wmahfoudh/o
 
 Five fonts are built into Oryx: DejaVu Sans for text, Courier Prime for code, STIX Two Math for math, Amiri for Arabic and David Libre for Hebrew. DejaVu is under the DejaVu Fonts License, the other four under the SIL Open Font License. The settings (`Ctrl+,`) can switch the text and code fonts to any font installed on your system.
 
-The sample book in [examples](examples/) is the [Standard Ebooks](https://standardebooks.org) edition of *The Adventures of Sherlock Holmes*, in the public domain and dedicated with CC0 by its producers.
+The sample book in [examples](examples/) is the [Standard Ebooks](https://standardebooks.org) edition of *The Adventures of Sherlock Holmes*, in the public domain and dedicated with CC0 by its producers. The 8 MB file in the same folder is made of Wikipedia articles, under CC BY-SA 4.0, and of public-domain books from Project Gutenberg; its last section lists them.
 
 <details>
 <summary><b>Adapted theme palettes</b> (all MIT, with thanks to their authors)</summary>

@@ -615,7 +615,7 @@ mod tests {
         )
     }
 
-    fn book_dialog() -> ExportDialog {
+    fn prose_dialog() -> ExportDialog {
         ExportDialog::new(
             settings(),
             vec!["DejaVu Sans".to_string(), "Courier Prime".to_string()],
@@ -649,14 +649,14 @@ mod tests {
     }
 
     #[test]
-    fn the_justify_row_appears_only_for_books() {
+    fn the_justify_row_appears_for_prose_only() {
         assert!(!dialog().rows.contains(&Row::Justify));
-        assert!(book_dialog().rows.contains(&Row::Justify));
+        assert!(prose_dialog().rows.contains(&Row::Justify));
     }
 
     #[test]
     fn the_justify_row_toggles_the_setting() {
-        let mut d = book_dialog();
+        let mut d = prose_dialog();
         d.select(Row::Justify);
         assert!(d.settings().justify, "on by default");
         d.toggle();

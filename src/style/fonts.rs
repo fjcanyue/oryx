@@ -7,7 +7,7 @@
 
 use std::collections::HashMap;
 
-use cosmic_text::{FontSystem, SwashCache, Weight};
+use cosmic_text::{FontSystem, LayoutGlyph, SwashCache, Weight};
 
 pub const BODY_FAMILY: &str = "DejaVu Sans";
 pub const CODE_FAMILY: &str = "Courier Prime";
@@ -92,6 +92,14 @@ fn script_class(c: char) -> ScriptClass {
     }
 }
 
+/// The width of a shaped line: the farthest right edge of its glyphs.
+/// The glyphs of a right-to-left line come in reading order and are
+/// placed from the right, so the last one is the leftmost, and its edge
+/// is the width of one letter.
+pub(crate) fn line_width(glyphs: &[LayoutGlyph]) -> f32 {
+    glyphs.iter().map(|g| g.x + g.w).fold(0.0, f32::max)
+}
+
 /// The bidi strength of one character: `Some(true)` for Arabic and
 /// Hebrew, `Some(false)` for any other alphabetic, `None` for neutrals.
 /// The first non-`None` answer over a text decides its base direction.
@@ -116,9 +124,19 @@ fn family_for(class: ScriptClass) -> Option<&'static str> {
 /// offset still maps. No font has a glyph for one, and the shaper's
 /// search for it walks every font on the system, loading each: a log
 /// full of escape codes froze the window for seconds and a random
-/// file for longer.
+/// file for longer. A line or paragraph separator (U+2028, U+2029)
+/// becomes an em space, three bytes like itself: the shaper splits a
+/// line at one into bidi paragraphs and asserts that they share a
+/// direction, which a pasted query mixing scripts fails. A C1 control
+/// (U+0080 to U+009F) becomes a no-break space, two bytes like itself:
+/// none has a glyph, and U+0085 is a paragraph separator too, one the
+/// shaper drops between two of its lines, which would put every offset
+/// after it one byte off.
 pub fn shapable(text: &str) -> std::borrow::Cow<'_, str> {
-    if !text.bytes().any(is_control_byte) {
+    if !text.bytes().any(is_control_byte)
+        && !text.contains(['\u{2028}', '\u{2029}'])
+        && !text.chars().any(is_c1_control)
+    {
         return std::borrow::Cow::Borrowed(text);
     }
     std::borrow::Cow::Owned(
@@ -126,12 +144,21 @@ pub fn shapable(text: &str) -> std::borrow::Cow<'_, str> {
             .map(|c| {
                 if c.is_ascii() && is_control_byte(c as u8) {
                     ' '
+                } else if matches!(c, '\u{2028}' | '\u{2029}') {
+                    '\u{2003}'
+                } else if is_c1_control(c) {
+                    '\u{a0}'
                 } else {
                     c
                 }
             })
             .collect(),
     )
+}
+
+/// A control of the C1 set, U+0080 to U+009F: two bytes, no glyph.
+fn is_c1_control(c: char) -> bool {
+    ('\u{80}'..='\u{9f}').contains(&c)
 }
 
 /// A byte no text shows: the C0 controls but the tab, and DEL.
@@ -299,6 +326,22 @@ mod tests {
             "a\x1b[31mb\x01c\x7fd\u{e9}".len(),
             "every offset still maps"
         );
+    }
+
+    #[test]
+    fn line_and_paragraph_separators_shape_as_an_em_space_of_the_same_length() {
+        let text = "a\u{2028}b\u{2029}مق";
+        let shaped = shapable(text);
+        assert_eq!(&*shaped, "a\u{2003}b\u{2003}مق");
+        assert_eq!(shaped.len(), text.len(), "every offset still maps");
+    }
+
+    #[test]
+    fn the_c1_controls_shape_as_a_no_break_space_of_the_same_length() {
+        let text = "a\u{85}b\u{80}c\u{9f}مق";
+        let shaped = shapable(text);
+        assert_eq!(&*shaped, "a\u{a0}b\u{a0}c\u{a0}مق");
+        assert_eq!(shaped.len(), text.len(), "every offset still maps");
     }
 
     #[test]

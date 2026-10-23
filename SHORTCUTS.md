@@ -2,7 +2,9 @@
 
 Oryx has no menus: you use it with the keys of this page, and with the mouse. The same list opens inside Oryx with `F1`, together with the markdown syntax.
 
-On macOS, use `Cmd` where this page says `Ctrl`, and `Cmd+[` / `Cmd+]` in place of `Alt+Left` / `Alt+Right`. The `Alt` key is the Option key.
+On macOS, use `Cmd` where this page says `Ctrl`, and `Cmd+[` / `Cmd+]` in place of `Alt+Left` / `Alt+Right`. The `Alt` key is the Option key: a shortcut with `Alt` holds by the key printed on the keycap, and `Alt+1` and `Alt+.` by the place of their key as well. Option with Shift, or with a key that types a plain character, types it as usual.
+
+On a keyboard layout that types another script, such as Cyrillic or Greek, or an accented letter on a letter key, such as BÉPO, a letter shortcut holds by the place of its key: `Ctrl` with the key of C is `Ctrl+C`. The shortcuts with a digit or a punctuation key (the zoom, the headings, the lists, the quote, the comment, the code span and the settings) hold by the place of their key as well.
 
 ## Files
 
@@ -69,6 +71,7 @@ On macOS, use `Cmd` where this page says `Ctrl`, and `Cmd+[` / `Cmd+]` in place 
 | `Ctrl+Shift+D` | Duplicate the line or the selected lines |
 | `Ctrl+Shift+K` | Delete the line or the selected lines |
 | `Ctrl+/` | Comment or uncomment the line or the selected lines, in the style of the language |
+| `Ctrl+U` | Change the case of the selection or the word, in turn: lower case, a capital on each word, upper case |
 | `Tab` / `Shift+Tab` | Indent / remove an indent, on every selected line |
 
 Closing, quitting or reloading with unsaved changes asks first: `S` saves, `D` discards, `Escape` goes back to editing.
@@ -140,6 +143,7 @@ With text selected, typing a bracket, a quote, `*`, `_` or a backtick wraps the 
 | Double click | Select a word and highlight every other place it appears |
 | Triple click | Select the paragraph, the line of code or the table cell |
 | `Shift` + click | Extend the selection to the click |
+| Drag over several words on one line | Select them and highlight every other place the text appears |
 | Click on a task box | Tick or untick it, without entering the editor |
 | Click on a picture or a diagram | Open it in the viewer |
 | Middle click on a file in the sidebar | Open it in a second window |

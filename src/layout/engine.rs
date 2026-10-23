@@ -7,11 +7,13 @@ use std::time::{Duration, Instant};
 
 use cosmic_text::{Align, Attrs, Buffer, Family, Metrics, Shaping, Style, Weight};
 
+use crate::style::fonts::line_width;
+
 use super::metrics;
 use crate::doc::images::{MediaCache, MermaidState};
 use crate::doc::mermaid;
 use crate::doc::model::{
-    AlertKind, Block, BlockKind, Document, Marker, Span, SpanImage, SpanScript,
+    AlertKind, Block, BlockKind, ColumnAlign, Document, Marker, Span, SpanImage, SpanScript,
 };
 use crate::layout::pool::{Job, ShapeCtx, StepKey, Work};
 use crate::style::fonts::{FontStore, BODY_FAMILY, CODE_FAMILY};
@@ -26,9 +28,11 @@ pub struct ViewConfig {
     pub code_size: f32,
     /// Session zoom multiplier, never persisted.
     pub zoom: f32,
-    /// Stretch prose to the content width, book typography. The app sets
-    /// it only for EPUB documents; paragraphs, list items, and quote
-    /// text justify, everything else keeps its natural width.
+    /// Stretch prose to the content width, book typography: paragraphs,
+    /// list items and quote text justify, everything else keeps its
+    /// natural width. The app sets it from the book preference on a book
+    /// and from the markdown preference on other prose, never on a code
+    /// or text file (`justify_pref` in the app).
     pub justify: bool,
     /// A comic's display state; layout reads it only when the document
     /// is a comic. The page states carry the viewport height, which the
@@ -143,7 +147,7 @@ fn model_span(doc: &Document, block: usize, span: usize) -> Option<&Span> {
         | BlockKind::ListItem { spans, .. }
         | BlockKind::FootnoteDef { spans, .. }
         | BlockKind::Summary { spans, .. } => spans.get(span),
-        BlockKind::Table { header, rows } => header
+        BlockKind::Table { header, rows, .. } => header
             .iter()
             .flatten()
             .chain(rows.iter().flatten().flatten())
@@ -1225,6 +1229,20 @@ fn settle_retention(
             }
         }
         return;
+    }
+    // The bound moved past the window while the pass ran: the blocks
+    // between were placed outside the bound of their slice and dropped.
+    // A new window opens on this block; extending the old one would hand
+    // its marks to the wrong positions. The old window's blocks may still
+    // lie inside the bound of this slice, and the slide re-shapes them.
+    let follows = out
+        .window
+        .as_ref()
+        .is_none_or(|window| window.start + window.marks.len() == position);
+    if !follows {
+        let held = out.window.as_ref().map_or(0, |window| window.marks.len());
+        out.window_drop_front(held);
+        out.window.as_mut().expect("windowed layout").start = position;
     }
     let marks = PosMarks::of(out, lines);
     match out.window.as_mut() {
@@ -2407,6 +2425,7 @@ pub(crate) fn shape_kind(
                 bold: heading.is_some(),
                 block_index,
                 justify: heading.is_none() && cfg.justify,
+                align: None,
             };
             flow_or_shape(
                 fonts, theme, cfg, source, media, spans, &base, x_base, 0.0, avail, scratch,
@@ -2483,13 +2502,18 @@ pub(crate) fn shape_kind(
             ));
             thickness
         }
-        BlockKind::Table { header, rows } => layout_table(
+        BlockKind::Table {
+            header,
+            rows,
+            aligns,
+        } => layout_table(
             fonts,
             theme,
             cfg,
             source,
             header,
             rows,
+            aligns,
             block_index,
             x_base,
             0.0,
@@ -3372,6 +3396,7 @@ fn shape_alert_title(
         bold: true,
         block_index,
         justify: false,
+        align: None,
     };
     let title_h = shape_block(
         fonts, theme, cfg, source, &title, false, &base, x_base, 0.0, avail, scratch,
@@ -3643,6 +3668,20 @@ struct BlockStyle {
     /// Justify this block's segments; runs then split per word so paint
     /// can re-shape each at its stretched position.
     justify: bool,
+    /// The alignment of the block's lines, a table cell's from its
+    /// column; `None` leaves each line its natural one.
+    align: Option<Align>,
+}
+
+/// A column's mark as the alignment of its cells' lines; a column
+/// without a mark leaves them to their direction.
+fn cell_align(column: ColumnAlign) -> Option<Align> {
+    match column {
+        ColumnAlign::Auto => None,
+        ColumnAlign::Left => Some(Align::Left),
+        ColumnAlign::Center => Some(Align::Center),
+        ColumnAlign::Right => Some(Align::Right),
+    }
 }
 
 fn heading_color(theme: &Theme, level: u8) -> Rgba {
@@ -3769,6 +3808,40 @@ fn shape_block(
     content_width: f32,
     out: &mut LayoutDoc,
 ) -> f32 {
+    shape_block_lines(
+        fonts,
+        theme,
+        cfg,
+        source,
+        spans,
+        model_spans,
+        base,
+        x0,
+        y0,
+        content_width,
+        false,
+        out,
+    )
+}
+
+/// As `shape_block`; with `first_line_only`, the first visual line is
+/// shaped and emitted and the rest of the block is left, for a chunk
+/// whose first line joins an open line of the flow.
+#[allow(clippy::too_many_arguments)]
+fn shape_block_lines(
+    fonts: &mut FontStore,
+    theme: &Theme,
+    cfg: &ViewConfig,
+    source: &str,
+    spans: &[Span],
+    model_spans: bool,
+    base: &BlockStyle,
+    x0: f32,
+    y0: f32,
+    content_width: f32,
+    first_line_only: bool,
+    out: &mut LayoutDoc,
+) -> f32 {
     let line_height = metrics::LINE_HEIGHT * base.size;
     // Spans expand into pieces at this point only. Math literals expand
     // into sup/sub script segments with synthesized text (the model
@@ -3784,7 +3857,7 @@ fn shape_block(
     let mut model: Vec<bool> = Vec::new();
     for (si, span) in spans.iter().enumerate() {
         if span.math && span.text(source) != "\n" {
-            for (text, script) in math_scripts(&tex_symbols(span.text(source))) {
+            for (text, script) in math_scripts(span.text(source)) {
                 let mut piece = span.clone();
                 piece.set_text(text);
                 let mut style = span_style(fonts, theme, cfg, base, &piece);
@@ -3856,9 +3929,13 @@ fn shape_block(
                     y0 + height,
                     content_width,
                     line_height,
+                    first_line_only,
                     out,
                 );
                 segment.clear();
+                if first_line_only && height > 0.0 {
+                    break;
+                }
             } else if i < shaped.len() {
                 height += line_height;
             }
@@ -3897,6 +3974,7 @@ fn shape_segment(
     y0: f32,
     content_width: f32,
     line_height: f32,
+    first_line_only: bool,
     out: &mut LayoutDoc,
 ) -> f32 {
     // Almost every segment is small and shapes whole; it pays one
@@ -3920,6 +3998,7 @@ fn shape_segment(
             y0,
             content_width,
             line_height,
+            first_line_only,
             out,
         );
     }
@@ -3964,9 +4043,13 @@ fn shape_segment(
             y0 + height,
             content_width,
             line_height,
+            first_line_only,
             out,
         );
         start = end;
+        if first_line_only && height > 0.0 {
+            break;
+        }
     }
     height
 }
@@ -3994,6 +4077,7 @@ fn shape_segment_chunk(
     y0: f32,
     content_width: f32,
     line_height: f32,
+    first_line_only: bool,
     out: &mut LayoutDoc,
 ) -> f32 {
     let mut buffer = Buffer::new(&mut fonts.font_system, Metrics::new(base.size, line_height));
@@ -4034,6 +4118,10 @@ fn shape_segment_chunk(
         for line in buffer.lines.iter_mut() {
             line.set_align(Some(Align::Justified));
         }
+    } else if let Some(align) = base.align {
+        for line in buffer.lines.iter_mut() {
+            line.set_align(Some(align));
+        }
     } else if cfg.direction != DirectionMode::Auto {
         // A forced direction aligns every line to the forced side; a
         // line already reading that way keeps its natural alignment.
@@ -4058,7 +4146,10 @@ fn shape_segment_chunk(
     // A span text may carry embedded newlines; the buffer splits them
     // into separate lines whose glyph offsets are line-local. Each
     // line's base offset inside the chunk counts the stripped newline
-    // back in, so a model reference lands on the span's own bytes.
+    // back in, one byte, so a model reference lands on the span's own
+    // bytes. The buffer splits at every paragraph separator, and
+    // `shapable` turns the others (the carriage return, U+0085, U+2029)
+    // into blanks, so the newline is the only one it drops here.
     // The unchunked path's piece table: each piece with its offset in
     // the segment, the first of an origin span being where a model
     // reference counts from. A handful of pieces, so a scan answers.
@@ -4091,8 +4182,19 @@ fn shape_segment_chunk(
         line_acc += line.text().len() as u32 + 1;
     }
 
+    // Inline code is drawn as written, left to right: its group keeps
+    // the gaps the bidi rules open in its bytes, while the span is one
+    // group. Justification cuts a span at its spaces, and a kept gap
+    // in one of its words would span the bytes of the others.
+    let as_written: Vec<bool> = spans
+        .iter()
+        .map(|s| s.code && (!base.justify || !s.text(source).contains([' ', '\u{a0}'])))
+        .collect();
     let mut height = 0.0_f32;
-    for run in buffer.layout_runs() {
+    for (visual_line, run) in buffer.layout_runs().enumerate() {
+        if first_line_only && visual_line > 0 {
+            break;
+        }
         height = height.max(run.line_top + line_height);
         let line_text = buffer.lines[run.line_i].text();
         let line_base = line_offsets[run.line_i];
@@ -4101,7 +4203,7 @@ fn shape_segment_chunk(
         // words of one phrase share a pill instead of overlapping at
         // their spaces, which doubles a translucent color.
         let mut open_pill: Option<(usize, Rgba)> = None;
-        for group in glyph_groups(glyphs, line_text, base.justify) {
+        for group in glyph_groups(glyphs, line_text, base.justify, &as_written) {
             let span_index = group.meta;
             let (start_byte, end_byte) = (group.bytes.start, group.bytes.end);
             let st = &styles[span_index];
@@ -4111,8 +4213,14 @@ fn shape_segment_chunk(
             let baseline = y0 + run.line_y - st.rise;
             match (st.pill, open_pill) {
                 (Some(pill), Some((at, color))) if color == pill => {
+                    // The groups of a right-to-left line come from the
+                    // right, and the bidi rules can put a group left of
+                    // the first one: the pill grows on both sides.
                     let rect = &mut out.rects[at];
-                    rect.width = (x + width + 3.0 - rect.x).max(rect.width);
+                    let left = rect.x.min(x - 3.0);
+                    let right = (rect.x + rect.width).max(x + width + 3.0);
+                    rect.x = left;
+                    rect.width = right - left;
                 }
                 (Some(pill), _) => {
                     let radius = metrics::PILL_RADIUS * cfg.zoom;
@@ -4233,6 +4341,7 @@ fn layout_summary(
         bold: false,
         block_index,
         justify: false,
+        align: None,
     };
     let h = flow_or_shape(
         fonts, theme, cfg, source, media, spans, &base, text_x, 0.0, text_w, scratch,
@@ -4350,6 +4459,7 @@ fn layout_list_item(
         bold: false,
         block_index,
         justify: cfg.justify,
+        align: None,
     };
     let height = flow_or_shape(
         fonts, theme, cfg, source, media, spans, &base, text_x, y0, text_w, out,
@@ -4368,6 +4478,7 @@ fn layout_table(
     source: &str,
     header: &[Vec<Span>],
     rows: &[Vec<Vec<Span>>],
+    aligns: &[ColumnAlign],
     block_index: usize,
     x0: f32,
     y0: f32,
@@ -4401,6 +4512,7 @@ fn layout_table(
             bold,
             block_index,
             justify: false,
+            align: None,
         };
         shape_block(
             fonts, theme, cfg, source, spans, true, &base, 0.0, 0.0, 100_000.0, &mut tmp,
@@ -4482,6 +4594,7 @@ fn layout_table(
                 bold: *is_header,
                 block_index,
                 justify: false,
+                align: aligns.get(c).copied().and_then(cell_align),
             };
             let h = shape_block(
                 fonts,
@@ -4627,6 +4740,7 @@ fn layout_image(
         bold: false,
         block_index,
         justify: false,
+        align: None,
     };
     let rects_mark = out.rects.len();
     let text_h = shape_block(
@@ -4788,6 +4902,7 @@ fn layout_mermaid_panel(
         bold: false,
         block_index,
         justify: false,
+        align: None,
     };
     let rects_mark = out.rects.len();
     let text_h = shape_block(
@@ -4986,8 +5101,14 @@ static TEX_SYMBOLS: &[(&str, &str)] = &[
     ("zeta", "\u{03B6}"),
 ];
 
-/// Replaces common TeX commands with their Unicode symbols; unknown
-/// commands stay literal.
+/// The reserved characters of TeX, which show themselves when escaped
+/// (`\%`), as noad reads them.
+const TEX_RESERVED: &str = "#$%&_{}";
+
+/// The text a TeX literal shows where noad does not typeset it (a table
+/// cell, the copy, the search): a command with a known symbol becomes
+/// the symbol, an escaped reserved character its character, and the
+/// rest stays literal.
 fn tex_symbols(tex: &str) -> String {
     let chars: Vec<char> = tex.chars().collect();
     let mut out = String::with_capacity(tex.len());
@@ -5005,6 +5126,10 @@ fn tex_symbols(tex: &str) -> String {
                     i = end;
                     continue;
                 }
+            } else if let Some(&c) = chars.get(i + 1).filter(|c| TEX_RESERVED.contains(**c)) {
+                out.push(c);
+                i += 2;
+                continue;
             }
         }
         out.push(chars[i]);
@@ -5013,21 +5138,24 @@ fn tex_symbols(tex: &str) -> String {
     out
 }
 
-/// Splits a TeX literal into script segments: `^` and `_` bind the next
-/// character or braced group, as in TeX. Anything unmatched stays literal.
 /// The display text a math literal renders as, scripts flattened: the
 /// text the screen shows, which model copy and search read.
 pub fn math_display(tex: &str) -> String {
-    math_scripts(&tex_symbols(tex.trim()))
+    math_scripts(tex.trim())
         .into_iter()
         .map(|(text, _)| text)
         .collect()
 }
 
+/// Splits a TeX literal into script segments: `^` and `_` bind the next
+/// character, an escaped character or a braced group, as in TeX, and a
+/// backslash escapes the character after it, so the `_` of `x\_1` is a
+/// character. Anything unmatched stays literal. Each segment's text
+/// goes through `tex_symbols`.
 fn math_scripts(tex: &str) -> Vec<(String, Script)> {
     fn flush(normal: &mut String, out: &mut Vec<(String, Script)>) {
         if !normal.is_empty() {
-            out.push((std::mem::take(normal), Script::Normal));
+            out.push((tex_symbols(&std::mem::take(normal)), Script::Normal));
         }
     }
     let chars: Vec<char> = tex.chars().collect();
@@ -5036,16 +5164,34 @@ fn math_scripts(tex: &str) -> Vec<(String, Script)> {
     let mut i = 0;
     while i < chars.len() {
         let c = chars[i];
+        if c == '\\' {
+            normal.push(c);
+            if let Some(&next) = chars.get(i + 1) {
+                normal.push(next);
+                i += 2;
+            } else {
+                i += 1;
+            }
+            continue;
+        }
         if c == '^' || c == '_' {
             let script = if c == '^' { Script::Sup } else { Script::Sub };
             match chars.get(i + 1) {
                 Some('{') => {
                     if let Some(close) = chars[i + 2..].iter().position(|&ch| ch == '}') {
                         flush(&mut normal, &mut out);
-                        out.push((chars[i + 2..i + 2 + close].iter().collect(), script));
+                        let group: String = chars[i + 2..i + 2 + close].iter().collect();
+                        out.push((tex_symbols(&group), script));
                         i += close + 3;
                         continue;
                     }
+                }
+                Some('\\') if i + 2 < chars.len() => {
+                    flush(&mut normal, &mut out);
+                    let escaped: String = chars[i + 1..i + 3].iter().collect();
+                    out.push((tex_symbols(&escaped), script));
+                    i += 3;
+                    continue;
                 }
                 Some(&arg) => {
                     flush(&mut normal, &mut out);
@@ -5112,6 +5258,7 @@ fn layout_frontmatter(
         bold: false,
         block_index,
         justify: false,
+        align: None,
     };
     let runs_mark = out.runs.len();
     let rects_mark = out.rects.len();
@@ -5371,6 +5518,7 @@ fn layout_footnote_def(
         bold: true,
         block_index,
         justify: false,
+        align: None,
     };
     let runs_mark = out.runs.len();
     shape_block(
@@ -5406,6 +5554,7 @@ fn layout_footnote_def(
         bold: false,
         block_index,
         justify: false,
+        align: None,
     };
     let text_h = shape_block(
         fonts,
@@ -5509,21 +5658,27 @@ fn chunk_metrics(runs: &[TextRun], x0: f32, y: f32) -> (f32, f32, f32) {
     (last_top, end_x, last_base)
 }
 
-/// Reshapes a chunk that could not merge back after an equation so the
-/// punctuation glued to the equation joins its line and the remainder
-/// flows alone below. The prefix keeps its natural model offsets; the
-/// remainder's shift by the skipped bytes so selection and copy stay
-/// exact. Answers the remainder's marks and height, or None when there
-/// is no standalone punctuation prefix or it does not fit, the chunk
-/// reshaped in place as it was.
+/// Lays out the text chunk after an equation on an open line. The chunk
+/// is shaped in the room left, first visual line only, and that line
+/// joins the open line as shaped, so a justified paragraph stretches it
+/// to the margin. The remainder is shaped again at the full width, from
+/// the first word after the cut, the model offsets of the cut span
+/// shifted by the bytes skipped, so selection and copy stay exact. The
+/// chunk starts a new line whole, from its first word, when no word
+/// fits, when the first line would end inside a word, or when the chunk
+/// reads right to left: shaped alone, such a line is laid out right to
+/// left and lands over the text before the equation. Answers the
+/// remainder's marks and height; marks at the end of the runs mean the
+/// whole chunk joined the line.
 #[allow(clippy::too_many_arguments)]
-fn split_glued_punctuation(
+fn split_after_equation(
     fonts: &mut FontStore,
     theme: &Theme,
     cfg: &ViewConfig,
     source: &str,
     masked: &[Span],
     start: usize,
+    end: usize,
     line: &mut FlowLine,
     base: &BlockStyle,
     x0: f32,
@@ -5532,82 +5687,101 @@ fn split_glued_punctuation(
     runs_mark: usize,
     rects_mark: usize,
     out: &mut LayoutDoc,
-) -> Option<(usize, usize, f32)> {
-    let lb = line.baseline?;
-    let text = masked[start].text(source);
-    let punct: usize = text
-        .chars()
-        .take_while(|c| ".,;:!?".contains(*c))
-        .map(char::len_utf8)
-        .sum();
-    let ws: usize = text[punct..]
-        .chars()
-        .take_while(|c| c.is_whitespace())
-        .map(char::len_utf8)
-        .sum();
-    let skip = punct + ws;
-    if punct == 0 || (skip < text.len() && ws == 0) {
-        return None;
-    }
-    let prefix_text = text[..punct].to_string();
-    let rest_text = text[skip..].to_string();
+) -> (usize, usize, f32) {
+    let lb = line.baseline.expect("an open line with a baseline");
+    let room = x0 + avail - line.end_x;
     out.runs.truncate(runs_mark);
     out.rects.truncate(rects_mark);
-    let mut prefix_spans = masked.to_vec();
-    for (si, s) in prefix_spans.iter_mut().enumerate() {
-        if si == start {
-            s.set_text(prefix_text.clone());
-        } else {
-            s.clear_text();
+    let rtl = match cfg.direction {
+        DirectionMode::Rtl => true,
+        DirectionMode::Ltr => false,
+        DirectionMode::Auto => masked[start..end]
+            .iter()
+            .flat_map(|s| s.text(source).chars())
+            .find_map(crate::style::fonts::strong_rtl)
+            .unwrap_or(false),
+    };
+    // The cut: where the first visual line of the chunk, shaped in the
+    // room left, ends. No cut when nothing fits (a first line of a blank
+    // alone, which shaping trims, or wider than the room, a word that
+    // cannot break) or when the line would end inside a word.
+    let mut cut: Option<(usize, usize)> = None;
+    if room > 0.0 && !rtl {
+        shape_block_lines(
+            fonts, theme, cfg, source, masked, true, base, x0, y, room, true, out,
+        );
+        let runs = &out.runs[runs_mark..];
+        let left = runs.iter().map(|r| r.x).fold(f32::MAX, f32::min);
+        let right = runs.iter().map(|r| r.x + r.width).fold(x0, f32::max);
+        let last = runs
+            .iter()
+            .map(|r| {
+                let len = masked[r.span].text(source).len();
+                match r.text {
+                    TextRef::Model { start: s, len: l } => (r.span, ((s + l) as usize).min(len)),
+                    TextRef::Side { .. } => (r.span, len),
+                }
+            })
+            .max();
+        if let Some(c) = last {
+            let fits = left >= x0 - 0.5 && right - left <= room + 0.5;
+            if fits && cut_at_a_break(masked, source, c, end) {
+                cut = Some(c);
+            }
         }
     }
-    shape_block(
-        fonts,
-        theme,
-        cfg,
-        source,
-        &prefix_spans,
-        true,
-        base,
-        x0,
-        y,
-        avail,
-        out,
-    );
-    let pw = out.runs[runs_mark..]
-        .iter()
-        .map(|r| r.x + r.width)
-        .fold(x0, f32::max)
-        - x0;
-    let pb = out.runs[runs_mark..]
-        .iter()
-        .map(|r| r.baseline)
-        .fold(0.0, f32::max);
-    if out.runs.len() == runs_mark || line.end_x + pw > x0 + avail {
-        // No prefix fits; the chunk reshapes exactly as it was.
-        out.runs.truncate(runs_mark);
-        out.rects.truncate(rects_mark);
-        shape_block(
-            fonts, theme, cfg, source, masked, true, base, x0, y, avail, out,
-        );
-        return None;
+    let (mut span, mut byte) = match cut {
+        Some(c) => {
+            // The first line joins the open line. Its baseline is the
+            // line box's, which any run gives whatever its own raise.
+            let runs = &out.runs[runs_mark..];
+            let pb = runs.first().map_or(y, |r| y + r.baseline - r.y);
+            let pw = runs.iter().map(|r| r.x + r.width).fold(x0, f32::max) - x0;
+            let dx = line.end_x - x0;
+            let dy = lb - pb;
+            for run in &mut out.runs[runs_mark..] {
+                run.x += dx;
+                run.y += dy;
+                run.baseline += dy;
+            }
+            for rect in &mut out.rects[rects_mark..] {
+                rect.x += dx;
+                rect.y += dy;
+            }
+            line.end_x += pw;
+            c
+        }
+        None => {
+            out.runs.truncate(runs_mark);
+            out.rects.truncate(rects_mark);
+            (start, 0)
+        }
+    };
+    // The remainder starts at the first word after the cut.
+    loop {
+        let text = masked[span].text(source);
+        byte += text[byte..]
+            .chars()
+            .take_while(|c| c.is_whitespace())
+            .map(char::len_utf8)
+            .sum::<usize>();
+        if byte < text.len() || span + 1 >= end {
+            break;
+        }
+        span += 1;
+        byte = 0;
     }
-    let dx = line.end_x - x0;
-    let dy = lb - pb;
-    for run in &mut out.runs[runs_mark..] {
-        run.x += dx;
-        run.y += dy;
-        run.baseline += dy;
-    }
-    for rect in &mut out.rects[rects_mark..] {
-        rect.x += dx;
-        rect.y += dy;
-    }
-    line.end_x += pw;
     let rmark_runs = out.runs.len();
     let rmark_rects = out.rects.len();
+    if byte >= masked[span].text(source).len() {
+        return (rmark_runs, rmark_rects, 0.0);
+    }
     let mut rest_spans = masked.to_vec();
-    rest_spans[start].set_text(rest_text);
+    for s in &mut rest_spans[start..span] {
+        s.clear_text();
+    }
+    let tail = masked[span].text(source)[byte..].to_string();
+    rest_spans[span].set_text(tail);
     let h = shape_block(
         fonts,
         theme,
@@ -5622,13 +5796,39 @@ fn split_glued_punctuation(
         out,
     );
     for run in &mut out.runs[rmark_runs..] {
-        if run.span == start {
+        if run.span == span {
             if let TextRef::Model { start: s, .. } = &mut run.text {
-                *s += skip as u32;
+                *s += byte as u32;
             }
         }
     }
-    Some((rmark_runs, rmark_rects, h))
+    (rmark_runs, rmark_rects, h)
+}
+
+/// Whether a cut of the chunk at `(span, byte)` is a place where a line
+/// may break: whitespace follows it, the chunk ends there, or the Unicode
+/// line-breaking rules allow a break there in the span's text (after a
+/// hyphen or a dash, between Chinese characters), the rules the shaper
+/// breaks by. A cut anywhere else is inside a word wider than the room,
+/// which shaping breaks between glyphs.
+fn cut_at_a_break(
+    masked: &[Span],
+    source: &str,
+    (mut span, mut byte): (usize, usize),
+    end: usize,
+) -> bool {
+    loop {
+        let text = masked[span].text(source);
+        if byte < text.len() {
+            return text[byte..].starts_with(char::is_whitespace)
+                || unicode_linebreak::linebreaks(text).any(|(i, _)| i == byte);
+        }
+        span += 1;
+        if span >= end {
+            return true;
+        }
+        byte = 0;
+    }
 }
 
 /// Text with inline images or equations. Text shapes normally; an image
@@ -5692,59 +5892,56 @@ fn layout_flow(
                 .collect();
             let runs_mark = out.runs.len();
             let rects_mark = out.rects.len();
-            let mut h = shape_block(
-                fonts, theme, cfg, source, &masked, true, base, x0, y, avail, out,
-            );
-            let (mut last_top, mut end_x, mut last_base) =
-                chunk_metrics(&out.runs[runs_mark..], x0, y);
-            let single_line = h <= 1.5 * line_height;
-            let merged = if let Some(l) = line.as_mut() {
-                let fits = l.end_x + (end_x - x0) <= x0 + avail;
-                match l.baseline {
-                    Some(lb) if single_line && fits => {
-                        let dx = l.end_x - x0;
-                        let dy = lb - last_base;
-                        for run in &mut out.runs[runs_mark..] {
-                            run.x += dx;
-                            run.y += dy;
-                            run.baseline += dy;
-                        }
-                        for rect in &mut out.rects[rects_mark..] {
-                            rect.x += dx;
-                            rect.y += dy;
-                        }
-                        l.end_x += end_x - x0;
-                        true
-                    }
-                    _ => false,
+            // After an equation on an open text line, the split lays the
+            // chunk out: the words that fit join the line, and the rest
+            // flows below from its first word.
+            let after_equation = start > 0
+                && spans[start - 1].math
+                && line.as_ref().is_some_and(|l| l.baseline.is_some());
+            let (h, runs_mark, rects_mark, merged) = if after_equation {
+                let l = line.as_mut().expect("an open line with a baseline");
+                let (rm, rcm, rh) = split_after_equation(
+                    fonts, theme, cfg, source, &masked, start, i, l, base, x0, y, avail, runs_mark,
+                    rects_mark, out,
+                );
+                if out.runs.len() == rm {
+                    // The whole chunk joined the line, which stays open.
+                    continue;
                 }
+                (rh, rm, rcm, false)
             } else {
-                false
-            };
-            if !merged {
-                // Punctuation glued to an equation joins the equation's
-                // line even when the rest of the chunk wraps below.
-                let mut runs_mark = runs_mark;
-                let mut rects_mark = rects_mark;
-                if start > 0 && spans[start - 1].math {
-                    if let Some(l) = line.as_mut() {
-                        if let Some((rm, rcm, rh)) = split_glued_punctuation(
-                            fonts, theme, cfg, source, &masked, start, l, base, x0, y, avail,
-                            runs_mark, rects_mark, out,
-                        ) {
-                            if out.runs.len() == rm {
-                                // The chunk was the punctuation alone;
-                                // the line stays open as it was.
-                                continue;
+                let h = shape_block(
+                    fonts, theme, cfg, source, &masked, true, base, x0, y, avail, out,
+                );
+                let (_, end_x, last_base) = chunk_metrics(&out.runs[runs_mark..], x0, y);
+                let single_line = h <= 1.5 * line_height;
+                let merged = if let Some(l) = line.as_mut() {
+                    let fits = l.end_x + (end_x - x0) <= x0 + avail;
+                    match l.baseline {
+                        Some(lb) if single_line && fits => {
+                            let dx = l.end_x - x0;
+                            let dy = lb - last_base;
+                            for run in &mut out.runs[runs_mark..] {
+                                run.x += dx;
+                                run.y += dy;
+                                run.baseline += dy;
                             }
-                            runs_mark = rm;
-                            rects_mark = rcm;
-                            h = rh;
-                            (last_top, end_x, last_base) =
-                                chunk_metrics(&out.runs[runs_mark..], x0, y);
+                            for rect in &mut out.rects[rects_mark..] {
+                                rect.x += dx;
+                                rect.y += dy;
+                            }
+                            l.end_x += end_x - x0;
+                            true
                         }
+                        _ => false,
                     }
-                }
+                } else {
+                    false
+                };
+                (h, runs_mark, rects_mark, merged)
+            };
+            let (mut last_top, end_x, mut last_base) = chunk_metrics(&out.runs[runs_mark..], x0, y);
+            if !merged {
                 if let Some(l) = line.take() {
                     if l.row {
                         let below = l.top + l.height + 0.25 * base.size;
@@ -6185,7 +6382,7 @@ fn side_text_width(fonts: &mut FontStore, cfg: &ViewConfig, text: &str, size: f3
     let attrs = Attrs::new().family(Family::Name(&cfg.body_family));
     buffer.set_text(
         &mut fonts.font_system,
-        text,
+        &crate::style::fonts::shapable(text),
         &attrs,
         Shaping::Advanced,
         None,
@@ -6193,7 +6390,7 @@ fn side_text_width(fonts: &mut FontStore, cfg: &ViewConfig, text: &str, size: f3
     buffer.shape_until_scroll(&mut fonts.font_system, false);
     buffer
         .layout_runs()
-        .filter_map(|run| run.glyphs.last().map(|g| g.x + g.w))
+        .map(|run| line_width(run.glyphs))
         .fold(0.0, f32::max)
 }
 
@@ -6214,7 +6411,7 @@ fn shape_side_text(
     let attrs = Attrs::new().family(Family::Name(family_name));
     buffer.set_text(
         &mut fonts.font_system,
-        text,
+        &crate::style::fonts::shapable(text),
         &attrs,
         Shaping::Advanced,
         None,
@@ -6223,10 +6420,11 @@ fn shape_side_text(
     let mut runs = Vec::new();
     let mut width = 0.0f32;
     for run in buffer.layout_runs() {
-        let Some(last) = run.glyphs.last() else {
+        if run.glyphs.is_empty() {
             continue;
-        };
-        width = width.max(last.x + last.w);
+        }
+        let run_width = line_width(run.glyphs);
+        width = width.max(run_width);
         let text = out.side_ref(text);
         let family = out.family_id(family_name);
         runs.push(TextRun {
@@ -6234,7 +6432,7 @@ fn shape_side_text(
             x: 0.0,
             y: run.line_top,
             baseline: run.line_y,
-            width: last.x + last.w,
+            width: run_width,
             size,
             family,
             weight: Weight::NORMAL.0,
@@ -6764,7 +6962,7 @@ fn shape_code_chunk(
         height = height.max(run.line_top + line_height);
         let line_text = buffer.lines[run.line_i].text();
         let glyphs = trim_trailing_spaces(run.glyphs, line_text);
-        for group in glyph_groups(glyphs, line_text, false) {
+        for group in glyph_groups(glyphs, line_text, false, &[]) {
             let segment_index = group.meta;
             let (start_byte, end_byte) = (group.bytes.start, group.bytes.end);
             let role = segments[segment_index].1;
@@ -6859,8 +7057,16 @@ struct GlyphGroup {
 }
 
 /// Walks a shaped line grouping consecutive glyphs by metadata, the
-/// one walk both the prose and the code paths consume. With
-/// `cut_spaces`, a group also ends after each space run, since a
+/// one walk both the prose and the code paths consume. A group also
+/// ends where the next glyph's bytes do not touch the previous one's
+/// (`glyphs_touch`), so that its byte span, the smallest and the largest
+/// byte of its glyphs, holds its glyphs and nothing else. A span marked
+/// in `as_written` (inline code that stays one group) keeps such a gap,
+/// so that paint draws its text as written, left to right, whatever the
+/// line's direction; the caller leaves the mark off a span that the
+/// space cut below splits, since a kept gap in one of its words would
+/// span the bytes of the others.
+/// With `cut_spaces`, a group also ends after each space run, since a
 /// justified line must hold no stretched space inside a group: paint
 /// re-shapes runs naturally, so every word paints at its own recorded
 /// x, and the space stays with the word before it to keep byte ranges
@@ -6869,6 +7075,7 @@ fn glyph_groups<'a>(
     glyphs: &'a [cosmic_text::LayoutGlyph],
     line_text: &'a str,
     cut_spaces: bool,
+    as_written: &'a [bool],
 ) -> impl Iterator<Item = GlyphGroup> + 'a {
     let mut g = 0;
     std::iter::from_fn(move || {
@@ -6876,9 +7083,11 @@ fn glyph_groups<'a>(
             return None;
         }
         let meta = glyphs[g].metadata;
+        let keep_gaps = as_written.get(meta).copied().unwrap_or(false);
         let mut end = g + 1;
         while end < glyphs.len()
             && glyphs[end].metadata == meta
+            && (keep_gaps || glyphs_touch(&glyphs[end - 1], &glyphs[end]))
             && !(cut_spaces
                 && glyph_is_space(line_text, &glyphs[end - 1])
                 && !glyph_is_space(line_text, &glyphs[end]))
@@ -6917,6 +7126,16 @@ fn glyph_groups<'a>(
     })
 }
 
+/// Whether two glyphs next to each other on the line come from bytes
+/// that touch or overlap, in either direction, since the glyphs of a
+/// right-to-left line arrive from the right. A gap means the bidi rules
+/// placed one of them away from its neighbors in the text, as the final
+/// period of a Latin run, which lands at the run's left end in a
+/// right-to-left line, next to the run's first word.
+fn glyphs_touch(a: &cosmic_text::LayoutGlyph, b: &cosmic_text::LayoutGlyph) -> bool {
+    b.start <= a.end && b.end >= a.start
+}
+
 /// Whether a glyph draws only a stretchable space, U+0020 or U+00A0,
 /// the characters justification widens.
 fn glyph_is_space(line_text: &str, glyph: &cosmic_text::LayoutGlyph) -> bool {
@@ -6951,6 +7170,85 @@ mod tests {
 
     fn seg(text: &str, script: Script) -> (String, Script) {
         (text.to_string(), script)
+    }
+
+    /// The glyphs of a right-to-left line come in reading order, placed
+    /// from the right: the width of a label is its whole line, not its
+    /// last letter.
+    #[test]
+    fn a_right_to_left_label_measures_its_whole_width() {
+        let mut fonts = FontStore::new();
+        let cfg = ViewConfig::default();
+        let word = side_text_width(&mut fonts, &cfg, "مقدمة", 16.0);
+        let line = side_text_width(&mut fonts, &cfg, "مقدمة ابن خلدون", 16.0);
+        assert!(
+            line > 2.0 * word,
+            "three words measure more than twice the first: {line} against {word}"
+        );
+        let mut out = LayoutDoc::default();
+        let family = cfg.body_family.clone();
+        let white = Rgba {
+            r: 255,
+            g: 255,
+            b: 255,
+            a: 255,
+        };
+        let (runs, shaped) = shape_side_text(
+            &mut fonts,
+            &cfg,
+            &family,
+            "مقدمة ابن خلدون",
+            16.0,
+            white,
+            &mut out,
+        );
+        assert_eq!(shaped, line, "the shaped runs give the same width");
+        assert_eq!(runs[0].width, line);
+    }
+
+    /// A paragraph separator inside a paragraph's text splits the
+    /// shaped line into two bidi paragraphs, whose directions the text
+    /// library asserts equal: the page shapes through `shapable`.
+    #[test]
+    fn a_paragraph_separator_in_the_text_lays_out() {
+        let doc = markdown::parse("abc\u{2029}مق and on\n");
+        let lay = lay_of(&doc);
+        assert!(lay.height > 0.0);
+    }
+
+    /// A next line character (U+0085) is a paragraph separator too, and
+    /// the shaper drops it between two of its lines, which puts every
+    /// offset after it one byte off: the page shapes through
+    /// `shapable`, so each run's text is still readable.
+    #[test]
+    fn a_next_line_character_in_the_text_lays_out() {
+        let doc = markdown::parse("abc\u{85}مق and on\n");
+        let lay = lay_of(&doc);
+        assert!(lay.height > 0.0);
+        for run in &lay.runs {
+            assert!(!lay.run_text(&doc, run).is_empty());
+        }
+    }
+
+    /// The label of an image shown without its picture is shaped like
+    /// the text: a separator between two directions does not end the
+    /// layout, and a control character measures as the space it is
+    /// shown as, not as a glyph searched through every font.
+    #[test]
+    fn an_image_label_is_shaped_through_shapable() {
+        for label in ["abc\u{2029}مق", "abc\u{85}مق"] {
+            let doc = markdown::parse(format!("See ![{label}](nothing.png) here.\n"));
+            let lay = lay_of(&doc);
+            assert!(lay.height > 0.0);
+        }
+        let mut fonts = FontStore::new();
+        let cfg = ViewConfig::default();
+        let with_escape = side_text_width(&mut fonts, &cfg, "x\u{1b}y", 15.0);
+        let with_space = side_text_width(&mut fonts, &cfg, "x y", 15.0);
+        assert!(
+            (with_escape - with_space).abs() < 0.01,
+            "the escape measures as a space: {with_escape} against {with_space}"
+        );
     }
 
     fn lay_of(doc: &Document) -> LayoutDoc {
@@ -7298,6 +7596,31 @@ mod tests {
         assert_eq!(tex_symbols(r"\foo{x}"), r"\foo{x}");
         assert_eq!(tex_symbols("no commands"), "no commands");
         assert_eq!(tex_symbols(r"trailing \"), r"trailing \");
+    }
+
+    /// An escaped reserved character shows its character in the text
+    /// fallback, as noad shows it on the page (Task 280): the `_` of
+    /// `x\_1` is a character, not a subscript.
+    #[test]
+    fn escaped_reserved_characters_show_their_character() {
+        assert_eq!(tex_symbols(r"15\%"), "15%");
+        assert_eq!(tex_symbols(r"a \# b \& c \$5 \{x\}"), "a # b & c $5 {x}");
+        assert_eq!(math_display(r"x\_1"), "x_1");
+        assert_eq!(math_display(r"15\%"), "15%");
+        assert_eq!(math_scripts(r"x\_1"), [seg("x_1", Script::Normal)]);
+        assert_eq!(
+            math_scripts(r"a_\%"),
+            [seg("a", Script::Normal), seg("%", Script::Sub)],
+            "an escaped character as a script's argument"
+        );
+        assert_eq!(
+            math_scripts(r"\sum_{i=1}^{n}"),
+            [
+                seg("\u{2211}", Script::Normal),
+                seg("i=1", Script::Sub),
+                seg("n", Script::Sup)
+            ]
+        );
     }
 
     #[test]

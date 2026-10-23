@@ -4,10 +4,12 @@
 
 - Fork：`https://github.com/fjcanyue/oryx`，远端名 `origin`。
 - 上游：`https://github.com/wmahfoudh/oryx`，远端名 `upstream`。
-- 本次功能基线：上游 **v1.2.0**，提交 `96c51af`；最终同步至同版本维护提交 **`06f4c77`**。
-- 合并前的本地提交：`7b50799`；双方共同祖先：`41d9413`（v1.1.1 的打包配方提交）。
-- 本次对象来自 `.source/oryx` 的 Git 仓库。先合并发布标签，再合并其后的 `d53e03f`（v1.2.0 发布配方）和 `06f4c77`（macOS 磁盘映像重试）。原因是标签中的 AUR/Flathub 配方仍指向 1.1.1，发布配方更新和实际发布必然分两个阶段；不能只看 Cargo 版本号判定分发文件已经同步。
-- 包版本随上游为 `1.2.0`，本地 Mermaid 使用 Merman `=0.7.0`，所以最低 Rust 版本仍为 **1.95**，不能退回上游的 1.89。
+- 本次功能基线：上游 **v1.2.2**，提交 `1d73917`（`chore: recipes for 1.2.2`，随标签 `v1.2.2`）。
+- 合并前的本地提交：`3003c9d`；双方共同祖先：`b1c29aa`（v1.2.0 后的维护提交）。
+- 本次对象来自 `.source/oryx` 的 Git 仓库，以 `git fetch <本地路径> +main:refs/remotes/upstream/main` 更新，绕开 GitHub fetch 的 SSL 中断。
+- 包版本随上游为 `1.2.2`，本地 Mermaid 使用 Merman `=0.8.0`，最低 Rust 版本仍为 **1.95**，不能退回上游的 1.89；`rust-toolchain.toml` 随上游钉在 1.99.0。
+- 上游 1.2.2 的按键重构（`keymap::Press`，非拉丁布局）与本 fork 的 `sidebar_search_key`/`SearchInFiles` 在 `app.rs` 的按键阶梯里合流：fork 的调用统一改传上游的 `key` 变量（有修饰键时为 Latin 键，否则为逻辑键）。上游 `Regex` 命令（find bar 的 `Alt+R`）与 fork sidebar 搜索的 `Alt+R` 作用域不同，共存。
+- `sidebar::fit` 采纳上游 widths 闭包（一次 shaping 的性能修复）；fork 的 `fit_with_source_len`（搜索高亮需要字节前缀长度）保留 measure 闭包签名，两者并存。
 
 本地已经设置 `upstream` 远端和 `git config --local rerere.enabled true`。它们是本机 Git 配置，不会随代码克隆；新机器需要重新设置。`rerere` 记录本次冲突的解法，今后相同冲突可以复用，但仍需审查和测试。
 

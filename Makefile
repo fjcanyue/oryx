@@ -1,6 +1,8 @@
 VERSION := $(shell sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
 
 check:
+	@rustup target list --installed | grep -qx x86_64-pc-windows-gnu || { echo "the target x86_64-pc-windows-gnu is not installed: rustup target add x86_64-pc-windows-gnu"; exit 1; }
+	@rustup target list --installed | grep -qx aarch64-apple-darwin || { echo "the target aarch64-apple-darwin is not installed: rustup target add aarch64-apple-darwin"; exit 1; }
 	cargo fmt --all --check
 	cargo clippy --workspace --all-targets -- -D warnings
 	cargo clippy --workspace --target x86_64-pc-windows-gnu -- -D warnings
@@ -13,10 +15,12 @@ audit:
 	cargo audit
 
 release: audit
+	@rustup target list --installed | grep -qx x86_64-pc-windows-gnu || { echo "the target x86_64-pc-windows-gnu is not installed: rustup target add x86_64-pc-windows-gnu"; exit 1; }
 	@command -v wrestool >/dev/null || { echo "icoutils is not installed: wrestool extracts the MSI icon from the exe"; exit 1; }
 	@command -v makemsix >/dev/null || { echo "makemsix is not installed: see the Tools section of internal/releasing.md"; exit 1; }
 	@command -v nfpm >/dev/null || { echo "nfpm is not installed: it builds the .deb and the .rpm"; exit 1; }
 	@command -v appimagetool >/dev/null || { echo "appimagetool is not installed: see the Tools section of internal/releasing.md"; exit 1; }
+	@command -v patchelf >/dev/null || { echo "patchelf is not installed: it gives the AppImage's binary the path of its bundled libraries"; exit 1; }
 	sh packaging/build-linux.sh
 	cargo build --release --target x86_64-pc-windows-gnu
 	rm -rf release

@@ -93,7 +93,7 @@ pub(crate) fn block_pieces(doc: &Document, index: usize) -> Vec<Piece<'_>> {
                 });
             }
         }
-        BlockKind::Table { header, rows } => {
+        BlockKind::Table { header, rows, .. } => {
             let mut chain = 0usize;
             for (r, row) in std::iter::once(header).chain(rows.iter()).enumerate() {
                 if r > 0 {
@@ -412,11 +412,11 @@ pub fn run_interval(run: &TextRun) -> Option<(ModelPos, ModelPos)> {
 /// The model position nearest to a point in document coordinates.
 /// Snaps vertically to the closest line and horizontally to the closest
 /// character boundary. None only when nothing selectable is placed.
-/// Character classes word expansion runs over: letters, digits and
-/// underscores make words, whitespace makes gaps, anything else stands
-/// alone.
+/// Character classes word expansion runs over: the characters of a
+/// word (`caret::word_char`) make words, whitespace makes gaps,
+/// anything else stands alone.
 fn word_class(c: char) -> u8 {
-    if c.is_alphanumeric() || c == '_' {
+    if crate::edit::caret::word_char(c) {
         0
     } else if c.is_whitespace() {
         1
@@ -855,7 +855,7 @@ fn breaks_only(doc: &Document, sel: &Selection) -> Option<usize> {
             let whole = a.byte == format!("{key}: {value}").len();
             (whole && b.span == a.span + 1 && b.span < entries.len()).then_some(1)
         }
-        BlockKind::Table { header, rows } => {
+        BlockKind::Table { header, rows, .. } => {
             // The spans of every cell chain header first; a break stands
             // only between a row's last span and the next row's first.
             let mut chain = 0;
@@ -1343,14 +1343,31 @@ fn run_rtl(
     buffer.layout_runs().next().is_some_and(|line| line.rtl)
 }
 
-/// X offset of a byte boundary among shaped glyphs, which arrive in
-/// logical order. An LTR glyph's boundary sits at its left edge; an RTL
-/// glyph's at its right, since the character before it draws to its
-/// right. A boundary inside a glyph's cluster (a ligature such as fi is
-/// one glyph over two characters) splits the glyph's width evenly per
-/// character, mirrored for RTL, so carets and highlights land between
-/// the characters and always agree.
+/// X offset of a byte boundary among shaped glyphs. An LTR glyph's
+/// boundary sits at its left edge; an RTL glyph's at its right, since
+/// the character before it draws to its right. The glyph that starts at
+/// the byte answers first, wherever the line puts it: a line of mixed
+/// directions (a field's whole text) comes in visual order, where the
+/// first glyph past the byte can belong to another word. A cluster drawn
+/// as several glyphs (a letter and its mark) takes the outermost edge. A
+/// boundary inside a glyph's cluster (a ligature such as fi is one glyph
+/// over two characters) splits the glyph's width evenly per character,
+/// mirrored for RTL, so carets and highlights land between the
+/// characters and always agree.
 pub(crate) fn boundary_x(glyphs: &[LayoutGlyph], text: &str, byte: usize) -> Option<f32> {
+    let mut starting: Option<f32> = None;
+    for glyph in glyphs.iter().filter(|g| g.start == byte) {
+        let rtl = glyph.level.is_rtl();
+        let edge = if rtl { glyph.x + glyph.w } else { glyph.x };
+        starting = Some(match starting {
+            Some(seen) if rtl => seen.max(edge),
+            Some(seen) => seen.min(edge),
+            None => edge,
+        });
+    }
+    if starting.is_some() {
+        return starting;
+    }
     for glyph in glyphs {
         let rtl = glyph.level.is_rtl();
         if glyph.start >= byte {

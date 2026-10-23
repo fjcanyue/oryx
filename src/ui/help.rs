@@ -395,6 +395,11 @@ pub const TIPS: &[Tip] = &[
     Tip {
         kind: TipKind::Tip,
         area: Area::Selecting,
+        text: r#"Select a few words on one line, with the mouse or with `Shift` and the arrows. Oryx highlights every other place where the same words appear."#,
+    },
+    Tip {
+        kind: TipKind::Tip,
+        area: Area::Selecting,
         text: r#"Hold `Shift` and click to extend a selection to that point. In the editor it selects from the caret to the click, which is handy for a long stretch of text: click where it starts, scroll, and `Shift`+click where it ends."#,
     },
     Tip {
@@ -446,6 +451,11 @@ pub const TIPS: &[Tip] = &[
         kind: TipKind::Tip,
         area: Area::Editing,
         text: r#"`Ctrl+K` turns the selected text, or the word the caret is on, into a link. You can also paste a web address over a selection and Oryx will make it a link."#,
+    },
+    Tip {
+        kind: TipKind::Tip,
+        area: Area::Editing,
+        text: r#"`Ctrl+U` changes the case of the selected text, or of the word the caret is on: lower case, then a capital on each word, then upper case. The address of a link, inline code, an HTML tag and a formula keep their letters."#,
     },
     Tip {
         kind: TipKind::Tip,
@@ -700,7 +710,12 @@ pub const TIPS: &[Tip] = &[
     Tip {
         kind: TipKind::Tip,
         area: Area::Markdown,
-        text: r#"Tables keep each column's alignment, shade every other row and wrap long cells, so a wide table never runs off the page."#,
+        text: r#"You can align individual columns of a table: in the line under the header, `:---:` centers a column and `---:` aligns it to the right. The alignment is not lost when you copy the table."#,
+    },
+    Tip {
+        kind: TipKind::Tip,
+        area: Area::Markdown,
+        text: r#"Long cells of a table wrap, so a wide table stays on the page. Every other row is shaded."#,
     },
     Tip {
         kind: TipKind::Tip,
@@ -790,7 +805,7 @@ pub const TIPS: &[Tip] = &[
     Tip {
         kind: TipKind::Tip,
         area: Area::Books,
-        text: r#"The examples folder installed with Oryx has sample documents, a math sample and *The Adventures of Sherlock Holmes*, so you can try the book reader right away."#,
+        text: r#"The examples folder installed with Oryx has sample documents, a math sample, *The Adventures of Sherlock Holmes* to try the book reader, and an 8 MB markdown file to try a big one."#,
     },
     Tip {
         kind: TipKind::Tip,

@@ -28,6 +28,9 @@ version=$(sed -n 's/^version = "\(.*\)"/\1/p' "$root/Cargo.toml" | head -1)
 name="oryx-$version-macos-universal.dmg"
 
 cd "$root"
+# The version named in rust-toolchain.toml, installed before its targets
+# are added, so that the log shows it as a step of its own.
+rustup toolchain install
 rustup target add aarch64-apple-darwin x86_64-apple-darwin
 cargo build --release --locked --target aarch64-apple-darwin
 cargo build --release --locked --target x86_64-apple-darwin

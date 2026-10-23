@@ -191,7 +191,7 @@ pub fn strip(
         .as_chunks::<4>()
         .0
         .iter()
-        .map(|px| ((px[0] as u32) << 16) | ((px[1] as u32) << 8) | px[2] as u32)
+        .map(|px| super::pixel(px[0], px[1], px[2]))
         .collect();
     Some(Strip {
         pixels,
@@ -301,7 +301,7 @@ mod tests {
     const HEIGHT: u32 = 400;
 
     fn packed(c: Rgba) -> u32 {
-        ((c.r as u32) << 16) | ((c.g as u32) << 8) | c.b as u32
+        crate::paint::pixel(c.r, c.g, c.b)
     }
 
     fn lay(doc: &Document, cfg: &ViewConfig, fonts: &mut FontStore) -> LayoutDoc {
@@ -526,6 +526,35 @@ mod tests {
             }
         }
         edges
+    }
+
+    /// The strip's pixels go into the frame as they are: each carries
+    /// 0xFF in its top byte, as the band's do (KWin 6.8 reads the byte
+    /// as the pixel's opacity).
+    #[test]
+    fn every_pixel_of_a_strip_is_opaque() {
+        let doc = load::code_document(Some("rust"), "let a = 1;\nlet b = 2;\n");
+        let mut fonts = FontStore::new();
+        let lay = lay(&doc, &ViewConfig::default(), &mut fonts);
+        let theme = Theme::default_dark();
+        let strip = strip(
+            &mut fonts,
+            &lay,
+            &doc,
+            0,
+            1,
+            paper(&doc, &theme),
+            theme.syntax.punctuation,
+        )
+        .expect("the line is placed");
+        let clear = strip.pixels.iter().find(|px| *px >> 24 != 0xFF);
+        assert_eq!(clear, None, "a strip pixel without 0xFF in its top byte");
+        let numbered = painted(&doc, &lay, &mut fonts, true);
+        let clear = numbered.iter().find(|px| *px >> 24 != 0xFF);
+        assert_eq!(
+            clear, None,
+            "a numbered band pixel without 0xFF in its top byte"
+        );
     }
 
     #[test]

@@ -631,6 +631,7 @@ mod tests {
                     spans: c.spans,
                     seam: Some(c.seam),
                     converged: c.converged,
+                    reach: c.reach,
                     speculative: false,
                 });
                 true

@@ -566,6 +566,7 @@ const BUNDLED: &[&str] = &[
     "meadow",
     "night-owl",
     "nord",
+    "on-the-field",
     "one-dark",
     "oryx-dark",
     "oryx-hero",

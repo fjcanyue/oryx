@@ -361,7 +361,7 @@ $$
 \int_{-\infty}^{\infty} e^{-x^2}\,dx = \sqrt{\pi}
 ```
 
-All four GitHub notations typeset through the same TeX engine in STIX Two Math. Oryx infers whether a dollar sign is a currency or a math delimiter: a digit right after a closing dollar, as in `$5-$10`, keeps it text.
+All four GitHub notations typeset through the same TeX engine in STIX Two Math. Oryx infers whether a dollar sign is a currency or a math delimiter: a digit right after a closing dollar, as in `$5-$10`, keeps it text. A backslash before `%`, `#`, `&`, `$` or `_` shows the character, as in KaTeX. A bare `%` starts a comment, as in TeX.
 
 ```latex
 x_i^2 \quad \frac{a}{b} \quad \binom{n}{k} \quad \sqrt[3]{x^3+y^3}

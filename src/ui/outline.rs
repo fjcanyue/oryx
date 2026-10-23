@@ -189,23 +189,55 @@ impl OutlineTree {
         }
     }
 
-    /// The current section: the entry placed nearest at or above the
-    /// viewport top, wherever the list puts it, since a book's table of
-    /// contents need not follow the reading order. Among entries at the
-    /// same place, the one listed last wins. `top` answers a heading
-    /// block's document y, None while it is folded away or not yet
-    /// placed.
-    pub fn current_of(&self, scroll_y: f32, top: impl Fn(usize) -> Option<f32>) -> Option<usize> {
-        self.entries
-            .iter()
-            .enumerate()
-            .filter_map(|(i, e)| {
-                top(e.block)
-                    .filter(|&y| y <= scroll_y + 1.0)
-                    .map(|y| (i, y))
-            })
+    /// The current section, the entry the outline highlights. The first
+    /// heading in the top half of the view wins: the reader has reached
+    /// it. With none there, the entry placed nearest at or above the
+    /// top of the view, wherever the list puts it, since a book's table
+    /// of contents need not follow the reading order. At the end of the
+    /// page a heading lower in the view cannot reach the top, so the
+    /// nearest at or above the view's bottom wins instead. At the start
+    /// of a book nothing is above the top and a cover may hold the first
+    /// heading in the lower half of the view: the first heading in view
+    /// wins then. Among entries at the same place, the one listed last
+    /// wins. `top` answers a heading block's document y, None while it
+    /// is folded away or not yet placed.
+    pub fn current_of(
+        &self,
+        scroll_y: f32,
+        view_h: f32,
+        at_end: bool,
+        top: impl Fn(usize) -> Option<f32>,
+    ) -> Option<usize> {
+        let placed = || {
+            self.entries
+                .iter()
+                .enumerate()
+                .filter_map(|(i, e)| top(e.block).map(|y| (i, y)))
+        };
+        let reached = placed()
+            .filter(|&(_, y)| y >= scroll_y - 1.0 && y <= scroll_y + view_h / 2.0)
+            // min_by keeps the first of equal minima; the indexes
+            // reversed make that the last listed.
+            .min_by(|a, b| a.1.total_cmp(&b.1).then_with(|| b.0.cmp(&a.0)));
+        if let Some((i, _)) = reached {
+            return Some(i);
+        }
+        let line = if at_end {
+            scroll_y + view_h
+        } else {
+            scroll_y + 1.0
+        };
+        let above = placed()
+            .filter(|&(_, y)| y <= line)
             // max_by keeps the last of equal maxima.
             .max_by(|a, b| a.1.total_cmp(&b.1))
+            .map(|(i, _)| i);
+        if above.is_some() {
+            return above;
+        }
+        placed()
+            .filter(|&(_, y)| y <= scroll_y + view_h)
+            .min_by(|a, b| a.1.total_cmp(&b.1).then_with(|| b.0.cmp(&a.0)))
             .map(|(i, _)| i)
     }
 
@@ -398,12 +430,124 @@ mod tests {
             2 => Some(900.0),
             _ => None,
         };
-        assert_eq!(tree.current_of(0.0, tops), None, "above the first heading");
-        assert_eq!(tree.current_of(100.0, tops), Some(0), "exactly at the top");
-        assert_eq!(tree.current_of(600.0, tops), Some(1));
-        assert_eq!(tree.current_of(5000.0, tops), Some(2), "past the last");
+        assert_eq!(
+            tree.current_of(0.0, 150.0, false, tops),
+            Some(0),
+            "above the first heading, under the half line: the first in view"
+        );
+        assert_eq!(
+            tree.current_of(100.0, 400.0, false, tops),
+            Some(0),
+            "exactly at the top"
+        );
+        assert_eq!(tree.current_of(600.0, 400.0, false, tops), Some(1));
+        assert_eq!(
+            tree.current_of(5000.0, 400.0, false, tops),
+            Some(2),
+            "past the last"
+        );
         let none = |_: usize| None;
-        assert_eq!(tree.current_of(600.0, none), None, "nothing placed yet");
+        assert_eq!(
+            tree.current_of(600.0, 400.0, false, none),
+            None,
+            "nothing placed yet"
+        );
+    }
+
+    #[test]
+    fn a_heading_in_the_top_half_of_the_view_is_current() {
+        let d = doc("# A\n\n# B\n\n# C");
+        let tree = OutlineTree::build(&d);
+        let tops = |block: usize| match block {
+            0 => Some(100.0),
+            1 => Some(500.0),
+            2 => Some(900.0),
+            _ => None,
+        };
+        let view_h = 400.0;
+        assert_eq!(
+            tree.current_of(350.0, view_h, false, tops),
+            Some(1),
+            "B stands 150 under the top, in the top half"
+        );
+        assert_eq!(
+            tree.current_of(300.0, view_h, false, tops),
+            Some(1),
+            "B stands on the half line"
+        );
+        assert_eq!(
+            tree.current_of(250.0, view_h, false, tops),
+            Some(0),
+            "B stands 250 under the top, in the lower half: A stays"
+        );
+        assert_eq!(
+            tree.current_of(0.0, view_h, false, tops),
+            Some(0),
+            "A stands 100 under the top of the page"
+        );
+        // Two headings in the top half: the higher one, the first reached.
+        let close = |block: usize| match block {
+            0 => Some(100.0),
+            1 => Some(500.0),
+            2 => Some(550.0),
+            _ => None,
+        };
+        assert_eq!(tree.current_of(450.0, view_h, false, close), Some(1));
+    }
+
+    #[test]
+    fn at_the_end_of_the_page_the_last_heading_in_view_is_current() {
+        // The conclusion is shorter than the view: its heading stands in
+        // the lower half once the page cannot scroll further, and the
+        // chapter before it is long above the view.
+        let tree = book(&[("Six", 1), ("Conclusion", 9)]);
+        let tops = |block: usize| Some(block as f32 * 100.0);
+        let view_h = 400.0;
+        assert_eq!(
+            tree.current_of(600.0, view_h, false, tops),
+            Some(0),
+            "not at the end: the chapter above"
+        );
+        assert_eq!(
+            tree.current_of(600.0, view_h, true, tops),
+            Some(1),
+            "at the end: the conclusion"
+        );
+        let tree = book(&[("Six", 1), ("Seven", 7), ("Conclusion", 9)]);
+        assert_eq!(
+            tree.current_of(600.0, view_h, true, tops),
+            Some(1),
+            "a heading in the top half wins at the end too"
+        );
+    }
+
+    #[test]
+    fn at_the_start_of_a_book_the_first_heading_in_view_is_current() {
+        // A cover stands above the first heading, which the first view
+        // shows in its lower half: nothing is above the top, and the
+        // reader is at the start of that chapter.
+        let tree = book(&[("One", 1), ("Two", 5)]);
+        let tops = |block: usize| match block {
+            1 => Some(300.0),
+            5 => Some(900.0),
+            _ => None,
+        };
+        let view_h = 400.0;
+        assert_eq!(
+            tree.current_of(0.0, view_h, false, tops),
+            Some(0),
+            "the first heading, in the lower half of the first view"
+        );
+        let far = |block: usize| match block {
+            1 => Some(500.0),
+            5 => Some(900.0),
+            _ => None,
+        };
+        assert_eq!(
+            tree.current_of(0.0, view_h, false, far),
+            None,
+            "no heading in view: nothing"
+        );
     }
 
     /// A book's outline with each entry resolved to the given block, in
@@ -434,14 +578,19 @@ mod tests {
             ("Table of Contents", 0),
         ]);
         let tops = |block: usize| Some(block as f32 * 1000.0);
-        assert_eq!(tree.current_of(0.0, tops), Some(3), "on the contents page");
-        assert_eq!(tree.current_of(1500.0, tops), Some(0));
+        let view_h = 1000.0;
         assert_eq!(
-            tree.current_of(5000.0, tops),
+            tree.current_of(0.0, view_h, false, tops),
+            Some(3),
+            "on the contents page"
+        );
+        assert_eq!(tree.current_of(1500.0, view_h, false, tops), Some(0));
+        assert_eq!(
+            tree.current_of(5000.0, view_h, false, tops),
             Some(1),
             "the entry jumped to, not the one listed last"
         );
-        assert_eq!(tree.current_of(9500.0, tops), Some(2));
+        assert_eq!(tree.current_of(9500.0, view_h, false, tops), Some(2));
     }
 
     #[test]
@@ -450,9 +599,10 @@ mod tests {
         // the section, listed after, carries the highlight.
         let tree = book(&[("Chapter", 4), ("First section", 4), ("Second section", 7)]);
         let tops = |block: usize| Some(block as f32 * 1000.0);
-        assert_eq!(tree.current_of(4000.0, tops), Some(1));
-        assert_eq!(tree.current_of(6000.0, tops), Some(1));
-        assert_eq!(tree.current_of(7000.0, tops), Some(2));
+        let view_h = 1000.0;
+        assert_eq!(tree.current_of(4000.0, view_h, false, tops), Some(1));
+        assert_eq!(tree.current_of(6000.0, view_h, false, tops), Some(1));
+        assert_eq!(tree.current_of(7000.0, view_h, false, tops), Some(2));
     }
 
     #[test]

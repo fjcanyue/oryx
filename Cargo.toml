@@ -3,7 +3,7 @@ members = ["noad", "palmbook", "rarball"]
 
 [package]
 name = "oryx"
-version = "1.2.1"
+version = "1.2.2"
 description = "Fast editor for markdown and code, reader for ebooks and comics"
 edition = "2021"
 license = "GPL-3.0-only"
@@ -36,6 +36,9 @@ markup5ever_rcdom = "0.39"
 # resvg/usvg stack in beside Oryx's own.
 merman = { version = "=0.8.0", default-features = false, features = ["all-diagrams", "complete-svg"] }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "rayon"] }
+# The X11 keyboard libraries, loaded before winit does, for a plain line
+# when one is missing.
+libloading = "0.8"
 miniz_oxide = "0.8"
 noad = { path = "noad" }
 nucleo-matcher = "0.3.1"
@@ -55,6 +58,10 @@ syntect = { version = "5.3.0", default-features = false, features = ["default-fa
 tiny-skia = "0.11"
 toml = "0.8"
 ttf-parser = "0.25"
+# The combining marks that belong to a word, for the caret, the double
+# click and the case key; already in the tree through resvg.
+unicode-properties = { version = "0.1.4", default-features = false, features = ["general-category"] }
+unicode-linebreak = "0.1"
 ureq = { version = "3.2.1", default-features = false, features = ["native-tls", "gzip"] }
 winit = "0.30"
 zip = { version = "4.2", default-features = false, features = ["deflate"] }
@@ -71,9 +78,11 @@ syntect = { version = "5.3.0", default-features = false, features = ["default-fa
 [target."cfg(windows)".dependencies]
 winreg = "0.56.0"
 
-# File drops on Wayland, which winit 0.30 leaves out; both crates are
-# already in the tree through winit, at the same versions.
+# File drops on Wayland, which winit 0.30 leaves out; the three crates
+# are already in the tree through winit, at the same versions. rustix
+# gives the drop thread its wait on two descriptors.
 [target.'cfg(target_os = "linux")'.dependencies]
+rustix = { version = "1.1", features = ["event"] }
 wayland-backend = { version = "0.3", features = ["client_system"] }
 wayland-client = "0.31"
 

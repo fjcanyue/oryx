@@ -11,6 +11,11 @@ use crate::mlist::{Atom, AtomClass, ColAlign, Field, Limits, MathList, Noad, Tab
 /// name for binary search. Coverage grows by adding rows; the layout
 /// tests pin every codepoint to a glyph in the STIX fixture.
 pub(crate) const VOCABULARY: &[(&str, char, AtomClass)] = &[
+    // A reserved character, escaped, shows that character, as in KaTeX.
+    ("#", '#', AtomClass::Ord),
+    ("$", '$', AtomClass::Ord),
+    ("%", '%', AtomClass::Ord),
+    ("&", '&', AtomClass::Ord),
     ("Alpha", '\u{0391}', AtomClass::Ord),
     ("Beta", '\u{0392}', AtomClass::Ord),
     ("Box", '\u{25A1}', AtomClass::Ord),
@@ -63,6 +68,7 @@ pub(crate) const VOCABULARY: &[(&str, char, AtomClass)] = &[
     ("Vvdash", '\u{22AA}', AtomClass::Rel),
     ("Xi", '\u{039E}', AtomClass::Ord),
     ("Zeta", '\u{0396}', AtomClass::Ord),
+    ("_", '_', AtomClass::Ord),
     ("aleph", '\u{2135}', AtomClass::Ord),
     ("alpha", '\u{03B1}', AtomClass::Ord),
     ("amalg", '\u{2A3F}', AtomClass::Bin),
@@ -1896,6 +1902,32 @@ mod tests {
         assert_eq!(a[0].nucleus, Field::Literal("\\foobar".into()));
         assert_eq!(a[0].class, AtomClass::Ord);
         assert_eq!(a[1].nucleus, Field::Symbol('x'));
+    }
+
+    #[test]
+    fn escaped_percent_is_a_sign_and_a_bare_one_a_comment() {
+        let a = atoms("15\\% % off\nx");
+        let symbols: Vec<Field> = a.iter().map(|a| a.nucleus.clone()).collect();
+        assert_eq!(
+            symbols,
+            vec![
+                Field::Symbol('1'),
+                Field::Symbol('5'),
+                Field::Symbol('%'),
+                Field::Symbol('x'),
+            ]
+        );
+        assert_eq!(a[2].class, AtomClass::Ord);
+    }
+
+    #[test]
+    fn escaped_specials_become_their_character() {
+        let a = atoms("\\#\\&\\$\\_");
+        assert_eq!(a.len(), 4);
+        for (atom, ch) in a.iter().zip(['#', '&', '$', '_']) {
+            assert_eq!(atom.nucleus, Field::Symbol(ch), "\\{ch}");
+            assert_eq!(atom.class, AtomClass::Ord, "\\{ch}");
+        }
     }
 
     #[test]

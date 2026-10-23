@@ -1,6 +1,6 @@
 # Maintainer: Walid Mahfoudh <walid.mahfoudh@gmail.com>
 pkgname=oryx-editor
-pkgver=1.2.1
+pkgver=1.2.2
 pkgrel=1
 pkgdesc='Fast editor for markdown and code, reader for ebooks and comics'
 arch=('x86_64')
@@ -8,14 +8,14 @@ url='https://github.com/wmahfoudh/oryx'
 license=('GPL-3.0-only')
 # gcc-libs ships the libgcc_s.so.1 the binary links; namcap calls it
 # implicitly satisfied, it is listed all the same.
-depends=('openssl' 'gcc-libs' 'glibc' 'hicolor-icon-theme')
+depends=('openssl' 'gcc-libs' 'glibc' 'hicolor-icon-theme' 'libxkbcommon-x11')
 makedepends=('cargo' 'librsvg')
 # The command is oryx. The extra repository ships an unrelated oryx (a
 # network sniffer) that installs the same /usr/bin/oryx.
 conflicts=('oryx')
 source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
 # Written by packaging/channels.sh once the tag is published.
-sha256sums=('79ab55fb380f4b1aa4961a72d4336cb27af313f6f72211dd471bfbd64aa84750')
+sha256sums=('9e0c6633e05ca48ba2ac2e0ad4f714486f760cd3d4ad6e4f2d425067931ef121')
 
 prepare() {
     cd "oryx-$pkgver"

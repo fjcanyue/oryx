@@ -4,9 +4,10 @@ Every package is on the [releases page](https://github.com/wmahfoudh/oryx/releas
 
 ## Windows
 
-There are three ways to install Oryx on Windows:
+There are four ways to install Oryx on Windows:
 
 - **Microsoft Store**: search for *Oryx Editor*, or open [its page](https://apps.microsoft.com/detail/9NQGHNSJF3VB). The Store keeps it up to date.
+- **winget**: `winget install Steerania.Oryx` in a terminal. winget downloads the MSI installer and runs it. `winget upgrade Steerania.Oryx` updates it. A new version reaches winget some days after its release.
 - **MSI installer**: `oryx-<version>-windows-x86_64.msi`, a classic installer.
 - **Zip**: `oryx-<version>-windows-x86_64.zip`, for an install in your user folder without administrator rights. Unzip it and run `install.ps1` in PowerShell. It copies Oryx to `%LOCALAPPDATA%\Programs\Oryx` and registers the file types. `install.ps1 -Uninstall` removes it.
 
@@ -65,9 +66,11 @@ The Linux packages, the AppImage and the tarball need glibc 2.35 and OpenSSL 3. 
 
 Oryx uses OpenSSL to download remote images, such as the badges at the top of a README. On a system without OpenSSL 3, Oryx does not start.
 
+On X11, Oryx also needs the keyboard library `libxkbcommon-x11`. The deb and the rpm install it, and the AppImage carries its own copy. With the tarball, install the package yourself: `libxkbcommon-x11-0` on Debian and Ubuntu, `libxkbcommon-x11` on Fedora and Arch. Without it, Oryx says so and does not start.
+
 ## Building from source
 
-You need Rust 1.95 or later (this fork renders Mermaid diagrams with Merman 0.7, which needs it). On Linux, the build also needs a C compiler, `pkg-config` and the development files of OpenSSL:
+You need Rust 1.95 or later (this fork renders Mermaid diagrams with Merman 0.8, which needs it). If you use rustup, it installs the version named in `rust-toolchain.toml` by itself. On Linux, the build also needs a C compiler, `pkg-config` and the development files of OpenSSL:
 
 - Debian and Ubuntu: `sudo apt-get install pkg-config libssl-dev`
 - Fedora: `sudo dnf install pkgconf perl-FindBin perl-IPC-Cmd openssl-devel`

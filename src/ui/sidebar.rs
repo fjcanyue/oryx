@@ -164,14 +164,46 @@ pub fn caption_hit(width: f32, x: f32, y: f32) -> Option<Tab> {
     }
 }
 
-/// Shortens text with a trailing ellipsis to fit `avail`, measured by
-/// the caller's closure so the fitting stays pure and testable.
-pub fn fit(text: &str, avail: f32, measure: impl FnMut(&str) -> f32) -> String {
-    fit_with_source_len(text, avail, measure).0
+/// Shortens text with a trailing ellipsis to fit `avail`. `widths`
+/// gives the width of each character of a text from one shaping (the
+/// painter's `advances`), so the fitting stays pure and testable. The
+/// text with the ellipsis is shaped once: the sum of the text's widths
+/// says whether it fits, and the longest run of its characters whose
+/// widths with the ellipsis's stay within `avail` is the cut, checked
+/// by one more shaping. A candidate wider than its sum said (a letter
+/// whose form changes at the cut) loses a character more, a step at a
+/// time. Before, each step shaped the rest of the text again, and a
+/// long title cost its length in shapings at every frame.
+pub fn fit(text: &str, avail: f32, mut widths: impl FnMut(&str) -> Vec<f32>) -> String {
+    let with_ellipsis = format!("{text}\u{2026}");
+    let all = widths(&with_ellipsis);
+    let (ellipsis, chars) = all.split_last().map_or((0.0, &[][..]), |(e, c)| (*e, c));
+    if chars.iter().sum::<f32>() <= avail {
+        return text.to_string();
+    }
+    let mut keep = 0;
+    let mut sum = 0.0;
+    for width in chars {
+        if sum + width + ellipsis > avail {
+            break;
+        }
+        sum += width;
+        keep += 1;
+    }
+    let mut cut: String = text.chars().take(keep).collect();
+    loop {
+        let candidate = format!("{cut}\u{2026}");
+        if cut.is_empty() || widths(&candidate).iter().sum::<f32>() <= avail {
+            return candidate;
+        }
+        cut.pop();
+    }
 }
 
-/// Fits text and reports the byte length of the retained source prefix.
-/// Source offsets only apply to that prefix, never to the added ellipsis.
+/// Fits text, measured by the caller's closure so the fitting stays
+/// pure and testable, and reports the byte length of the retained
+/// source prefix. Source offsets only apply to that prefix, never to
+/// the added ellipsis.
 pub(crate) fn fit_with_source_len(
     text: &str,
     avail: f32,
@@ -1562,7 +1594,7 @@ fn outline_color(ui: &Ui, depth: usize, dead: bool, current: bool) -> Rgba {
 /// Shortens a name with an ellipsis to fit the available width.
 fn truncated(painter: &mut Painter, name: &str, avail: f32, weight: u16) -> String {
     fit(name, avail, |text| {
-        painter.measure(text, BODY_FAMILY, TEXT_SIZE, weight)
+        painter.advances(text, BODY_FAMILY, TEXT_SIZE, weight)
     })
 }
 
@@ -1691,13 +1723,49 @@ mod tests {
 
     #[test]
     fn fit_keeps_what_fits_and_cuts_with_an_ellipsis() {
-        // A fake measure: ten pixels per character.
-        let measure = |t: &str| t.chars().count() as f32 * 10.0;
-        assert_eq!(fit("short", 100.0, measure), "short");
-        assert_eq!(fit("exactly ten", 110.0, measure), "exactly ten");
-        let cut = fit("far too long a name", 60.0, measure);
+        // Fake widths: ten pixels per character.
+        let widths = |t: &str| vec![10.0; t.chars().count()];
+        assert_eq!(fit("short", 100.0, widths), "short");
+        assert_eq!(fit("exactly ten", 110.0, widths), "exactly ten");
+        let cut = fit("far too long a name", 60.0, widths);
         assert_eq!(cut, "far t\u{2026}", "five chars plus the ellipsis");
-        assert_eq!(fit("abc", 5.0, measure), "\u{2026}", "nothing fits");
+        assert_eq!(fit("abc", 5.0, widths), "\u{2026}", "nothing fits");
+    }
+
+    /// A cut costs a few shapings, not one per character: the widths
+    /// of the characters come from one shaping, the cut is summed from
+    /// them, and the candidate is checked once. The Outline tab of a
+    /// book with long titles drew each row in its length of shapings.
+    #[test]
+    fn a_cut_costs_a_few_shapings_not_one_per_character() {
+        let shapings = std::cell::Cell::new(0);
+        let title = "word ".repeat(40);
+        let cut = fit(&title, 95.0, |t| {
+            shapings.set(shapings.get() + 1);
+            vec![10.0; t.chars().count()]
+        });
+        assert_eq!(cut, "word wor\u{2026}", "eight characters and the ellipsis");
+        assert!(
+            shapings.get() <= 3,
+            "{} shapings for one cut",
+            shapings.get()
+        );
+    }
+
+    #[test]
+    fn a_long_right_to_left_title_is_cut_at_its_end() {
+        let title = "الباب الثاني في العمران البدوي و الأمم الوحشية و القبائل و ما يعرض في ذلك من الأحوال و فيه فصول و تمهيدات";
+        let mut pixmap = Pixmap::new(300, 40).unwrap();
+        let mut fonts = FontStore::new();
+        let mut painter = Painter::new(&mut pixmap, &mut fonts, None, 1.0);
+        let cut = truncated(&mut painter, title, 200.0, 400);
+        assert!(cut.ends_with('\u{2026}'), "the title is cut: {cut}");
+        assert!(
+            title.starts_with(cut.trim_end_matches('\u{2026}')),
+            "cut at its end in reading order, so the beginning shows: {cut}"
+        );
+        let width = painter.measure(&cut, BODY_FAMILY, TEXT_SIZE, 400);
+        assert!(width <= 200.0, "the cut title fits the row: {width}");
     }
 
     #[test]

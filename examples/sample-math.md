@@ -205,6 +205,12 @@ Prices like $5-$10, US$100, or "$5, $6, and $7" stay text. To force
 math where it guesses wrong, use the backtick form: $`k^2`$. An
 escaped \$50 always stays a dollar.
 
+## Reserved characters
+
+Inside a formula, `%` starts a comment, and `#`, `&`, `$` and `_` have
+a meaning of their own. Escaped, each shows its character: $15\%$,
+$\#A$, $a \& b$, $\$5$ and $x\_1$.
+
 ## Unknown commands
 
 A command Oryx does not know renders as literal source, in place, and

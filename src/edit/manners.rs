@@ -806,9 +806,10 @@ pub fn wrap_pair(typed: &str, markdown: bool) -> Option<(&'static str, &'static 
 }
 
 /// The word the caret stands in or at an end of: a run of letters,
-/// digits and underscores. None between two spaces or in an empty file.
+/// digits, underscores and combining marks (`caret::word_char`). None
+/// between two spaces or in an empty file.
 fn word_at(source: &str, at: usize) -> Option<std::ops::Range<usize>> {
-    let is_word = |c: char| c.is_alphanumeric() || c == '_';
+    let is_word = super::caret::word_char;
     let start = source[..at]
         .char_indices()
         .rev()
@@ -1429,6 +1430,501 @@ fn outdent_cut(line: &str, unit: &IndentUnit) -> usize {
         IndentUnit::Tab => 4,
     };
     b.iter().take_while(|c| **c == b' ').count().min(step)
+}
+
+/// The forms the case key cycles through, in this order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CaseForm {
+    Lower,
+    Title,
+    Upper,
+}
+
+const CASE_CYCLE: [CaseForm; 3] = [CaseForm::Lower, CaseForm::Title, CaseForm::Upper];
+
+/// The stretches of a text between its blank lines, each with the line
+/// breaks it holds.
+fn paragraphs(text: &str) -> Vec<std::ops::Range<usize>> {
+    let mut out = Vec::new();
+    let mut start = None;
+    let mut at = 0;
+    for line in text.split_inclusive('\n') {
+        match (line.trim().is_empty(), start) {
+            (true, Some(s)) => {
+                out.push(s..at);
+                start = None;
+            }
+            (false, None) => start = Some(at),
+            _ => {}
+        }
+        at += line.len();
+    }
+    if let Some(s) = start {
+        out.push(s..text.len());
+    }
+    out
+}
+
+/// The stretch from the start of the paragraph that holds a range's
+/// start to the end of the one that holds its end.
+fn paragraphs_around(source: &str, range: &std::ops::Range<usize>) -> std::ops::Range<usize> {
+    let mut start = source[..range.start].rfind('\n').map_or(0, |i| i + 1);
+    while start > 0 {
+        let line_end = start - 1;
+        let line_start = source[..line_end].rfind('\n').map_or(0, |i| i + 1);
+        if source[line_start..line_end].trim().is_empty() {
+            break;
+        }
+        start = line_start;
+    }
+    let mut end = source[range.end..]
+        .find('\n')
+        .map_or(source.len(), |i| range.end + i + 1);
+    while end < source.len() {
+        let line_end = source[end..].find('\n').map_or(source.len(), |i| end + i);
+        if source[end..line_end].trim().is_empty() {
+            break;
+        }
+        end = (line_end + 1).min(source.len());
+    }
+    start..end
+}
+
+/// The ranges of a markdown text that keep their letters under the case
+/// key: inline code with its backticks, the address of a link with its
+/// parentheses, an autolink or an HTML tag with its angle brackets, the
+/// address of a reference definition, and a formula with its dollar
+/// signs. Inline code closes with a run of backticks of the same length
+/// in the same paragraph, as the markdown rules say, so a lone backtick
+/// is text, and an escaped backtick outside code is text too. An
+/// address runs to the parenthesis that balances its own, on its line;
+/// an autolink holds no whitespace; a tag opens with a letter or a
+/// slash and runs to the `>` on its line, its attributes inside. A
+/// formula is what the markdown parser reads as one: `$` not followed
+/// by whitespace to the next `$`, which must not follow whitespace or
+/// precede a digit (a price), or `$$` to the next `$$`, on the
+/// paragraph; an escaped dollar sign is text, and so is a `$` whose
+/// closer is missing, the search going on from the `$` that could not
+/// close, which may open. A press costs about the text's length: a
+/// length of backtick run found unclosed, or a kind of dollar sign
+/// with none left on the paragraph, is not searched again in its
+/// paragraph, each `$` is visited once, the next `>` is searched once
+/// per region, and an autolink candidate is refused on its first
+/// whitespace.
+fn kept_pieces(text: &str) -> Vec<std::ops::Range<usize>> {
+    let mut kept = Vec::new();
+    for para in paragraphs(text) {
+        let mut unclosed: Vec<usize> = Vec::new();
+        let mut dollar_unclosed = [false, false];
+        // The next `>` from a position, remembered until the scan passes
+        // it: None once no `>` stands before the paragraph's end.
+        let mut next_gt: Option<Option<usize>> = None;
+        let mut line_start = true;
+        let mut i = para.start;
+        while i < para.end {
+            let rest = &text[i..para.end];
+            if line_start {
+                if let Some(address) = definition_address(rest) {
+                    kept.push(i + address.start..i + address.end);
+                    i += address.end;
+                    line_start = false;
+                    continue;
+                }
+            }
+            line_start = false;
+            let c = rest.chars().next().expect("inside the text");
+            if c == '\n' {
+                line_start = true;
+                i += 1;
+            } else if c == '\\' {
+                // An escaped character is text, a backtick or a dollar
+                // sign among them.
+                i += 1 + rest[1..].chars().next().map_or(0, char::len_utf8);
+            } else if c == '`' {
+                let ticks = rest.len() - rest.trim_start_matches('`').len();
+                let close = if unclosed.contains(&ticks) {
+                    None
+                } else {
+                    closing_ticks(&rest[ticks..], ticks)
+                };
+                match close {
+                    Some(at) => {
+                        let len = ticks + at + ticks;
+                        kept.push(i..i + len);
+                        i += len;
+                    }
+                    None => {
+                        if !unclosed.contains(&ticks) {
+                            unclosed.push(ticks);
+                        }
+                        i += ticks;
+                    }
+                }
+            } else if c == '$' {
+                let display = rest.starts_with("$$");
+                let signs = if display { 2 } else { 1 };
+                let opens = rest[signs..]
+                    .chars()
+                    .next()
+                    .is_some_and(|next| !next.is_ascii_whitespace());
+                if !opens || dollar_unclosed[usize::from(display)] {
+                    i += signs;
+                } else {
+                    match formula_end(&rest[signs..], display) {
+                        Formula::Closed(len) => {
+                            kept.push(i..i + signs + len);
+                            i += signs + len;
+                        }
+                        // The scan goes on from the `$` that could not
+                        // close: it may open a formula of its own.
+                        Formula::Opener(at) => i += signs + at,
+                        Formula::None => {
+                            dollar_unclosed[usize::from(display)] = true;
+                            i += signs;
+                        }
+                    }
+                }
+            } else if let Some(after) = rest.strip_prefix("](") {
+                match address_end(after) {
+                    Some(len) => {
+                        kept.push(i..i + 2 + len);
+                        i += 2 + len;
+                    }
+                    None => i += 2,
+                }
+            } else if c == '<' {
+                let gt = match next_gt {
+                    Some(Some(at)) if at > i => Some(at),
+                    Some(None) => None,
+                    _ => {
+                        let found = text[i + 1..para.end].find('>').map(|k| i + 1 + k);
+                        next_gt = Some(found);
+                        found
+                    }
+                };
+                let inner = gt.map(|at| &text[i + 1..at]);
+                match inner.filter(|inner| autolink_inner(inner) || tag_inner(inner)) {
+                    Some(inner) => {
+                        let len = 1 + inner.len() + 1;
+                        kept.push(i..i + len);
+                        i += len;
+                    }
+                    None => i += 1,
+                }
+            } else {
+                i += c.len_utf8();
+            }
+        }
+    }
+    kept
+}
+
+/// How the text after an opening `$` or `$$` reads.
+enum Formula {
+    /// A formula: the length from after the opener to the end of its
+    /// closer.
+    Closed(usize),
+    /// The opener is text, and the `$` at this offset could not close
+    /// it but may open a formula of its own: the scan goes on from it.
+    Opener(usize),
+    /// The opener is text, and no `$` of its kind is left on the
+    /// paragraph.
+    None,
+}
+
+/// Where the formula opened by a `$` or a `$$` ends, as the markdown
+/// parser reads it (pulldown-cmark 0.13.4, `src/firstpass.rs` and
+/// `src/parse.rs`): for an inline formula, a `$` closes when it does
+/// not follow whitespace and no digit follows it, which the page reads
+/// as a price; a `$` that cannot close ends the search from this
+/// opener, which is then text, and may open a formula of its own; a
+/// `$` that can neither close nor open is text and the search goes on
+/// past it. For a display formula, the next `$$` closes, a lone `$`
+/// inside being text. None when no `$` of the kind is left on the
+/// paragraph.
+fn formula_end(after: &str, display: bool) -> Formula {
+    let mut previous: Option<char> = None;
+    let mut chars = after.char_indices();
+    while let Some((i, c)) = chars.next() {
+        match c {
+            '\\' => {
+                previous = chars.next().map(|(_, escaped)| escaped);
+                continue;
+            }
+            '$' if display => {
+                if after[i + 1..].starts_with('$') {
+                    return Formula::Closed(i + 2);
+                }
+            }
+            '$' => {
+                let closes = previous.is_some_and(|p| !p.is_ascii_whitespace());
+                let price = after.as_bytes().get(i + 1).is_some_and(u8::is_ascii_digit);
+                if closes && !price {
+                    return Formula::Closed(i + 1);
+                }
+                let opens = after[i + 1..]
+                    .chars()
+                    .next()
+                    .is_some_and(|next| !next.is_ascii_whitespace());
+                if opens {
+                    return Formula::Opener(i);
+                }
+            }
+            _ => {}
+        }
+        previous = Some(c);
+    }
+    Formula::None
+}
+
+/// The offset in `after` of a run of exactly `ticks` backticks, the
+/// closer of a code span.
+fn closing_ticks(after: &str, ticks: usize) -> Option<usize> {
+    let mut from = 0;
+    while let Some(at) = after[from..].find('`') {
+        let run_start = from + at;
+        let run = after[run_start..].len() - after[run_start..].trim_start_matches('`').len();
+        if run == ticks {
+            return Some(run_start);
+        }
+        from = run_start + run;
+    }
+    None
+}
+
+/// The length of a link's address from after its `](` to its closing
+/// parenthesis, the parentheses inside it balanced, on its line. None
+/// when the line ends first.
+fn address_end(after: &str) -> Option<usize> {
+    let mut depth = 1;
+    let mut chars = after.char_indices();
+    while let Some((i, c)) = chars.next() {
+        match c {
+            '\n' => return None,
+            '\\' => {
+                chars.next();
+            }
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(i + 1);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Whether the text between a `<` and the next `>` is an autolink: an
+/// address with a scheme or an at sign and no whitespace. The candidate
+/// is refused on its first whitespace or `<` before any other look,
+/// and the scheme is sought in its first 32 bytes, the longest the
+/// markdown rules allow: on a paragraph of many `<` with a `>` near
+/// its end, each candidate runs to that `>`, and a scan of each to its
+/// end cost the square of the paragraph's length.
+fn autolink_inner(inner: &str) -> bool {
+    if inner.is_empty() || inner.contains(|c: char| c.is_whitespace() || c == '<') {
+        return false;
+    }
+    let scheme = inner
+        .bytes()
+        .take(33)
+        .position(|b| b == b':')
+        .is_some_and(|colon| {
+            let s = &inner[..colon];
+            s.len() >= 2
+                && s.starts_with(|c: char| c.is_ascii_alphabetic())
+                && s.chars()
+                    .all(|c| c.is_ascii_alphanumeric() || "+.-".contains(c))
+        });
+    scheme || inner.contains('@')
+}
+
+/// Whether the text between a `<` and the next `>` is an HTML tag: a
+/// name of letters after the `<`, or after a slash for a closing tag,
+/// then its attributes, on one line and holding no `<`.
+fn tag_inner(inner: &str) -> bool {
+    let name = inner.strip_prefix('/').unwrap_or(inner);
+    name.starts_with(|c: char| c.is_ascii_alphabetic()) && !inner.contains(['<', '\n'])
+}
+
+/// The address of a reference definition at the start of a line,
+/// `[label]: address`, as its range in the line. None for any other
+/// line.
+fn definition_address(line: &str) -> Option<std::ops::Range<usize>> {
+    let indent = line.len() - line.trim_start_matches(' ').len();
+    if indent > 3 || !line[indent..].starts_with('[') {
+        return None;
+    }
+    let label_end = indent + 1 + line[indent + 1..].find([']', '\n'])?;
+    if label_end == indent + 1 || !line[label_end..].starts_with("]:") {
+        return None;
+    }
+    let after = label_end + 2;
+    let start = after + line[after..].len() - line[after..].trim_start_matches([' ', '\t']).len();
+    let len = line[start..]
+        .find(char::is_whitespace)
+        .unwrap_or(line.len() - start);
+    (len > 0).then(|| start..start + len)
+}
+
+/// The text of a range cut into the pieces the case key changes and
+/// the pieces that keep their letters, from the kept ranges of the
+/// source. True marks a kept piece.
+fn pieces_of<'s>(
+    source: &'s str,
+    range: &std::ops::Range<usize>,
+    kept: &[std::ops::Range<usize>],
+) -> Vec<(&'s str, bool)> {
+    let mut pieces = Vec::new();
+    let mut at = range.start;
+    for k in kept {
+        if k.end <= at {
+            continue;
+        }
+        if k.start >= range.end {
+            break;
+        }
+        let (from, to) = (k.start.max(at), k.end.min(range.end));
+        if at < from {
+            pieces.push((&source[at..from], false));
+        }
+        pieces.push((&source[from..to], true));
+        at = to;
+    }
+    if at < range.end {
+        pieces.push((&source[at..range.end], false));
+    }
+    pieces
+}
+
+/// The pieces in a form, the kept ones as they are. A capital on each
+/// word goes on the first letter or digit after whitespace, the
+/// punctuation before it left alone, and the rest of the word is
+/// lowered. A tag is not on the page, so the text after it starts a
+/// word; inline code and an address are, and a word goes on after
+/// them. The letters change as strings, so a Greek sigma at the end of
+/// a word takes its final form.
+fn in_case(pieces: &[(&str, bool)], form: CaseForm) -> String {
+    let mut out = String::new();
+    let mut word_start = true;
+    for (piece, kept) in pieces {
+        if *kept {
+            out.push_str(piece);
+            word_start = piece.starts_with('<') && piece.ends_with('>');
+            continue;
+        }
+        match form {
+            CaseForm::Lower => out.push_str(&piece.to_lowercase()),
+            CaseForm::Upper => out.push_str(&piece.to_uppercase()),
+            CaseForm::Title => title_case(piece, &mut word_start, &mut out),
+        }
+    }
+    out
+}
+
+/// A text with a capital on each word, appended to `out`. `word_start`
+/// says whether the text begins a word, and says at the end whether a
+/// word begins after it.
+fn title_case(text: &str, word_start: &mut bool, out: &mut String) {
+    let mut rest = text;
+    while !rest.is_empty() {
+        let blank = rest.len() - rest.trim_start().len();
+        if blank > 0 {
+            out.push_str(&rest[..blank]);
+            *word_start = true;
+            rest = &rest[blank..];
+            continue;
+        }
+        let len = rest.find(char::is_whitespace).unwrap_or(rest.len());
+        let word = &rest[..len];
+        let first = (*word_start)
+            .then(|| word.char_indices().find(|(_, c)| c.is_alphanumeric()))
+            .flatten();
+        match first {
+            Some((i, c)) => {
+                out.push_str(&word[..i]);
+                out.extend(c.to_uppercase());
+                out.push_str(&word[i + c.len_utf8()..].to_lowercase());
+                *word_start = false;
+            }
+            None if *word_start => out.push_str(word),
+            None => out.push_str(&word.to_lowercase()),
+        }
+        rest = &rest[len..];
+    }
+}
+
+/// The next form of the cycle and the pieces in it, from the form they
+/// are in: the first form after it that reads differently, so that a
+/// single capital letter, both a capital on each word and upper case,
+/// goes to lower case. None when no letter the key changes is there.
+fn next_case(pieces: &[(&str, bool)]) -> Option<(CaseForm, String)> {
+    let has_letter = pieces
+        .iter()
+        .any(|(piece, kept)| !kept && piece.chars().any(char::is_alphabetic));
+    if !has_letter {
+        return None;
+    }
+    let text: String = pieces.iter().map(|(piece, _)| *piece).collect();
+    let current = CASE_CYCLE.iter().position(|f| in_case(pieces, *f) == text);
+    let first = current.map_or(0, |i| i + 1);
+    (0..CASE_CYCLE.len())
+        .map(|k| CASE_CYCLE[(first + k) % CASE_CYCLE.len()])
+        .map(|form| (form, in_case(pieces, form)))
+        .find(|(_, t)| *t != text)
+}
+
+/// The next case of the selection, or of the word under the caret:
+/// lower case, then a capital on each word, then upper case, then
+/// lower case again, from the form the text is in. The new text stays
+/// selected, so the key cycles on; with no selection the caret keeps
+/// its place in the word. In a markdown file the pieces that keep
+/// their letters (`kept_pieces`) are found on the paragraphs the text
+/// touches, and the word under the caret inside one is not the key's
+/// to change. None when nothing would change.
+pub fn case_edit(
+    source: &str,
+    selection: Option<std::ops::Range<usize>>,
+    caret: usize,
+    markdown: bool,
+) -> Option<MarkEdit> {
+    let selection = selection.filter(|r| !r.is_empty());
+    let had_selection = selection.is_some();
+    let range = selection.or_else(|| word_at(source, caret))?;
+    let kept = if markdown {
+        let around = paragraphs_around(source, &range);
+        kept_pieces(&source[around.clone()])
+            .into_iter()
+            .map(|k| around.start + k.start..around.start + k.end)
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let pieces = pieces_of(source, &range, &kept);
+    if !had_selection && pieces.iter().any(|(_, kept)| *kept) {
+        return None;
+    }
+    let (form, text) = next_case(&pieces)?;
+    let inner = range.start..range.start + text.len();
+    let caret = if had_selection {
+        inner.end
+    } else {
+        // The caret keeps its place by its letters, not by its byte
+        // offset: a letter before it may change length in the new form
+        // (a dotless i to I, a dotted I to i with a combining dot), and
+        // the old offset would fall inside a character.
+        let before = &source[range.start..caret.clamp(range.start, range.end)];
+        inner.start + in_case(&[(before, false)], form).len()
+    };
+    Some(MarkEdit {
+        replace: range,
+        text,
+        inner,
+        caret,
+    })
 }
 
 #[cfg(test)]
@@ -2749,5 +3245,281 @@ mod tests {
         ledger.edit(splice.range, &splice.text);
         assert_eq!(ledger.current(), base, "the split heals in one step");
         assert_eq!(caret, at);
+    }
+
+    fn case_of(text: &str) -> String {
+        let edit = case_edit(text, Some(0..text.len()), text.len(), true).expect("a change");
+        assert_eq!(edit.replace, 0..text.len());
+        assert_eq!(
+            edit.inner,
+            0..edit.text.len(),
+            "the new text stays selected"
+        );
+        assert_eq!(
+            edit.caret,
+            edit.text.len(),
+            "the caret at the selection's end"
+        );
+        edit.text
+    }
+
+    #[test]
+    fn the_case_key_cycles_a_word() {
+        assert_eq!(case_of("hello"), "Hello");
+        assert_eq!(case_of("Hello"), "HELLO");
+        assert_eq!(case_of("HELLO"), "hello");
+        assert_eq!(case_of("hElLo"), "hello", "a mixed word goes to lower case");
+    }
+
+    #[test]
+    fn the_case_key_cycles_a_sentence() {
+        assert_eq!(case_of("the quick brown fox"), "The Quick Brown Fox");
+        assert_eq!(case_of("The Quick Brown Fox"), "THE QUICK BROWN FOX");
+        assert_eq!(case_of("THE QUICK BROWN FOX"), "the quick brown fox");
+        assert_eq!(case_of("Hello world"), "hello world");
+        assert_eq!(case_of("well-known, don't"), "Well-known, Don't");
+    }
+
+    #[test]
+    fn the_case_key_changes_each_line_of_a_selection() {
+        assert_eq!(case_of("one two\nthree four"), "One Two\nThree Four");
+        assert_eq!(
+            case_of("One Two\nthree four"),
+            "one two\nthree four",
+            "the selection as a whole decides the form"
+        );
+    }
+
+    #[test]
+    fn the_case_key_spares_links_and_inline_code() {
+        assert_eq!(
+            case_of("see [the page](https://x.y/Path) and `fooBar` now"),
+            "See [The Page](https://x.y/Path) And `fooBar` Now"
+        );
+        assert_eq!(
+            case_of("See [The Page](https://x.y/Path) And `fooBar` Now"),
+            "SEE [THE PAGE](https://x.y/Path) AND `fooBar` NOW"
+        );
+    }
+
+    /// An HTML tag keeps its letters, its attributes with it, and so
+    /// does a formula as the markdown parser reads one; the dollar sign
+    /// of a price, an escaped one, a dollar with no closer and a lone
+    /// `<` are text.
+    #[test]
+    fn the_case_key_spares_tags_and_formulas() {
+        assert_eq!(
+            case_of("see <img src=\"images/Photo.png\"> here"),
+            "See <img src=\"images/Photo.png\"> Here"
+        );
+        assert_eq!(case_of("<b>bold</b> text"), "<b>Bold</b> Text");
+        assert_eq!(
+            case_of("the formula $\\Delta x$ holds"),
+            "The Formula $\\Delta x$ Holds"
+        );
+        assert_eq!(case_of("block $$\\Delta$$ done"), "Block $$\\Delta$$ Done");
+        assert_eq!(case_of("price $5-$10 each"), "Price $5-$10 Each");
+        assert_eq!(case_of("a < b and c > d"), "A < B And C > D");
+        assert_eq!(case_of("cost \\$x and $y"), "Cost \\$X And $Y");
+    }
+
+    /// A `$` that opens but meets no closer is text, and the search
+    /// goes on from the `$` that could not close, which may open: the
+    /// page reads the later formula, so the key keeps it. A kind of
+    /// dollar sign is given up only when none is left on the paragraph.
+    #[test]
+    fn a_formula_after_a_dollar_that_cannot_close_is_kept() {
+        assert_eq!(
+            case_of("spend $a then $delta x$ here"),
+            "Spend $A Then $delta x$ Here"
+        );
+        assert_eq!(
+            case_of("pay $5-$10 for $mass x$ now"),
+            "Pay $5-$10 For $mass x$ Now"
+        );
+        assert_eq!(
+            case_of("prices $5, $6, and $big x$ today"),
+            "Prices $5, $6, And $big x$ Today"
+        );
+        assert_eq!(
+            case_of("a $x$5 and $big y$ here"),
+            "A $X$5 And $big y$ Here"
+        );
+        assert_eq!(case_of("see $x and $y$ now"), "See $X And $y$ Now");
+        assert_eq!(
+            case_of("one $x then $ and y$ end"),
+            "One $x then $ and y$ End"
+        );
+        assert_eq!(case_of("none $x and $y and z"), "None $X And $Y And Z");
+    }
+
+    /// A press on a table of two hundred thousand rows holding a `<`
+    /// costs the paragraph's length, not its square: the closing `>` is
+    /// searched once per region. The bound is wide for a debug build;
+    /// the scan that searched from each `<` to the paragraph's end took
+    /// seconds here.
+    #[test]
+    fn the_case_key_on_a_long_table_with_lone_angle_brackets_costs_its_length() {
+        let source = "| a < b |\n".repeat(200_000);
+        let started = std::time::Instant::now();
+        let edit = case_edit(&source, None, 2, true);
+        let took = started.elapsed();
+        assert!(edit.is_some(), "the word changes");
+        assert!(took.as_secs_f32() < 1.0, "one press took {took:?}");
+        // A `>` near the end makes each `<` a candidate up to it: the
+        // candidate is refused on its first space, not scanned whole.
+        let source = format!("{source}| c > d |\n");
+        let started = std::time::Instant::now();
+        let edit = case_edit(&source, None, 2, true);
+        let took = started.elapsed();
+        assert!(edit.is_some(), "the word changes");
+        assert!(
+            took.as_secs_f32() < 1.0,
+            "one press with a `>` took {took:?}"
+        );
+    }
+
+    #[test]
+    fn the_case_key_takes_the_word_at_the_caret() {
+        let edit = case_edit("say hello there", None, 6, true).expect("the word");
+        assert_eq!(edit.replace, 4..9);
+        assert_eq!(edit.text, "Hello");
+        assert_eq!(edit.inner, 4..9);
+        assert_eq!(edit.caret, 6, "the caret keeps its place in the word");
+        assert!(
+            case_edit("say  there", None, 4, true).is_none(),
+            "between two spaces there is no word"
+        );
+    }
+
+    #[test]
+    fn the_word_at_the_caret_is_whole_across_a_joiner() {
+        let source = "\u{645}\u{6cc}\u{200c}\u{631}\u{648}\u{645} x";
+        assert_eq!(word_at(source, 9), Some(0..13), "from the second half");
+        assert_eq!(word_at(source, 2), Some(0..13), "from the first half");
+    }
+
+    #[test]
+    fn the_caret_stays_after_the_same_letters_when_their_bytes_change() {
+        // The dotless i is two bytes and its capital I one.
+        let edit = case_edit("ışık", None, 2, false).expect("the word");
+        assert_eq!(edit.text, "Işık");
+        assert!(edit.text.is_char_boundary(edit.caret));
+        assert_eq!(edit.caret, 1, "after the I");
+        // The dotted capital I lowers to an i with a combining dot, three bytes.
+        let edit = case_edit("İSTANBUL", None, 2, false).expect("the word");
+        assert_eq!(edit.text, "i\u{307}stanbul");
+        assert!(edit.text.is_char_boundary(edit.caret));
+        assert_eq!(edit.caret, 3, "after the i and its dot");
+        // A sharp s becomes two letters in upper case.
+        let edit = case_edit("Straße", None, 6, false).expect("the word");
+        assert_eq!(edit.text, "STRASSE");
+        assert_eq!(edit.caret, 6, "after both letters");
+    }
+
+    #[test]
+    fn a_single_capital_letter_cycles_with_its_lower_case() {
+        assert_eq!(case_of("A"), "a");
+        assert_eq!(case_of("a"), "A");
+        assert!(
+            case_edit("123", Some(0..3), 3, true).is_none(),
+            "no letter to change"
+        );
+    }
+
+    #[test]
+    fn the_caret_inside_inline_code_or_an_address_changes_nothing() {
+        assert!(
+            case_edit("in `fooBar` code", None, 7, true).is_none(),
+            "the word at the caret is inline code"
+        );
+        assert!(
+            case_edit("a [link](https://x.y/Path) here", None, 23, true).is_none(),
+            "the word at the caret is in the address"
+        );
+        let edit =
+            case_edit("in `fooBar` code", None, 7, false).expect("a code file spares nothing");
+        assert_eq!(edit.text, "foobar");
+    }
+
+    #[test]
+    fn an_autolink_and_a_reference_definition_keep_their_address() {
+        assert_eq!(
+            case_of("see <https://x.y/Path> now"),
+            "See <https://x.y/Path> Now"
+        );
+        assert_eq!(
+            case_of("[Ref]: https://x.y/Path"),
+            "[REF]: https://x.y/Path"
+        );
+    }
+
+    #[test]
+    fn an_address_with_balanced_parentheses_is_kept_whole() {
+        assert_eq!(
+            case_of("a [w](https://en.wikipedia.org/wiki/Foo_(Bar)_Baz) b"),
+            "A [W](https://en.wikipedia.org/wiki/Foo_(Bar)_Baz) B"
+        );
+    }
+
+    #[test]
+    fn a_selection_begun_inside_the_address_spares_it() {
+        let source = "see [x](https://x.y/Path) then\n";
+        let from = source.find("x.y").unwrap();
+        let to = source.len() - 1;
+        let edit = case_edit(source, Some(from..to), to, true).expect("a change");
+        assert_eq!(edit.text, "x.y/Path) Then");
+    }
+
+    #[test]
+    fn a_backtick_pairs_in_its_paragraph_only() {
+        assert_eq!(
+            case_of("one `Two\n\nThree` Four"),
+            "one `two\n\nthree` four",
+            "a lone backtick in each paragraph is no code"
+        );
+        assert_eq!(
+            case_of("esc \\`not Code\\` Text"),
+            "esc \\`not code\\` text",
+            "an escaped backtick is no mark"
+        );
+        assert_eq!(
+            case_of("fn Main() {}\n```\nSome `x` Text"),
+            "fn main() {}\n```\nsome `x` text",
+            "a fence with no closer in the paragraph is no code, the span after it is"
+        );
+    }
+
+    #[test]
+    fn a_code_file_spares_nothing() {
+        let source = "let s = \"`\"; let X = 1; let t = \"`\";";
+        let edit = case_edit(source, Some(0..source.len()), source.len(), false).expect("a change");
+        assert_eq!(edit.text, "let s = \"`\"; let x = 1; let t = \"`\";");
+    }
+
+    #[test]
+    fn the_final_sigma_and_a_decomposed_accent() {
+        assert_eq!(case_of("ΟΔΟΣ ΚΑΙ ΣΟΦΟΣ"), "οδος και σοφος");
+        assert_eq!(case_of("οδος και σοφος"), "Οδος Και Σοφος");
+        let source = "an e\u{301}cole here";
+        let at = source.find("le").unwrap();
+        let edit = case_edit(source, None, at, true).expect("the word");
+        assert_eq!(
+            edit.replace,
+            3..3 + "e\u{301}cole".len(),
+            "the accent is part of the word"
+        );
+        assert_eq!(edit.text, "E\u{301}cole");
+    }
+
+    #[test]
+    fn an_unclosed_address_costs_its_line_only() {
+        let source = "see [x](y and more text\n".repeat(40_000);
+        let start = std::time::Instant::now();
+        let edit = case_edit(&source, Some(0..source.len()), source.len(), true).expect("a change");
+        assert!(edit.text.starts_with("See [X](y And More Text\n"));
+        let took = start.elapsed();
+        println!("the case key on 960 KB of unclosed links: {took:?}");
+        assert!(took < std::time::Duration::from_secs(2), "{took:?}");
     }
 }

@@ -18,7 +18,7 @@ Oryx is a fast editor for markdown and code, and a reader for ebooks and comics.
 
 Oryx reads CommonMark and the GitHub Flavored Markdown extensions: tables, task lists, strikethrough, footnotes, alerts and math. It also reads the extended syntax listed by the Markdown Guide: heading IDs in braces, definition lists, subscript and superscript (`H~2~O`, `x^2^`), highlight (`==highlight==`) and abbreviations, whose expansion shows when the mouse is over them. Emoji shortcodes are replaced by the emoji: `:tada:` gives :tada:. The [examples](examples/) folder is installed with Oryx and shows the syntax in real documents.
 
-Lists nest as deep as needed, and a wrapped line lines up with the text above it, not with the bullet. Tables keep the alignment of each column, shade every other row, and wrap long cells. A link to another file opens that file in Oryx.
+Lists nest as deep as needed, and a wrapped line lines up with the text above it, not with the bullet. You can align the columns of a table, each on its own, and the alignment is kept when you copy the table. Every other row is shaded, and long cells wrap. A link to another file opens that file in Oryx.
 
 The five GitHub alerts (note, tip, important, warning, caution) each have their own color and title. A YAML front matter block at the top of a file is shown as a small panel above the document.
 
@@ -58,7 +58,9 @@ Oryx opens text in UTF-8 only. A file in an older encoding is refused, and so is
 
 ## Ebooks
 
-Oryx opens EPUB, FB2, MOBI and AZW3 (Kindle) books, and FB2 books zipped as `.fb2.zip` or `.fbz`. A book is shown as one continuous document, in your theme rather than in the book's own style. It keeps its structure: chapter headings, italics and bold (including those set by the book's stylesheet), images and the cover, tables and code. The first chapters show immediately, and the rest of the book loads in the background. The window title shows the book's title and its format, which helps when you have the same book in several formats.
+Oryx opens EPUB, FB2, MOBI and AZW3 (Kindle) books, and FB2 books zipped as `.fb2.zip` or `.fbz`. A book is shown as one continuous document, in your theme rather than in the book's own style. It keeps its structure: chapter headings, italics and bold (including those set by the book's stylesheet), images and the cover, tables and code. An image alone on its line is centered, the cover too, unless the book's stylesheet places it.
+
+The first chapters show immediately, and the rest of the book loads in the background. The window title shows the book's title and its format, which helps when you have the same book in several formats.
 
 Book text is justified: lines end at the same right edge, and the last line of each paragraph stays short, as in print. `Ctrl+J` turns justification off and on. Markdown files can be justified too. They start unjustified, and Oryx remembers the choice separately for books and for markdown.
 
@@ -98,7 +100,7 @@ The search field works like a text box: `Ctrl+Left` and `Ctrl+Right` move by wor
 
 `Ctrl+C` copies the selection with its formatting. It pastes into an email or a Word document with its headings, lists, tables, quotes, links and code, and with its pictures and formulas as images. A terminal or a text editor gets plain text. `Ctrl+Shift+C` copies the markdown source of the selection.
 
-A double click selects a word and highlights every other place where the same word appears. A triple click selects the paragraph, the line of code or the table cell, and a click with `Shift` held extends the selection to that point. Select all is instant whatever the size of the file. A selection stays when you zoom, change the theme or resize the window, and both kinds of copy work before a big file has finished loading.
+A double click selects a word and highlights every other place where the same word appears. A selection of several words on one line, made with the mouse or the keyboard, highlights its other occurrences too. A triple click selects the paragraph, the line of code or the table cell, and a click with `Shift` held extends the selection to that point. Select all is instant whatever the size of the file. A selection stays when you zoom, change the theme or resize the window, and both kinds of copy work before a big file has finished loading.
 
 ### The image viewer
 
@@ -188,6 +190,8 @@ With nothing selected, `Ctrl+C` copies the whole line, `Ctrl+X` cuts it, and `Ct
 
 With text selected, typing a bracket or a quote wraps the selection instead of replacing it. In a markdown file, `*`, `_` and a backtick do the same.
 
+`Ctrl+U` changes the case of the selection, or of the word under the cursor, in turn: lower case, a capital on each word, upper case. The new text stays selected, so the key can be pressed again. In a markdown file, the address of a link, inline code, an HTML tag and a formula keep their letters.
+
 `Alt+Up` and `Alt+Down` move the line or the selected lines, `Ctrl+Shift+D` duplicates them, `Ctrl+Shift+K` deletes them, and `Ctrl+/` comments them out in the style of the language. Each of these is undone with one `Ctrl+Z`.
 
 `Alt+Left` and `Alt+Right` go back and forward between the places you jumped from, in the editor too.
@@ -232,7 +236,7 @@ Oryx keeps a copy of the note while you type. If Oryx closes without asking, aft
 
 ## Themes
 
-Oryx comes with 33 themes, 11 of them made for Oryx. A theme is a TOML file that sets 51 colors, so every markdown element can have its own color.
+Oryx comes with 34 themes, 12 of them made for Oryx. A theme is a TOML file that sets 51 colors, so every markdown element can have its own color.
 
 `Ctrl+T` opens the list of themes. The arrow keys move through the list and show each theme on your document, `Enter` keeps the selected theme, and `Escape` goes back to the one you had.
 
@@ -242,7 +246,7 @@ The theme editor changes any of the 51 colors with a color picker, and the docum
 
 <p align="center"><img src="images/features-theme-editor.png" alt="The theme editor in Oryx" width="800"></p>
 
-The 11 original themes are `oryx-light` and its dark twin `oryx-dark`, `oryx-hero`, `oryx-sand`, `oryx-night`, `inkstone`, `ember`, `meadow`, `slate`, `be-vendible`, and `black-and-white`, made for printing. The others adapt the palettes of well-known editor themes, credited in the [README](README.md#credits).
+The 12 original themes are `oryx-light` and its dark twin `oryx-dark`, `oryx-hero`, `oryx-sand`, `oryx-night`, `inkstone`, `ember`, `meadow`, `slate`, `be-vendible`, `black-and-white`, made for printing, and `on-the-field`. The others adapt the palettes of well-known editor themes, credited in the [README](README.md#credits).
 
 > [!TIP]
 > To make a theme from a picture or a website you like, give an existing theme file to an AI model like Claude or Gemini, describe or link what you like, and ask it for an Oryx theme.

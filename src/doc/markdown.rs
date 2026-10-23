@@ -7,12 +7,12 @@ use std::ops::Range;
 use std::sync::Arc;
 
 use pulldown_cmark::{
-    BlockQuoteKind, CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd,
+    Alignment, BlockQuoteKind, CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd,
 };
 
 use crate::doc::model::{
-    seal_blocks, AlertKind, Block, BlockKind, CodeBody, DetailsGroup, Document, Marker, Span,
-    SpanImage, SpanScript,
+    seal_blocks, AlertKind, Block, BlockKind, CodeBody, ColumnAlign, DetailsGroup, Document,
+    Marker, Span, SpanImage, SpanScript,
 };
 
 pub fn parse(source: impl Into<Arc<str>>) -> Document {
@@ -196,6 +196,17 @@ struct TableAcc {
     header: Vec<Vec<Span>>,
     rows: Vec<Vec<Vec<Span>>>,
     row: Vec<Vec<Span>>,
+    aligns: Vec<ColumnAlign>,
+}
+
+/// The mark of a separator cell as the model's column alignment.
+fn column_align(mark: &Alignment) -> ColumnAlign {
+    match mark {
+        Alignment::None => ColumnAlign::Auto,
+        Alignment::Left => ColumnAlign::Left,
+        Alignment::Center => ColumnAlign::Center,
+        Alignment::Right => ColumnAlign::Right,
+    }
 }
 
 /// Accumulates one embedded HTML table; the tag scanner drives it. The
@@ -712,7 +723,12 @@ impl Builder {
                 };
                 self.item_markers.push(Some(marker));
             }
-            Tag::Table(_) => self.table = Some(TableAcc::default()),
+            Tag::Table(aligns) => {
+                self.table = Some(TableAcc {
+                    aligns: aligns.iter().map(column_align).collect(),
+                    ..TableAcc::default()
+                })
+            }
             Tag::TableHead | Tag::TableRow | Tag::TableCell => {}
             Tag::Emphasis => self.italic += 1,
             Tag::Strong => self.bold += 1,
@@ -818,6 +834,7 @@ impl Builder {
                     self.emit(BlockKind::Table {
                         header: t.header,
                         rows: t.rows,
+                        aligns: t.aligns,
                     });
                 }
             }
@@ -1716,6 +1733,7 @@ impl Builder {
         self.emit(BlockKind::Table {
             header: t.header,
             rows: t.rows,
+            aligns: Vec::new(),
         });
     }
 
@@ -1925,7 +1943,7 @@ impl Builder {
             | BlockKind::ListItem { spans, .. }
             | BlockKind::FootnoteDef { spans, .. }
             | BlockKind::Summary { spans, .. } => extent(spans.iter()),
-            BlockKind::Table { header, rows } => extent(
+            BlockKind::Table { header, rows, .. } => extent(
                 header
                     .iter()
                     .flatten()
@@ -2624,7 +2642,7 @@ mod tests {
     #[test]
     fn table_header_and_rows() {
         let d = parse("|a|b|\n|-|-|\n|c|**d**|");
-        let BlockKind::Table { header, rows } = &d.blocks[0].kind else {
+        let BlockKind::Table { header, rows, .. } = &d.blocks[0].kind else {
             panic!()
         };
         assert_eq!(header.len(), 2);
@@ -2634,12 +2652,29 @@ mod tests {
     }
 
     #[test]
+    fn a_table_keeps_the_alignment_of_its_columns() {
+        let d = parse("| L | C | R | P |\n|:--|:-:|--:|---|\n| 1 | 2 | 3 | 4 |");
+        let BlockKind::Table { aligns, .. } = &d.blocks[0].kind else {
+            panic!()
+        };
+        assert_eq!(
+            aligns,
+            &[
+                ColumnAlign::Left,
+                ColumnAlign::Center,
+                ColumnAlign::Right,
+                ColumnAlign::Auto
+            ]
+        );
+    }
+
+    #[test]
     fn html_table_with_thead_maps_header_and_rows() {
         let d = parse(
             "<table>\n<thead><tr><th>Name</th><th>Size</th></tr></thead>\n\
              <tbody><tr><td>alpha</td><td> 12 </td></tr></tbody>\n</table>",
         );
-        let BlockKind::Table { header, rows } = &d.blocks[0].kind else {
+        let BlockKind::Table { header, rows, .. } = &d.blocks[0].kind else {
             panic!()
         };
         assert_eq!(header.len(), 2);
@@ -2656,7 +2691,7 @@ mod tests {
             "<table><tr><th>K</th><th>V</th></tr>\
              <tr><td>a</td><td>1</td></tr></table>",
         );
-        let BlockKind::Table { header, rows } = &d.blocks[0].kind else {
+        let BlockKind::Table { header, rows, .. } = &d.blocks[0].kind else {
             panic!()
         };
         assert_eq!(header[0][0].text(&d.source), "K");
@@ -2669,7 +2704,7 @@ mod tests {
             "<table><tr><td>a</td><td>1</td></tr>\
              <tr><td>b</td><td>2</td></tr></table>",
         );
-        let BlockKind::Table { header, rows } = &d.blocks[0].kind else {
+        let BlockKind::Table { header, rows, .. } = &d.blocks[0].kind else {
             panic!()
         };
         assert!(header.is_empty());
@@ -3648,7 +3683,7 @@ mod tests {
     #[test]
     fn an_unclosed_html_table_still_emits() {
         let d = parse("<table><tr><td>alpha</td>");
-        let BlockKind::Table { header, rows } = &d.blocks[0].kind else {
+        let BlockKind::Table { header, rows, .. } = &d.blocks[0].kind else {
             panic!()
         };
         assert!(header.is_empty());

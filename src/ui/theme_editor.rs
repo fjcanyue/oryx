@@ -588,9 +588,12 @@ impl Overlay for ThemeEditor {
                 painter.fill(hex.0 + 28.0, hex.1, hex.2 - 28.0, 26.0, 4.0, ui.overlay_bg);
                 painter.stroke(hex.0 + 28.0, hex.1, hex.2 - 28.0, 26.0, 4.0, 1.0, border);
                 let text_x = hex.0 + 34.0;
+                let positions = painter.boundaries(text, CODE_FAMILY, 14.0, 400);
                 if let Some(range) = field.selection() {
-                    let from = painter.measure(&text[..range.start], CODE_FAMILY, 14.0, 400);
-                    let to = painter.measure(&text[..range.end], CODE_FAMILY, 14.0, 400);
+                    let from = field.offset_of(range.start, &positions);
+                    let to = field.offset_of(range.end, &positions);
+                    // On right-to-left text the end stands left of the start.
+                    let (from, to) = (from.min(to), from.max(to));
                     painter.fill(
                         text_x + from,
                         hex.1 + 5.0,
@@ -609,8 +612,8 @@ impl Overlay for ThemeEditor {
                     400,
                     ui.overlay_fg,
                 );
-                let caret = field.caret_offset(|s| painter.measure(s, CODE_FAMILY, 14.0, 400));
-                offsets = field.offsets(|s| painter.measure(s, CODE_FAMILY, 14.0, 400));
+                let caret = field.caret_offset(&positions);
+                offsets = positions;
                 painter.fill(
                     text_x + caret + 1.0,
                     hex.1 + 5.0,

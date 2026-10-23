@@ -67,6 +67,7 @@ use winit::event::{
 };
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{Key, ModifiersState, NamedKey};
+use winit::platform::modifier_supplement::KeyEventExtModifierSupplement;
 use winit::window::{CursorIcon, Window, WindowId};
 
 /// How often owed recolors land while highlights wash in.
@@ -87,6 +88,9 @@ const REHIGHLIGHT_REST: Duration = Duration::from_millis(400);
 /// How long after a touch pan the emulated mouse stays ignored, long
 /// enough to cover the click Windows synthesizes behind a lifted finger.
 const MOUSE_MUTE: Duration = Duration::from_millis(150);
+/// The pause after a keyboard selection before its other occurrences
+/// are looked for, so a held Shift+Right scans once.
+const OCCURRENCES_PAUSE: Duration = Duration::from_millis(150);
 
 /// How old the workspace index may be before entering a search view
 /// rescans behind it: the old answers stand while the walk runs.
@@ -333,6 +337,9 @@ pub fn run(
         hover_link: false,
         tooltip: None,
         sel_anchor: None,
+        left_held: false,
+        sel_grabbed: false,
+        page_press: false,
         last_click: None,
         selection: None,
         clipboard: None,
@@ -351,6 +358,7 @@ pub fn run(
         sidebar_canvas: None,
         search: None,
         occurrences: None,
+        occurrences_at: None,
         goto: None,
         pending_goto: launch_target,
         search_canvas: None,
@@ -369,8 +377,11 @@ pub fn run(
         ledger: None,
         undo: None,
         rehighlight_at: None,
+        burst_end: 0,
+        resumed: false,
         seams: HashMap::new(),
         spec_band: None,
+        guessed: HashMap::new(),
         bottom_hold: scroll::BottomHold::default(),
         confirm: None,
         help_stash: None,
@@ -433,6 +444,13 @@ pub fn run(
         app.cfg.direction = app.positions.direction(key);
     }
     let ended = event_loop.run_app(&mut app);
+    // The drop thread ends here, while the window and its display are
+    // alive: dropped with the app below, it would read the display the
+    // app frees at that moment.
+    #[cfg(target_os = "linux")]
+    {
+        app.drops = None;
+    }
     // Without a display no window can explain the ending, so the
     // terminal gets it in plain words, from the frame that failed or
     // from winit, which leaves its loop with the error's number.
@@ -513,17 +531,61 @@ fn outline_current(
     side: &Sidebar,
     lay: &LayoutDoc,
     scroll_y: f32,
+    view_h: f32,
+    pending: bool,
 ) -> Option<usize> {
     if side.tab() != sidebar::Tab::Outline {
         return None;
     }
+    let at_end = page_end_reached(scroll_y, view_h, lay.height, pending);
     let entry = outline
-        .current_of(scroll_y, |b| {
+        .current_of(scroll_y, view_h, at_end, |b| {
             (b != usize::MAX).then(|| lay.approx_top(b, 0)).flatten()
         })
         .map(|e| outline.visible_entry(e));
     outline.track_current(entry, sidebar::ROW_H, side.list_h());
     entry
+}
+
+/// Whether a selection drag is live: the left button held since a press
+/// that grabbed the anchor. A selection an editing key, a Shift+click's
+/// release or the keyboard leaves standing keeps its anchor for the
+/// highlight fold, and is not a drag: the pointer's move leaves it
+/// alone, and no background work waits on it. A press that grabbed
+/// nothing, on a row of the sidebar or a button, is no drag either.
+fn selection_drag(left_held: bool, grabbed: bool) -> bool {
+    left_held && grabbed
+}
+
+/// What a left release does, from the press's grab of an anchor,
+/// whether the press was on the page, the selection the drag leaves
+/// and the mode. `Settle` ends a drag that selected text. `Click` is a
+/// release that selected nothing: it follows the link under the cursor
+/// while reading. `Nothing` is the release of a press that grabbed
+/// nothing elsewhere than on the page, a row of the sidebar or a
+/// button: a selection and the anchor an editing key left stand.
+#[derive(Debug, PartialEq, Eq)]
+enum Release {
+    Nothing,
+    Settle,
+    Click,
+}
+
+fn release_act(grabbed: bool, on_page: bool, selected: bool, reading: bool) -> Release {
+    if grabbed && selected {
+        Release::Settle
+    } else if grabbed || (on_page && reading) {
+        Release::Click
+    } else {
+        Release::Nothing
+    }
+}
+
+/// Whether the view shows the end of the page: the scroll stops where
+/// the page's end meets the view's bottom. While the layout is pending,
+/// the height is the part placed so far, and its edge is not the end.
+fn page_end_reached(scroll_y: f32, view_h: f32, height: f32, pending: bool) -> bool {
+    !pending && scroll_y + view_h >= height - 1.0
 }
 
 /// A link target naming a file on disk: resolved against the document's
@@ -559,7 +621,7 @@ fn draw_caret(
     caret: CaretBox,
     color: Rgba,
 ) {
-    let value = ((color.r as u32) << 16) | ((color.g as u32) << 8) | color.b as u32;
+    let value = oryx::paint::pixel(color.r, color.g, color.b);
     let bar = ((1.5 * scale).round() as u32).max(1);
     let x0 = (caret.x.max(0.0) as u32).saturating_add(inset).min(width);
     let x1 = x0.saturating_add(bar).min(width);
@@ -964,6 +1026,68 @@ fn kept_layout(
     }
 }
 
+/// What the guess asks for among the code lines near the view: the
+/// first block with a language whose exact mark has not reached the end
+/// of its lines in view, from that mark to that end. Nothing while a
+/// guess is in flight, or the new one would drop it before it lands. A
+/// band that a landed guess covers (`guessed`, the ranges each block's
+/// guesses colored) asks for nothing either, or two cold blocks near
+/// the view alternate without end (issue #9). A band covered in part is
+/// asked whole, as after a jump to the end and a scroll back up.
+/// Nothing while a re-coloring is owed or a resumed sweep runs
+/// (`resting`): the lines below a keystroke keep the colors they had,
+/// shifted by the edit, until the sweep corrects them. A cold guess
+/// there would flash its colors below the caret for a frame or two,
+/// and one landing past the seam the sweep converges on would stand in
+/// place of the exact colors.
+fn speculation_target(
+    doc: &Document,
+    visible: &[(usize, std::ops::Range<usize>)],
+    in_flight: bool,
+    guessed: &HashMap<usize, Vec<std::ops::Range<usize>>>,
+    resting: bool,
+) -> Option<(usize, std::ops::Range<usize>)> {
+    if in_flight || resting {
+        return None;
+    }
+    for (block, lines) in visible {
+        let Some(BlockKind::CodeBlock {
+            language, exact, ..
+        }) = doc.blocks.get(*block).map(|b| &b.kind)
+        else {
+            continue;
+        };
+        if language.is_none() || *exact >= lines.end {
+            continue;
+        }
+        let band = (*exact).max(lines.start)..lines.end;
+        if guessed.get(block).is_some_and(|ranges| {
+            ranges
+                .iter()
+                .any(|r| r.start <= band.start && r.end >= band.end)
+        }) {
+            continue;
+        }
+        return Some((*block, band));
+    }
+    None
+}
+
+/// Records a landed guess among a block's ranges, merged with the ones
+/// it touches, so a scroll ahead of the sweep keeps one range per block.
+fn note_guess(ranges: &mut Vec<std::ops::Range<usize>>, landed: std::ops::Range<usize>) {
+    let mut merged = landed;
+    ranges.retain(|r| {
+        if r.start <= merged.end && merged.start <= r.end {
+            merged = merged.start.min(r.start)..merged.end.max(r.end);
+            false
+        } else {
+            true
+        }
+    });
+    ranges.push(merged);
+}
+
 /// The rendered page set aside while its source is edited. A return
 /// that changed no byte puts it back whole, so looking at the source
 /// and coming out costs nothing at any file size.
@@ -1015,6 +1139,10 @@ struct Stash {
     /// A parse was still streaming at the swap, so the model is
     /// partial; the return reopens from disk instead of restoring it.
     reopen: bool,
+    /// The document's seam table and the burst's end, for the return to
+    /// resume from.
+    seams: HashMap<usize, Vec<(usize, highlight::Seam)>>,
+    burst_end: usize,
 }
 
 /// The help document, parsed from the generated page.
@@ -1335,6 +1463,13 @@ fn startup_theme(name: Option<&str>) -> Theme {
 }
 
 struct App {
+    /// Files dropped on the window under Wayland, where winit delivers
+    /// no drop event; the drop thread fills it and wakes the loop.
+    /// Declared before the window: the fields drop in this order, so an
+    /// unwind ends the thread before the window frees the display
+    /// (`run` ends it first on a plain exit).
+    #[cfg(target_os = "linux")]
+    drops: Option<wayland_drop::Drops>,
     gfx: Option<Gfx>,
     document: Document,
     /// The file shown in the document area, None on an empty launch.
@@ -1419,10 +1554,6 @@ struct App {
     /// The wheel's fraction of a zoom notch not yet spent, while the
     /// chord key is held.
     wheel_zoom: f32,
-    /// Files dropped on the window under Wayland, where winit delivers
-    /// no drop event; the drop thread fills it and wakes the loop.
-    #[cfg(target_os = "linux")]
-    drops: Option<wayland_drop::Drops>,
     /// Emulated mouse events are dropped until then after a touch pan.
     mute_mouse_until: Option<Instant>,
     /// The reader zoom captured when a pinch began.
@@ -1443,8 +1574,23 @@ struct App {
     /// The expansion of the abbreviation under the cursor, shown in a
     /// tooltip beside it.
     tooltip: Option<String>,
-    /// Selection drag in progress: the caret grabbed at mouse down.
+    /// The anchor of the selection: grabbed at the mouse's press, or set
+    /// by an editing key that leaves the new text selected, so that the
+    /// highlight fold re-cuts it. A drag is live only while the left
+    /// button is held (`selecting`).
     sel_anchor: Option<ModelPos>,
+    /// The left button is held, from its press to its release.
+    left_held: bool,
+    /// The press that is held grabbed the anchor: a drag or a Shift+click
+    /// is live while the button stays down (`selection_drag`). An
+    /// editing key sets the anchor and not this mark.
+    sel_grabbed: bool,
+    /// The press that is held was on the page, with or without text
+    /// under it: its release is a click while reading, which follows
+    /// the link under the cursor (`release_act`), as a linked picture
+    /// alone on a page needs. Dropped with the grab wherever the release
+    /// goes elsewhere.
+    page_press: bool,
     /// The last document-area press, for the double and triple click
     /// chain: when, where, and how many clicks it had reached.
     last_click: Option<(Instant, f32, f32, u8)>,
@@ -1491,6 +1637,9 @@ struct App {
     /// The other places a double-clicked word stands at, lit while the
     /// word stays selected and the search bar is closed.
     occurrences: Option<Occurrences>,
+    /// A keyboard selection is looked up for its occurrences once the
+    /// keys have paused: when.
+    occurrences_at: Option<Instant>,
     /// The go to line field while it is open; never beside the search
     /// bar, since both stand in the same corner and take the keys.
     goto: Option<GotoState>,
@@ -1543,13 +1692,24 @@ struct App {
     /// When the edited block re-highlights, set by each keystroke and
     /// fired once typing rests.
     rehighlight_at: Option<Instant>,
+    /// The highest line an edit touched that no exact sweep has reached
+    /// since, shifted by each edit as a seam is; zero for none. The
+    /// resumed sweep converges only at a seam at or past it.
+    burst_end: usize,
+    /// A sweep resumed by the rest timer is running: no guess until it
+    /// is done, or a converged stop would vouch for the guess's lines.
+    resumed: bool,
     /// The live generation's seam table per block, from the exact
     /// sweep's arrivals: the (line, state) pairs a later sweep can
     /// resume from and converge against.
     seams: HashMap<usize, Vec<(usize, highlight::Seam)>>,
-    /// The band the standing speculation covers, so a resting view
-    /// asks once.
+    /// The guess in flight, cleared when its arrival lands; nothing
+    /// else is asked meanwhile, or the new guess would drop it.
     spec_band: Option<(usize, std::ops::Range<usize>)>,
+    /// Per block, the line ranges the landed guesses colored, kept until
+    /// the text changes. A band they cover is not asked again, or two
+    /// cold blocks near the view alternate without end (issue #9).
+    guessed: HashMap<usize, Vec<std::ops::Range<usize>>>,
     /// A jump to the bottom of a document the pass had not finished
     /// placing, waiting for the whole document to seat it.
     bottom_hold: scroll::BottomHold,
@@ -1903,6 +2063,7 @@ impl App {
             Command::FindNext => self.step_search(true),
             Command::FindPrev => self.step_search(false),
             Command::Replace => self.open_replace(),
+            Command::Regex => self.toggle_search_regex(),
             // The page states fit whole pages, so the vertical keys turn
             // them; the strip scrolls freely but its page keys snap to
             // page tops, so a page turn always means the drawn page.
@@ -1963,6 +2124,7 @@ impl App {
             Command::Italic => self.toggle_mark("*"),
             Command::Code => self.toggle_mark("`"),
             Command::Link => self.insert_link(),
+            Command::Case => self.cycle_case(),
             Command::MoveLineUp => self.move_lines(true),
             Command::MoveLineDown => self.move_lines(false),
             Command::DuplicateLines => self.duplicate_lines(),
@@ -2056,10 +2218,10 @@ impl App {
         let waiting =
             waiting_place(self.pending_row, self.pending_offset, None).filter(|_| sel.is_none());
         self.drop_waiting_landings();
-        let (offset, below) = match (waiting, self.layout.as_ref()) {
+        let (offset, below, image_bottom) = match (waiting, self.layout.as_ref()) {
             (Some(place), _) => {
                 let caret = waiting_caret(&self.document.source, place, remembered);
-                (caret::clamp(&self.document, caret), place.below)
+                (caret::clamp(&self.document, caret), place.below, None)
             }
             (None, Some(lay)) => {
                 let offset = caret::landing(
@@ -2072,12 +2234,18 @@ impl App {
                 );
                 let below = caret::place_box(lay, &self.document, offset, view_h)
                     .map_or(0.0, |(y, h)| caret::held(y, h, self.scroll_y, view_h));
-                (offset, below)
+                let bottom = caret::image_bottom(lay, &self.document, offset, self.scroll_y);
+                (offset, below, bottom)
             }
             // The path a reload and a file switch take: the layout is
             // fresh and the file may have shrunk since the mark was set.
-            (None, None) => (caret::clamp(&self.document, remembered.unwrap_or(0)), 0.0),
+            (None, None) => (
+                caret::clamp(&self.document, remembered.unwrap_or(0)),
+                0.0,
+                None,
+            ),
         };
+        let page_scroll = self.scroll_y;
         self.mode = edit::Mode::Edit;
         self.caret = Some(Caret::at(offset));
         self.ensure_ledger();
@@ -2103,6 +2271,13 @@ impl App {
             // two documents share no coordinate but the bytes. The row
             // the caret landed on takes the height its line had on the
             // page, so the line does not move under the reader's eyes.
+            // A tall image the page is scrolled into has no line in view
+            // to hold: its row ends where the image's bottom was, so the
+            // text under the image keeps its place instead.
+            let below = image_bottom.map_or(below, |bottom| {
+                let row_h = row_height(&self.document, &self.cfg);
+                caret::held(bottom - row_h, row_h, page_scroll, view_h)
+            });
             self.seat_editor_on(Place {
                 offset,
                 below,
@@ -2217,6 +2392,17 @@ impl App {
     /// whole when no byte changed, and is rebuilt from the buffer when
     /// one did, so unsaved edits show on the page and not just on disk.
     fn leave_edit(&mut self) {
+        // A re-coloring the editor still owed: a markdown page starts
+        // its coloring afresh below, so its timer is dropped (firing on
+        // the page, it would restart the worker with nothing and kill
+        // that coloring between chunks). A code file keeps its document
+        // and gets its resumed sweep now; dropped, the re-coloring
+        // never came, and the frontier stayed at the edit.
+        if self.edit_park.is_some() {
+            self.rehighlight_at = None;
+        } else if self.rehighlight_at.take().is_some() {
+            self.rehighlight_edited();
+        }
         // The replace row is an editor tool; reading keeps the plain bar.
         let dropped = self.search.as_mut().and_then(|state| state.replace.take());
         if let Some(row) = dropped {
@@ -2444,9 +2630,10 @@ impl App {
     /// keep their app-wide meaning; the typing keys are consumed and
     /// inert until the splice ledger arrives. Escape stays a command so
     /// the ladder handles it, and the function keys keep their rows.
-    fn edit_key(&mut self, key: &Key, ctrl: bool, shift: bool) -> bool {
-        // Alt chords belong to the desktop, never to typing.
-        if self.modifiers.alt_key() {
+    fn edit_key(&mut self, key: &Key, ctrl: bool, shift: bool, alt: bool) -> bool {
+        // Alt chords belong to the desktop, never to typing; a character
+        // typed with Option comes with Alt off (`alt_typing`).
+        if alt {
             return false;
         }
         if ctrl {
@@ -2695,16 +2882,7 @@ impl App {
         let Some(ledger) = self.ledger.as_mut() else {
             return;
         };
-        let touched = ledger.edit(range.clone(), text);
-        let removed = self
-            .document
-            .source
-            .get(range)
-            .map_or(0, |cut| cut.matches('\n').count());
-        let old_touched = touched.start..touched.start + removed + 1;
-        if let Some(table) = self.seams.get_mut(&0) {
-            highlight::shift_seams(table, old_touched, touched);
-        }
+        ledger.edit(range, text);
         let current = ledger.current();
         let visible = self
             .layout
@@ -2714,9 +2892,12 @@ impl App {
         self.document = edit::rendered_document(load::detect_with_text(&path, &current), &current);
         self.restart_layout();
         self.outline = OutlineTree::build(&self.document);
-        self.cancel_highlight();
-        self.rehighlight_at =
-            (!self.document.plain_file).then(|| Instant::now() + REHIGHLIGHT_REST);
+        // The rebuilt page has no colors past the load's deadline, and a
+        // sweep resumed against the old seam table would converge at
+        // once and vouch for lines that have none: the coloring starts
+        // afresh, as at an open, and the table with it.
+        self.start_highlight(load::pending(&self.document));
+        self.rehighlight_at = None;
         self.selection = None;
         self.sel_anchor = None;
         if let Some(state) = self.search.as_mut() {
@@ -2751,6 +2932,11 @@ impl App {
     /// The caret after an edit or an undo step: seated, blink woken,
     /// the next placed frame snapping the view to it.
     fn seat_caret_after_edit(&mut self, offset: usize) {
+        // An offset inside a character would be sliced by the next frame.
+        debug_assert!(
+            self.document.source.is_char_boundary(offset),
+            "a caret seated inside a character, at byte {offset}"
+        );
         self.caret = Some(Caret::at(offset));
         self.wake_caret();
         self.caret_snap = true;
@@ -2790,6 +2976,8 @@ impl App {
                 if let Some(table) = self.seams.get_mut(&0) {
                     highlight::shift_seams(table, old_lines.clone(), new_lines.clone());
                 }
+                self.burst_end = highlight::shift_line(self.burst_end, &old_lines, &new_lines)
+                    .max(new_lines.end);
                 // The model spliced; the layout follows in place, or a
                 // restart re-measures the already-correct model.
                 let lay = self.layout.as_mut().expect("settled layout");
@@ -2818,6 +3006,8 @@ impl App {
                 if let Some(table) = self.seams.get_mut(&0) {
                     highlight::shift_seams(table, old_touched.clone(), touched.clone());
                 }
+                self.burst_end =
+                    highlight::shift_line(self.burst_end, &old_touched, &touched).max(touched.end);
                 self.document = edit::reparse(
                     load::detect(&path),
                     &current,
@@ -2847,12 +3037,15 @@ impl App {
         self.count_after_edit();
         self.arm_pause_save();
         // The match set holds positions of the text that just changed;
-        // the next frame recomputes it against the edit.
+        // the next frame recomputes it against the edit. The lit
+        // occurrences go with it: an editing key that selects the new
+        // text again lights nothing.
         if let Some(state) = self.search.as_mut() {
             state.matches.clear();
             state.rects.clear();
             state.stale = true;
         }
+        self.occurrences = None;
         true
     }
 
@@ -3778,41 +3971,25 @@ impl App {
     /// timer's due action. The sweep resumes from the nearest stored
     /// seam at or before the exact frontier, which every splice clamps
     /// to the burst's first touched line, and it converges against the
-    /// shifted table: typing anywhere re-colors about one chunk, not
-    /// the block.
+    /// shifted table past the burst's last touched line: typing
+    /// anywhere re-colors about one chunk, not the block, and a burst
+    /// of edits far apart re-colors the lines between them.
     fn rehighlight_edited(&mut self) {
-        let pending = match self.document.blocks.first().map(|b| &b.kind) {
-            Some(BlockKind::CodeBlock {
-                language,
-                lines,
-                exact,
-                ..
-            }) if !self.document.plain_file => {
-                let resume = self.seams.get(&0).map(|table| {
-                    let at = table.partition_point(|(line, _)| *line <= *exact);
-                    let (start_line, seam) = match at.checked_sub(1).and_then(|i| table.get(i)) {
-                        Some((line, seam)) => (*line, Some(seam.clone())),
-                        None => (0, None),
-                    };
-                    highlight::Resume {
-                        start_line,
-                        seam,
-                        expected: table[at..].to_vec(),
-                    }
-                });
-                vec![PendingBlock {
-                    block: 0,
-                    language: language.clone(),
-                    source: self.document.source.clone(),
-                    lines: lines.clone(),
-                    resume,
-                }]
-            }
-            _ => Vec::new(),
-        };
+        if self.document.plain_file {
+            return;
+        }
+        let pending = load::pending_from(&self.document, &self.seams, self.burst_end);
+        if pending.is_empty() {
+            return;
+        }
         // The resumed sweep converges against the stored table, which
         // therefore survives the start; its arrivals upsert their own
-        // lines.
+        // lines. A guess still in flight is dropped by the start, and
+        // none is asked until the sweep is done: a guess landing on
+        // lines a converged stop then vouches for would stand in place
+        // of the exact colors.
+        self.spec_band = None;
+        self.resumed = true;
         let waker = self.waker.clone();
         self.highlighter.start(pending, move || waker());
     }
@@ -4006,6 +4183,33 @@ impl App {
         }
         self.type_edit_at(edit.replace, &edit.text, Kind::Structural, edit.caret);
         if had_selection && !edit.inner.is_empty() {
+            if let Some(s) = caret::span_selection(&self.document, edit.inner.start, edit.inner.end)
+            {
+                self.sel_anchor = Some(s.start);
+                self.selection = Some(s);
+            }
+        }
+        self.rehighlight_now();
+    }
+
+    /// Ctrl+U: the next case of the selection, or of the word under the
+    /// caret. The new text stays selected, so the key cycles on. Editor
+    /// only, as the other editing keys.
+    fn cycle_case(&mut self) {
+        if self.mode != edit::Mode::Edit {
+            return;
+        }
+        let selection = self.selection_source_range();
+        let had_selection = selection.is_some();
+        let caret = self.caret.map_or(0, |c| c.offset);
+        let markdown = self.markdown_source();
+        let Some(edit) =
+            edit::manners::case_edit(&self.document.source, selection, caret, markdown)
+        else {
+            return;
+        };
+        self.type_edit_at(edit.replace, &edit.text, Kind::Structural, edit.caret);
+        if had_selection {
             if let Some(s) = caret::span_selection(&self.document, edit.inner.start, edit.inner.end)
             {
                 self.sel_anchor = Some(s.start);
@@ -4285,6 +4489,10 @@ impl App {
                 (Some(a), Some(c)) if a != c => caret::span_selection(&self.document, a, c),
                 _ => None,
             };
+            self.occurrences_at = self
+                .selection
+                .is_some()
+                .then(|| Instant::now() + OCCURRENCES_PAUSE);
             self.band = None;
             self.request_redraw();
             return;
@@ -4632,8 +4840,8 @@ impl App {
     /// Escape closes, digits and the colon type, and the field's own
     /// editing keys act on it. Everything else falls through to the
     /// app-wide commands, never to the document.
-    fn goto_key(&mut self, key: &Key, ctrl: bool, shift: bool) -> bool {
-        if self.goto.is_none() || self.modifiers.alt_key() {
+    fn goto_key(&mut self, key: &Key, ctrl: bool, shift: bool, alt: bool) -> bool {
+        if self.goto.is_none() || alt {
             return false;
         }
         match key {
@@ -4951,16 +5159,13 @@ impl App {
     /// Keys the open search bar consumes: query edits, Enter stepping,
     /// Escape closing. Everything else falls through to the document, so
     /// scrolling and shortcuts stay live under the bar.
-    fn search_key(&mut self, key: &Key, ctrl: bool, shift: bool) -> bool {
+    fn search_key(&mut self, key: &Key, ctrl: bool, shift: bool, alt: bool) -> bool {
         if self.search.is_none() {
             return false;
         }
-        // Alt chords belong to the desktop, except the bar's own toggle.
-        if self.modifiers.alt_key() {
-            if matches!(key, Key::Character(s) if s.eq_ignore_ascii_case("r")) {
-                self.toggle_search_regex();
-                return true;
-            }
+        // Alt chords belong to the desktop; the bar's own `Alt+R` is a
+        // row of the keymap, run as a command.
+        if alt {
             return false;
         }
         match key {
@@ -5350,14 +5555,24 @@ impl App {
         };
         if let Some(sel) = sel {
             self.selection = Some(sel);
-            self.occurrences = if paragraph {
-                None
+            // A double-clicked word lights its whole-word matches; a
+            // triple-clicked paragraph, line of code or table cell lights
+            // its text as a selection does, a line of code its identical
+            // lines among them.
+            let matched = if paragraph {
+                occurrences::Match::Text
             } else {
-                occurrences::find(&self.document, sel)
+                occurrences::Match::Word
             };
+            self.occurrences = occurrences::find(&self.document, sel, matched);
             self.band = None;
             self.request_redraw();
         }
+    }
+
+    /// Whether a selection drag is live (`selection_drag`).
+    fn selecting(&self) -> bool {
+        selection_drag(self.left_held, self.sel_grabbed)
     }
 
     /// Grabs a selection anchor at the cursor and clears any previous
@@ -5369,6 +5584,8 @@ impl App {
             return;
         };
         self.sel_anchor = selection::pos_at(lay, &self.document, &mut self.fonts, x, y);
+        self.sel_grabbed = self.sel_anchor.is_some();
+        self.page_press = true;
         if self.selection.take().is_some() {
             self.band = None;
             if let Some(gfx) = self.gfx.as_ref() {
@@ -5419,6 +5636,7 @@ impl App {
         };
         self.last_click = None;
         self.sel_anchor = Some(anchor);
+        self.sel_grabbed = true;
         self.extend_selection();
         if self.mode == edit::Mode::Edit {
             self.caret_to_selection_edge();
@@ -5426,27 +5644,68 @@ impl App {
         true
     }
 
-    /// Ends a selection drag. A drag that never left its starting caret is
-    /// a click and follows the link under the cursor instead.
+    /// The other occurrences of a selection that settled: a drag's or a
+    /// Shift+click's release, or a keyboard selection after its pause.
+    /// A selection already looked up keeps its set, and the search bar's
+    /// own matches rule while it is open.
+    fn light_selection(&mut self) {
+        let Some(sel) = self.selection.filter(|s| !s.is_empty()) else {
+            return;
+        };
+        if self.search.is_some() || self.occurrences.as_ref().is_some_and(|f| f.word == sel) {
+            return;
+        }
+        self.occurrences = occurrences::find(&self.document, sel, occurrences::Match::Text);
+        if self.occurrences.is_some() {
+            self.band = None;
+            self.request_redraw();
+        }
+    }
+
+    /// Ends a selection drag at the button's release (`release_act`): a
+    /// drag that selected text settles, a release that selected nothing
+    /// on the page is a click and follows the link under the cursor
+    /// while reading, and the release of a press that grabbed nothing
+    /// elsewhere, on a row of the sidebar or a button, changes nothing:
+    /// a selection and the anchor an editing key left stand as they are.
     fn end_selection(&mut self) {
-        self.sel_anchor = None;
-        if self.selection.is_some_and(|s| !s.is_empty()) {
-            // The drag's release point is where editing continues.
-            if self.mode == edit::Mode::Edit {
-                self.caret_to_selection_edge();
+        // A double or a triple click dropped the anchor at its press and
+        // found its own occurrences; a drag or a Shift+click kept it.
+        let grabbed = std::mem::take(&mut self.sel_grabbed);
+        let on_page = std::mem::take(&mut self.page_press);
+        let selected = self.selection.is_some_and(|s| !s.is_empty());
+        match release_act(grabbed, on_page, selected, self.mode == edit::Mode::Read) {
+            Release::Nothing => return,
+            Release::Settle => {
+                self.sel_anchor = None;
+                // The drag's release point is where editing continues.
+                if self.mode == edit::Mode::Edit {
+                    self.caret_to_selection_edge();
+                }
+                self.light_selection();
+                if let Some(gfx) = self.gfx.as_ref() {
+                    gfx.window.request_redraw();
+                }
             }
-            if let Some(gfx) = self.gfx.as_ref() {
-                gfx.window.request_redraw();
-            }
-        } else {
-            self.selection = None;
-            // While editing, a click already placed the caret; a link
-            // never follows.
-            if self.mode == edit::Mode::Read {
-                self.link_press();
+            Release::Click => {
+                self.sel_anchor = None;
+                self.selection = None;
+                // While editing, a click already placed the caret; a link
+                // never follows.
+                if self.mode == edit::Mode::Read {
+                    self.link_press();
+                }
             }
         }
         self.fold_highlights();
+    }
+
+    /// The press that is held ends elsewhere than in a release on the
+    /// page: its grab and its mark go, so that a later release does not
+    /// end a drag that never was.
+    fn drop_grab(&mut self) {
+        self.sel_grabbed = false;
+        self.page_press = false;
     }
 
     /// A left button press at the current cursor, from the mouse or a
@@ -5456,6 +5715,9 @@ impl App {
         // own release.
         self.search_mouse = false;
         self.search_drag = false;
+        // The pause of a keyboard selection ends with the press: a drag
+        // looks its selection up at its own release.
+        self.occurrences_at = None;
         if let Some(overlay) = self.overlay.as_mut() {
             self.overlay_mouse = true;
             let (x, y) = (
@@ -5583,6 +5845,9 @@ impl App {
         self.search_drag = false;
         if let Some(overlay) = self.overlay.as_mut() {
             overlay.release();
+            // An overlay opened while the button was held on the page
+            // takes the release: the press's grab ends here.
+            self.drop_grab();
         } else if self.search_mouse {
             self.search_mouse = false;
         } else if let Some(drag) = self.drag.take() {
@@ -5644,8 +5909,11 @@ impl App {
                     PanTarget::Document
                 };
                 // The pre-slop tail of the gesture may have pressed the
-                // emulated mouse button; a swipe selects nothing.
+                // emulated mouse button; a swipe selects nothing, and the
+                // button counts as up, its release being muted.
                 self.sel_anchor = None;
+                self.drop_grab();
+                self.left_held = false;
                 self.drag = None;
                 match self.pan_target {
                     PanTarget::Sidebar => self.move_ownership(PaneAct::WheelSidebar),
@@ -5691,7 +5959,13 @@ impl App {
             }
             touch::Act::PinchStart => {
                 self.pinch_base = self.user_zoom;
+                // As at a pan's start: the pre-slop tail of the gesture
+                // may have pressed the emulated mouse button, and a pinch
+                // selects nothing, so the button counts as up, or the
+                // layout would wait until the fingers lift.
                 self.sel_anchor = None;
+                self.drop_grab();
+                self.left_held = false;
                 self.drag = None;
             }
             touch::Act::Pinch { factor } => {
@@ -5735,7 +6009,10 @@ impl App {
     /// their first line, so the seam table rebuilds from its arrivals.
     fn start_highlight(&mut self, pending: Vec<PendingBlock>) {
         self.seams.clear();
+        self.burst_end = 0;
+        self.resumed = false;
         self.spec_band = None;
+        self.guessed.clear();
         let waker = self.waker.clone();
         self.highlighter.start(pending, move || waker());
     }
@@ -5746,7 +6023,9 @@ impl App {
     /// generation recorded. Stale arrivals drop at the drain, so the
     /// table only ever learns from the live generation.
     fn cancel_highlight(&mut self) {
+        self.resumed = false;
         self.spec_band = None;
+        self.guessed.clear();
         let waker = self.waker.clone();
         self.highlighter.start(Vec::new(), move || waker());
     }
@@ -5754,10 +6033,11 @@ impl App {
     /// Colors the visible band ahead of the exact sweep when the view
     /// rests on lines the sweep has not reached, so a jump into a huge
     /// file does not sit on plain text for the length of the wash. The
-    /// band is padded a screen each way; a band the standing request
-    /// already covers asks for nothing.
+    /// band is padded a screen each way; one guess is in flight at a
+    /// time, and a band a landed guess covers asks for nothing
+    /// (`speculation_target`).
     fn maybe_speculate(&mut self) {
-        if self.document.plain_file || self.drag.is_some() || self.sel_anchor.is_some() {
+        if self.document.plain_file || self.drag.is_some() || self.selecting() {
             return;
         }
         let Some(lay) = self.layout.as_ref() else {
@@ -5769,39 +6049,38 @@ impl App {
             &self.document,
             self.scroll_y - view_h..self.scroll_y + 2.0 * view_h,
         );
-        for (block, lines) in visible {
-            let Some(BlockKind::CodeBlock {
-                language,
-                lines: body,
-                exact,
-                ..
-            }) = self.document.blocks.get(block).map(|b| &b.kind)
-            else {
-                continue;
-            };
-            if language.is_none() || *exact >= lines.end {
-                continue;
-            }
-            let band = (*exact).max(lines.start)..lines.end;
-            if self
-                .spec_band
-                .as_ref()
-                .is_some_and(|(b, r)| *b == block && r.start <= band.start && r.end >= band.end)
-            {
-                continue;
-            }
-            let job = highlight::SpecJob {
-                block,
-                language: language.clone(),
-                source: Arc::clone(&self.document.source),
-                lines: body.clone(),
-                range: band.clone(),
-            };
-            self.spec_band = Some((block, band));
-            let waker = self.waker.clone();
-            self.highlighter.speculate(job, move || waker());
-            return;
+        // A resumed sweep whose last fold still saw the worker running
+        // leaves the flag set: it is read here, so it is cleared here.
+        if self.resumed && !self.highlighter.is_running() {
+            self.resumed = false;
         }
+        let Some((block, band)) = speculation_target(
+            &self.document,
+            &visible,
+            self.spec_band.is_some(),
+            &self.guessed,
+            self.rehighlight_at.is_some() || self.resumed,
+        ) else {
+            return;
+        };
+        let Some(BlockKind::CodeBlock {
+            language,
+            lines: body,
+            ..
+        }) = self.document.blocks.get(block).map(|b| &b.kind)
+        else {
+            return;
+        };
+        let job = highlight::SpecJob {
+            block,
+            language: language.clone(),
+            source: Arc::clone(&self.document.source),
+            lines: body.clone(),
+            range: band.clone(),
+        };
+        self.spec_band = Some((block, band));
+        let waker = self.waker.clone();
+        self.highlighter.speculate(job, move || waker());
     }
 
     /// Hands the full source to the parse worker; the prefix on screen
@@ -5831,7 +6110,7 @@ impl App {
     /// Lands a parked parse delivery. Deferred while any drag is live: a
     /// replace would pull the layout out from under it.
     fn fold_parse(&mut self) {
-        if self.sel_anchor.is_some() || self.drag.is_some() {
+        if self.selecting() || self.drag.is_some() {
             return;
         }
         if let Some(delivered) = self.parser.drain() {
@@ -5904,7 +6183,7 @@ impl App {
                 state.stale = true;
             }
             if let Some(found) = self.occurrences.take() {
-                self.occurrences = occurrences::find(&self.document, found.word);
+                self.occurrences = occurrences::find(&self.document, found.word, found.matched);
             }
         } else {
             self.layout = None;
@@ -5956,12 +6235,25 @@ impl App {
         }
         for arrival in &arrivals {
             load::fold(&mut self.document, arrival);
+            let line = arrival.start_line + arrival.spans.len();
             // The exact sweep's seams feed the table a later sweep
-            // resumes from; speculative arrivals never do.
-            if let (Some(seam), false) = (&arrival.seam, arrival.speculative) {
-                let line = arrival.start_line + arrival.spans.len();
-                let table = self.seams.entry(arrival.block).or_default();
-                highlight::record_seam(table, line, seam);
+            // resumes from; speculative arrivals never do. A landed
+            // guess is remembered instead, so it is not asked again.
+            match (&arrival.seam, arrival.speculative) {
+                (Some(seam), false) => {
+                    let table = self.seams.entry(arrival.block).or_default();
+                    highlight::record_seam(table, line, seam);
+                }
+                (_, true) => {
+                    // The guess in flight landed: the next cold block
+                    // may be asked.
+                    self.spec_band = None;
+                    note_guess(
+                        self.guessed.entry(arrival.block).or_default(),
+                        arrival.start_line..line,
+                    );
+                }
+                (None, false) => {}
             }
         }
         if let Some((anchor, ends)) = carried {
@@ -5975,6 +6267,19 @@ impl App {
                 .iter()
                 .map(|a| (a.block, a.start_line..a.start_line + a.spans.len())),
         );
+        // The burst's end is behind the frontier once the exact sweep
+        // has colored the lines up to it; a resumed sweep that ended
+        // lets the guesses in again.
+        let frontier = self.document.blocks.first().map_or(0, |b| match &b.kind {
+            BlockKind::CodeBlock { exact, .. } => *exact,
+            _ => 0,
+        });
+        if frontier >= self.burst_end {
+            self.burst_end = 0;
+        }
+        if !self.highlighter.is_running() {
+            self.resumed = false;
+        }
         // Recolors land in waves: the model folds immediately, but the
         // run vector rebuilds at most once per wave, so a trickling
         // wash-in pays a handful of ranged rebuilds, not hundreds.
@@ -7531,6 +7836,11 @@ impl App {
             self.parser.cancel();
             self.parse_pending = false;
         }
+        // The document's seam table and the burst it still owes a
+        // re-coloring for go with it, so that the return resumes from
+        // them instead of sweeping the file again from line 0.
+        let seams = std::mem::take(&mut self.seams);
+        let burst_end = self.burst_end;
         self.start_highlight(Vec::new());
         self.rehighlight_at = None;
         self.close_search();
@@ -7563,8 +7873,15 @@ impl App {
             cfg: self.cfg.clone(),
             theme: self.theme.clone(),
             reopen,
+            seams,
+            burst_end,
         }));
         self.document = markdown_help();
+        // The page's code blocks get the exact sweep a file gets at
+        // open. Left cold, they are colored by the guess of the band in
+        // view alone, and two of them near the view keep the guess
+        // running without end (issue #9).
+        self.start_highlight(load::pending(&self.document));
         self.outline = OutlineTree::build(&self.document);
         self.cfg.justify = justify_pref(&self.config, &self.document);
         // The help page opens in automatic direction. The direction of
@@ -7657,7 +7974,23 @@ impl App {
         self.band = None;
         self.pending_band_for = None;
         self.close_search();
-        self.start_highlight(load::pending(&self.document));
+        // Recolors still owed name the help page's blocks, not this
+        // document's. Its seam table comes back with it, and the blocks
+        // still to color resume from it: a key after the help page
+        // re-colors from the edit, not the file from line 0.
+        self.pending_recolor.clear();
+        self.seams = stash.seams;
+        self.burst_end = stash.burst_end;
+        self.spec_band = None;
+        self.guessed.clear();
+        let pending = load::pending_from(&self.document, &self.seams, self.burst_end);
+        // A sweep resumed from the table converges against it, so no
+        // guess is asked while it runs, as after the timer's firing: a
+        // guess landing first would be vouched for by the converged
+        // stop.
+        self.resumed = !pending.is_empty();
+        let waker = self.waker.clone();
+        self.highlighter.start(pending, move || waker());
         if self.mode == edit::Mode::Edit {
             self.wake_caret();
         }
@@ -8408,11 +8741,7 @@ impl App {
     /// selection and scrollbar dragging stay smooth; the queue resumes on
     /// release.
     fn slice(&mut self, budget: Duration) {
-        if !self.pass_active()
-            || self.drag.is_some()
-            || self.sel_anchor.is_some()
-            || self.overlay_mouse
-        {
+        if !self.pass_active() || self.drag.is_some() || self.selecting() || self.overlay_mouse {
             return;
         }
         let before = self.doc_height();
@@ -8665,10 +8994,8 @@ impl App {
         // An open search counts as interactive: every keystroke edits the
         // highlights, so frames paint direct and the expensive band
         // rebuild waits until the bar closes.
-        let interactive = self.drag.is_some()
-            || self.sel_anchor.is_some()
-            || self.overlay_mouse
-            || self.search.is_some();
+        let interactive =
+            self.drag.is_some() || self.selecting() || self.overlay_mouse || self.search.is_some();
         // The materialized window slides to the scroll position before
         // anything reads geometry: the full band when settled, only the
         // viewport under a live gesture.
@@ -8819,6 +9146,9 @@ impl App {
                 .view(frame_y, size.height),
         };
 
+        // Read before the frame borrows the graphics: the outline's end
+        // of the page waits for a layout still pending.
+        let pending = self.layout_pending();
         let Some(gfx) = self.gfx.as_mut() else {
             return;
         };
@@ -8900,7 +9230,7 @@ impl App {
         // canvas, fullscreen included.
         if self.mode == edit::Mode::Edit {
             let color = self.theme.ui.selection_bg;
-            let value = ((color.r as u32) << 16) | ((color.g as u32) << 8) | color.b as u32;
+            let value = oryx::paint::pixel(color.r, color.g, color.b);
             let h = (self.scale as u32).max(1).min(size.height);
             for y in 0..h {
                 let row = (y * size.width) as usize;
@@ -8946,7 +9276,14 @@ impl App {
             // source is on screen it holds the mark it had rather than
             // tracking a layout of a different model.
             let current = if self.mode == edit::Mode::Read {
-                outline_current(&mut self.outline, side, lay, self.scroll_y)
+                outline_current(
+                    &mut self.outline,
+                    side,
+                    lay,
+                    self.scroll_y,
+                    size.height as f32,
+                    pending,
+                )
             } else {
                 self.outline.last_current()
             };
@@ -9193,6 +9530,14 @@ impl ApplicationHandler for App {
                 wake.by(at);
             }
         }
+        if let Some(at) = self.occurrences_at {
+            if Instant::now() >= at {
+                self.occurrences_at = None;
+                self.light_selection();
+            } else {
+                wake.by(at);
+            }
+        }
         if self.mode == edit::Mode::Edit && self.caret.is_some() && self.focused {
             let now = Instant::now();
             if now >= self.blink_flip {
@@ -9402,7 +9747,10 @@ impl ApplicationHandler for App {
             }
             WindowEvent::Focused(false) => {
                 // The caret goes with the focus, as in a native text box.
+                // The button's release goes elsewhere too.
                 self.focused = false;
+                self.left_held = false;
+                self.drop_grab();
                 self.request_redraw();
                 self.flush_note_copy();
                 if self.config.save_on_focus_loss {
@@ -9412,17 +9760,19 @@ impl ApplicationHandler for App {
             WindowEvent::ModifiersChanged(m) => self.modifiers = m.state(),
             WindowEvent::Ime(event) => self.ime(event),
             WindowEvent::KeyboardInput {
-                event:
-                    KeyEvent {
-                        logical_key,
-                        physical_key,
-                        state: ElementState::Pressed,
-                        repeat,
-                        ..
-                    },
+                event,
                 is_synthetic,
                 ..
-            } => {
+            } if event.state == ElementState::Pressed => {
+                // The keycap, the key's own character with no modifier,
+                // is what a chord with Option is matched by on a Mac.
+                let keycap = event.key_without_modifiers();
+                let KeyEvent {
+                    logical_key,
+                    physical_key,
+                    repeat,
+                    ..
+                } = event;
                 self.fling = None;
                 // A synthetic press reports a key that was already held
                 // when focus arrived, not a keystroke. On Windows the
@@ -9432,6 +9782,13 @@ impl ApplicationHandler for App {
                 if is_synthetic {
                     return;
                 }
+                // On a layout that types another script, a chord is
+                // matched with the Latin letter of the key's place, and
+                // so is a dialog's answer. A bare press keeps its
+                // character, which a field types, and so does a press
+                // with Ctrl and Alt both held, an AltGr character on
+                // Windows.
+                let latin = keymap::latin_key(&logical_key, physical_key);
                 // The confirm modal owns the keyboard outright until a
                 // decision lands.
                 if self.confirm.is_some() {
@@ -9439,26 +9796,50 @@ impl ApplicationHandler for App {
                     // the Enter that opened it from the sidebar must not
                     // answer it too.
                     if !repeat {
-                        self.confirm_key(&logical_key, event_loop);
+                        self.confirm_key(&latin, event_loop);
                     }
                     return;
                 }
                 let ctrl = chord_key(self.modifiers);
                 let shift = self.modifiers.shift_key();
                 let alt = self.modifiers.alt_key();
+                let resolved = keymap::command(keymap::Press {
+                    typed: &logical_key,
+                    keycap: &keycap,
+                    code: physical_key,
+                    ctrl,
+                    shift,
+                    alt,
+                });
+                // A character typed with Alt held (Option on a Mac) is
+                // typing when no chord of the keymap claims the key.
+                let claimed = resolved.is_some();
+                let alt = alt
+                    && !keymap::alt_typing(
+                        &logical_key,
+                        ctrl,
+                        alt,
+                        claimed,
+                        cfg!(target_os = "macos"),
+                    );
+                let key = if keymap::chord_held(ctrl, alt) {
+                    &latin
+                } else {
+                    &logical_key
+                };
+                // The text fields of the panels insert a character with
+                // Alt held (Option types one on a Mac), so the panels take
+                // the Latin key with Ctrl alone.
+                let panel_key = if ctrl && !alt { &latin } else { &logical_key };
                 // A held Escape repeats, and the ladder must not climb by
                 // itself: each rung, the quit included, takes its own
                 // press. The same held key kept repeating into the window
                 // after a dialog closed on it.
-                if repeat
-                    && keymap::command(&logical_key, physical_key, ctrl, shift, alt)
-                        == Some(Command::Quit)
-                {
+                if repeat && resolved == Some(Command::Quit) {
                     return;
                 }
                 // The overlay toggles stay global so their chord closes the
                 // overlay it opened; everything else feeds an open overlay.
-                let resolved = keymap::command(&logical_key, physical_key, ctrl, shift, alt);
                 match resolved {
                     Some(
                         cmd @ (Command::ThemeBrowser
@@ -9470,10 +9851,10 @@ impl ApplicationHandler for App {
                     }
                     _ if self.overlay.is_some() => {
                         let overlay = self.overlay.as_mut().expect("overlay open");
-                        let result = overlay.key(&logical_key, ctrl, shift);
+                        let result = overlay.key(panel_key, ctrl, shift);
                         self.overlay_result(result);
                     }
-                    _ if self.goto_key(&logical_key, ctrl, shift) => {}
+                    _ if self.goto_key(key, ctrl, shift, alt) => {}
                     // The go to line field has the keyboard, under the
                     // search fields' own rule: what it did not claim
                     // acts only when it is app-wide.
@@ -9482,10 +9863,10 @@ impl ApplicationHandler for App {
                             self.run_command(cmd, event_loop);
                         }
                     }
-                    _ if self.search_key(&logical_key, ctrl, shift) => {}
+                    _ if self.search_key(key, ctrl, shift, alt) => {}
                     // The Files tab's search views take the whole
                     // keyboard next, the way the find bar does.
-                    _ if self.sidebar_search_key(&logical_key, ctrl, shift, alt) => {}
+                    _ if self.sidebar_search_key(key, ctrl, shift, alt) => {}
                     // A search field has the keyboard: what the bar did
                     // not claim acts only when it is app-wide. Nothing
                     // reaches the editor's own keys or the document's
@@ -9495,8 +9876,7 @@ impl ApplicationHandler for App {
                             self.run_command(cmd, event_loop);
                         }
                     }
-                    _ if self.mode == edit::Mode::Edit
-                        && self.edit_key(&logical_key, ctrl, shift) => {}
+                    _ if self.mode == edit::Mode::Edit && self.edit_key(key, ctrl, shift, alt) => {}
                     // A plain slash over the Files tree, the panel
                     // owning the keys, opens the file search.
                     None if self.sidebar_owns_keys()
@@ -9504,7 +9884,7 @@ impl ApplicationHandler for App {
                         && self.sidebar.as_ref().is_some_and(|s| {
                             s.tab() == sidebar::Tab::Files && !s.search.active()
                         })
-                        && matches!(&logical_key, Key::Character(c)
+                        && matches!(key, Key::Character(c)
                             if c.as_str() == "/" && !ctrl && !alt) =>
                     {
                         self.open_sidebar_search(FilesView::FileSearch);
@@ -9653,7 +10033,7 @@ impl ApplicationHandler for App {
                     self.request_redraw();
                 } else if self.drag.is_some() {
                     self.drag_to(position.y as f32);
-                } else if self.sel_anchor.is_some() {
+                } else if self.selecting() {
                     self.extend_selection();
                 } else {
                     self.update_hover();
@@ -9693,27 +10073,36 @@ impl ApplicationHandler for App {
                 state,
                 button: MouseButton::Left,
                 ..
-            } => {
-                if self.mouse_muted() {
-                    return;
-                }
-                match state {
-                    ElementState::Pressed => {
-                        self.fling = None;
-                        if self.confirm.is_some() {
-                            let (x, y) = self.ui_cursor();
-                            let decision = self
-                                .confirm
-                                .as_mut()
-                                .map_or(confirm::Decision::Hold, |confirm| confirm.click(x, y));
-                            self.confirm_decide(decision, event_loop);
-                            return;
-                        }
-                        self.left_press();
+            } => match state {
+                ElementState::Pressed => {
+                    if self.mouse_muted() {
+                        return;
                     }
-                    ElementState::Released => self.left_release(),
+                    self.left_held = true;
+                    self.fling = None;
+                    if self.confirm.is_some() {
+                        let (x, y) = self.ui_cursor();
+                        let decision = self
+                            .confirm
+                            .as_mut()
+                            .map_or(confirm::Decision::Hold, |confirm| confirm.click(x, y));
+                        self.confirm_decide(decision, event_loop);
+                        return;
+                    }
+                    self.left_press();
                 }
-            }
+                ElementState::Released => {
+                    // The release counts even when a touch pan mutes it:
+                    // the button is up, and the press it ends may have
+                    // passed before the pan was told from a tap.
+                    self.left_held = false;
+                    if self.mouse_muted() {
+                        self.drop_grab();
+                        return;
+                    }
+                    self.left_release();
+                }
+            },
             WindowEvent::Resized(size) => {
                 // A drag delivers a width per frame. When a full pass
                 // outlasts a slice, restarting it on each one would strand
@@ -9776,6 +10165,197 @@ impl ApplicationHandler for App {
 
 #[cfg(test)]
 mod tests {
+    /// Two code blocks with a language, one line each, both cold: the
+    /// shape of the help page's syntax section near the view.
+    fn two_cold_blocks() -> super::Document {
+        let doc =
+            oryx::doc::markdown::parse("```rust\nlet a = 1;\n```\n\n```rust\nlet b = 2;\n```\n");
+        assert_eq!(doc.blocks.len(), 2, "two blocks, both code");
+        for block in &doc.blocks {
+            assert!(matches!(
+                block.kind,
+                super::BlockKind::CodeBlock { exact: 0, .. }
+            ));
+        }
+        doc
+    }
+
+    /// One code block of ten lines, cold: a code file, windowed by lines.
+    fn one_cold_block() -> super::Document {
+        let body: String = (0..10).map(|i| format!("let x{i} = {i};\n")).collect();
+        let doc = oryx::doc::markdown::parse(format!("```rust\n{body}```\n"));
+        assert_eq!(doc.blocks.len(), 1);
+        doc
+    }
+
+    type Guessed = std::collections::HashMap<usize, Vec<std::ops::Range<usize>>>;
+
+    /// The map of landed guesses, from pairs of a block and a range.
+    fn landed(entries: &[(usize, std::ops::Range<usize>)]) -> Guessed {
+        let mut map = Guessed::new();
+        for (block, range) in entries {
+            map.entry(*block).or_default().push(range.clone());
+        }
+        map
+    }
+
+    #[test]
+    fn the_guess_takes_the_first_cold_block_near_the_view() {
+        let doc = two_cold_blocks();
+        let visible = [(0, 0..1), (1, 0..1)];
+        assert_eq!(
+            super::speculation_target(&doc, &visible, false, &Guessed::new(), false),
+            Some((0, 0..1))
+        );
+    }
+
+    #[test]
+    fn nothing_is_asked_while_a_guess_is_in_flight() {
+        let doc = two_cold_blocks();
+        let visible = [(0, 0..1), (1, 0..1)];
+        // The first block's guess is out: the second waits for it, or
+        // the second would drop the first before it lands.
+        assert_eq!(
+            super::speculation_target(&doc, &visible, true, &Guessed::new(), false),
+            None
+        );
+    }
+
+    /// A keystroke lowers the frontier to its line, and the lines below
+    /// keep the colors they had: no guess over them while the
+    /// re-coloring is owed or its sweep runs, or the cold colors would
+    /// flash below the caret until the sweep corrects them.
+    #[test]
+    fn nothing_is_asked_while_a_re_coloring_is_owed() {
+        let doc = one_cold_block();
+        let visible = [(0, 0..10)];
+        assert_eq!(
+            super::speculation_target(&doc, &visible, false, &Guessed::new(), true),
+            None
+        );
+    }
+
+    /// The release of a press on the page that found no text under it
+    /// is a click while reading: it follows the link under the cursor,
+    /// which a linked picture alone on a page needs. A release that
+    /// grabbed nothing elsewhere, on a row of the sidebar or a button,
+    /// changes nothing, and so does one while editing, where the click
+    /// already placed the caret.
+    #[test]
+    fn a_release_on_the_page_that_grabbed_nothing_is_a_click_while_reading() {
+        use super::{release_act, Release};
+        assert_eq!(release_act(false, true, false, true), Release::Click);
+        assert_eq!(
+            release_act(false, true, false, false),
+            Release::Nothing,
+            "while editing the click placed the caret"
+        );
+        assert_eq!(release_act(false, false, false, true), Release::Nothing);
+        assert_eq!(release_act(true, true, true, true), Release::Settle);
+        assert_eq!(release_act(true, true, false, false), Release::Click);
+    }
+
+    #[test]
+    fn the_next_cold_block_is_asked_once_a_guess_landed() {
+        let doc = two_cold_blocks();
+        let visible = [(0, 0..1), (1, 0..1)];
+        let landed = landed(&[(0, 0..1)]);
+        assert_eq!(
+            super::speculation_target(&doc, &visible, false, &landed, false),
+            Some((1, 0..1))
+        );
+    }
+
+    #[test]
+    fn a_guess_that_landed_is_not_asked_again() {
+        let doc = two_cold_blocks();
+        let visible = [(0, 0..1), (1, 0..1)];
+        let landed = landed(&[(0, 0..1), (1, 0..1)]);
+        // Both landed: nothing to ask. Issue #9 asked for the first
+        // again, without end.
+        assert_eq!(
+            super::speculation_target(&doc, &visible, false, &landed, false),
+            None
+        );
+    }
+
+    #[test]
+    fn a_band_above_a_landed_guess_is_asked() {
+        let doc = one_cold_block();
+        // The bottom of the block was guessed after a jump to the end.
+        let landed = landed(&[(0, 6..10)]);
+        // A scroll back up shows lines the guess never colored.
+        assert_eq!(
+            super::speculation_target(&doc, &[(0, 0..4)], false, &landed, false),
+            Some((0, 0..4))
+        );
+        // A band inside the landed guess asks for nothing.
+        assert_eq!(
+            super::speculation_target(&doc, &[(0, 7..10)], false, &landed, false),
+            None
+        );
+        // A band the guess covers in part is asked whole.
+        assert_eq!(
+            super::speculation_target(&doc, &[(0, 3..8)], false, &landed, false),
+            Some((0, 3..8))
+        );
+    }
+
+    #[test]
+    fn landed_guesses_merge_when_they_touch() {
+        let mut ranges: Vec<std::ops::Range<usize>> = std::iter::once(6..10).collect();
+        super::note_guess(&mut ranges, 0..3);
+        assert_eq!(ranges, [6..10, 0..3], "apart, both kept");
+        super::note_guess(&mut ranges, 3..7);
+        assert_eq!(ranges.len(), 1, "the one that joins them");
+        assert_eq!(ranges[0], 0..10);
+    }
+
+    #[test]
+    fn the_help_page_has_code_blocks_for_the_exact_sweep() {
+        // F1 starts the sweep with them, as a file is swept at open;
+        // a page with none would leave its blocks to the guess alone.
+        let pending = oryx::doc::load::pending(&super::markdown_help());
+        let with_language = pending
+            .iter()
+            .filter(|block| block.language.is_some())
+            .count();
+        assert!(with_language >= 2, "the syntax section has many");
+    }
+
+    #[test]
+    fn the_guess_leaves_an_exact_block_and_a_block_without_language_alone() {
+        let mut doc = oryx::doc::markdown::parse("```rust\nlet a = 1;\n```\n\n```\nplain\n```\n");
+        if let super::BlockKind::CodeBlock { exact, .. } = &mut doc.blocks[0].kind {
+            *exact = 1;
+        }
+        let visible = [(0, 0..1), (1, 0..1)];
+        assert_eq!(
+            super::speculation_target(&doc, &visible, false, &Guessed::new(), false),
+            None
+        );
+    }
+
+    /// While a long document loads, the layout's height is the part
+    /// placed so far, and a view at that edge is not at the page's end.
+    #[test]
+    fn the_end_of_the_page_waits_for_the_layout() {
+        assert!(super::page_end_reached(600.0, 400.0, 1000.0, false));
+        assert!(
+            !super::page_end_reached(600.0, 400.0, 1000.0, true),
+            "still loading"
+        );
+        assert!(!super::page_end_reached(0.0, 400.0, 1000.0, false));
+        assert!(
+            super::page_end_reached(0.0, 400.0, 300.0, false),
+            "shorter than the view"
+        );
+        assert!(
+            !super::page_end_reached(0.0, 400.0, 300.0, true),
+            "shorter so far"
+        );
+    }
+
     #[test]
     fn a_jump_to_a_line_stands_it_in_the_middle() {
         let place = super::Place::centered(7, 600.0, 20.0);
@@ -10495,6 +11075,28 @@ mod tests {
         );
     }
 
+    /// The caret's pixels carry 0xFF in their top byte, which KWin 6.8
+    /// reads as the opacity.
+    #[test]
+    fn the_caret_paints_opaque_pixels() {
+        let (width, height) = (20u32, 20u32);
+        let caret = oryx::edit::caret::CaretBox {
+            x: 5.0,
+            y: 5.0,
+            h: 10.0,
+        };
+        let color = oryx::style::theme::Rgba {
+            r: 255,
+            g: 255,
+            b: 255,
+            a: 255,
+        };
+        let mut frame = vec![0u32; (width * height) as usize];
+        super::draw_caret(&mut frame, width, height, 0, 0.0, 1.0, caret, color);
+        let painted = frame.iter().find(|p| **p != 0).expect("the caret painted");
+        assert_eq!(painted >> 24, 0xFF);
+    }
+
     #[test]
     fn the_command_key_is_a_chord_key_on_macos_only() {
         assert!(super::chord_pressed(true, false, false));
@@ -11039,5 +11641,22 @@ mod tests {
     fn the_hidden_files_notice_names_the_new_state() {
         assert_eq!(super::hidden_notice(true), "Showing hidden files");
         assert_eq!(super::hidden_notice(false), "Hidden files out of the way");
+    }
+
+    #[test]
+    fn a_standing_selection_is_not_a_drag() {
+        assert!(
+            !super::selection_drag(false, false),
+            "an editing key left the selection and its anchor, the button up"
+        );
+        assert!(
+            super::selection_drag(true, true),
+            "the button held since the press that grabbed the anchor"
+        );
+        assert!(
+            !super::selection_drag(true, false),
+            "the button held by a press that grabbed nothing, a row of the sidebar after an editing key"
+        );
+        assert!(!super::selection_drag(false, false));
     }
 }

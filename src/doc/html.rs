@@ -66,6 +66,9 @@ pub struct EmphasisFlags {
     pub sup: bool,
     pub mono: bool,
     pub centered: bool,
+    /// Justified text: not centered, and no word on where a single
+    /// line goes, so a lone image under it is not placed.
+    pub justified: bool,
 }
 
 /// What one selector says: traits it turns on and traits it explicitly
@@ -86,6 +89,7 @@ macro_rules! each_trait {
         $macro!(sup);
         $macro!(mono);
         $macro!(centered);
+        $macro!(justified);
     };
 }
 
@@ -133,6 +137,12 @@ impl Emphasis {
         } else {
             None
         }
+    }
+
+    /// Whether the text is justified, which clears a centering but
+    /// places nothing: a justified single line stays where it starts.
+    fn justified(&self) -> bool {
+        self.set.justified
     }
 }
 
@@ -299,10 +309,20 @@ impl EmphasisTable {
                     "center" => {
                         out.set.centered = true;
                         out.clear.centered = false;
+                        out.set.justified = false;
+                        out.clear.justified = true;
                     }
-                    "left" | "right" | "justify" | "start" | "end" => {
+                    "left" | "right" | "start" | "end" => {
                         out.set.centered = false;
                         out.clear.centered = true;
+                        out.set.justified = false;
+                        out.clear.justified = true;
+                    }
+                    "justify" => {
+                        out.set.centered = false;
+                        out.clear.centered = true;
+                        out.set.justified = true;
+                        out.clear.justified = false;
                     }
                     _ => {}
                 },
@@ -554,7 +574,10 @@ pub struct Walker {
     /// A whitespace run is pending; the next visible character spends it.
     space: bool,
     quote_depth: u8,
-    center: Vec<bool>,
+    /// The word of each open paragraph or division on its alignment:
+    /// Some(true) centered, Some(false) placed left or right, None when
+    /// it says nothing.
+    center: Vec<Option<bool>>,
     bold: u16,
     italic: u16,
     strike: u16,
@@ -893,10 +916,23 @@ impl Walker {
                 });
             }
             "p" | "div" if !in_table => {
-                let centered = attr("align").is_some_and(|a| a.eq_ignore_ascii_case("center"))
-                    || emphasis.centered() == Some(true);
-                self.center.push(centered);
+                // The stylesheet's word first, the attribute's when the
+                // stylesheet says nothing: the attribute is a presentational
+                // hint, which any stylesheet rule overrides. Justify places
+                // nothing: a justified single line stays where it starts.
+                let word = match emphasis.centered() {
+                    Some(true) => Some(true),
+                    Some(false) => (!emphasis.justified()).then_some(false),
+                    None => match attr("align").map(|a| a.to_ascii_lowercase()) {
+                        Some(a) if a == "center" => Some(true),
+                        Some(a) if a == "left" || a == "right" => Some(false),
+                        _ => None,
+                    },
+                };
+                // The content pending before this block belongs to the
+                // enclosing blocks and takes their words, not this one's.
                 self.flush();
+                self.center.push(word);
                 self.children(node);
                 self.flush();
                 self.center.pop();
@@ -1279,7 +1315,7 @@ impl Walker {
             return;
         };
         if let Some(caption) = t.caption.take() {
-            self.center.push(true);
+            self.center.push(Some(true));
             self.emit(BlockKind::Paragraph { spans: caption });
             self.center.pop();
         }
@@ -1294,6 +1330,7 @@ impl Walker {
             BlockKind::Table {
                 header: t.header,
                 rows: t.rows,
+                aligns: Vec::new(),
             },
             start..start,
         );
@@ -1385,6 +1422,18 @@ impl Walker {
         self.emit_placed(kind, range);
     }
 
+    /// A paragraph that holds an image and nothing else: a figure or a
+    /// cover. It is centered when the book says nothing about its place.
+    fn lone_image(&self, kind: &BlockKind) -> bool {
+        let BlockKind::Paragraph { spans } = kind else {
+            return false;
+        };
+        spans.iter().any(|s| s.image.is_some())
+            && spans
+                .iter()
+                .all(|s| s.image.is_some() || s.text(&self.source).trim().is_empty())
+    }
+
     fn emit_placed(&mut self, kind: BlockKind, range: std::ops::Range<usize>) {
         // A summary row belongs to the group enclosing its own; it is
         // the toggle, visible while its group is closed.
@@ -1392,11 +1441,16 @@ impl Walker {
             BlockKind::Summary { group, .. } => self.details[*group as usize].parent,
             _ => self.details_stack.last().copied(),
         };
+        // The word of the innermost block that carries one places the
+        // block, as the model says; with no word said, a lone image is
+        // centered.
+        let word = self.center.iter().rev().find_map(|word| *word);
+        let centered = word.unwrap_or_else(|| self.lone_image(&kind));
         self.blocks.push(Block {
             quote_depth: self.quote_depth,
             alert: None,
             range,
-            centered: self.center.iter().any(|&c| c),
+            centered,
             right: false,
             left: false,
             details,
@@ -1603,6 +1657,114 @@ mod tests {
     }
 
     #[test]
+    fn a_lone_image_is_centered_when_the_book_says_nothing() {
+        let (blocks, _, _) =
+            walk("<html><body><p><img src=\"cover.jpg\" alt=\"The cover\"/></p></body></html>");
+        assert!(blocks[0].centered, "a paragraph holding only an image");
+        let (blocks, _, _) = walk("<html><body><div><img src=\"a.png\"/></div></body></html>");
+        assert!(blocks[0].centered, "a division holding only an image");
+    }
+
+    #[test]
+    fn a_lone_image_the_book_places_keeps_its_word() {
+        let (blocks, _, _) = walk_styled(
+            ".fig { text-align: left }",
+            "<html><body><p class=\"fig\"><img src=\"a.png\"/></p></body></html>",
+        );
+        assert!(!blocks[0].centered, "the stylesheet says left");
+        let (blocks, _, _) =
+            walk("<html><body><p align=\"right\"><img src=\"a.png\"/></p></body></html>");
+        assert!(!blocks[0].centered, "the attribute says right");
+        let (blocks, _, _) =
+            walk("<html><body><div align=\"left\"><p><img src=\"a.png\"/></p></div></body></html>");
+        assert!(!blocks[0].centered, "an enclosing block says left");
+    }
+
+    /// The word of the innermost block that carries one places a block,
+    /// as the model says: a paragraph placed left by its own class or
+    /// attribute inside a centered division stays at the left.
+    #[test]
+    fn a_blocks_own_word_wins_inside_a_centered_division() {
+        let (blocks, _, _) = walk_styled(
+            ".c { text-align: center } .l { text-align: left }",
+            "<html><body><div class=\"c\"><p class=\"l\">Title</p><p>Second</p></div></body></html>",
+        );
+        assert!(!blocks[0].centered, "the paragraph's class says left");
+        assert!(
+            blocks[1].centered,
+            "a paragraph with no word of its own takes the division's"
+        );
+        let (blocks, _, _) = walk(
+            "<html><body><div align=\"center\"><p align=\"right\">Title</p></div></body></html>",
+        );
+        assert!(!blocks[0].centered, "the paragraph's attribute says right");
+        let (blocks, _, _) = walk(
+            "<html><body><div align=\"left\"><p align=\"center\">Title</p></div></body></html>",
+        );
+        assert!(
+            blocks[0].centered,
+            "a centered paragraph inside a left division"
+        );
+    }
+
+    #[test]
+    fn an_image_inside_text_is_not_centered() {
+        let (blocks, _, _) =
+            walk("<html><body><p>See <img src=\"a.png\"/> here.</p></body></html>");
+        assert!(!blocks[0].centered);
+    }
+
+    #[test]
+    fn a_bare_image_before_a_paragraph_is_centered_by_the_lone_image_rule() {
+        // The image stands outside any paragraph. The paragraph after it
+        // has a word of its own, which is not the image's.
+        let (blocks, _, _) = walk_styled(
+            "p { text-align: justify }",
+            "<html><body><h2>One</h2><img src=\"a.png\"/><p>First paragraph.</p></body></html>",
+        );
+        assert!(
+            blocks[1].centered,
+            "the bare image before a justified paragraph"
+        );
+        assert!(!blocks[2].centered, "the paragraph itself");
+    }
+
+    #[test]
+    fn a_lone_image_under_a_justify_rule_is_centered() {
+        // Justify says nothing about where a single line goes, so it
+        // does not place the image; left and right do.
+        let (blocks, _, _) = walk_styled(
+            "p { text-align: justify }",
+            "<html><body><p><img src=\"a.png\"/></p><p>Text under the rule.</p></body></html>",
+        );
+        assert!(blocks[0].centered, "the stylesheet says justify");
+        assert!(!blocks[1].centered, "the text paragraph");
+        let (blocks, _, _) =
+            walk("<html><body><p align=\"justify\"><img src=\"a.png\"/></p></body></html>");
+        assert!(blocks[0].centered, "the attribute says justify");
+    }
+
+    #[test]
+    fn the_stylesheet_wins_over_the_align_attribute() {
+        let (blocks, _, _) = walk_styled(
+            ".c { text-align: center }",
+            "<html><body><p align=\"left\" class=\"c\">Title</p></body></html>",
+        );
+        assert!(
+            blocks[0].centered,
+            "the stylesheet says center, the attribute left"
+        );
+        let (blocks, _, _) = walk_styled(
+            ".l { text-align: left }",
+            "<html><body><p align=\"center\" class=\"l\">Title</p></body></html>",
+        );
+        assert!(
+            !blocks[0].centered,
+            "the stylesheet says left, the attribute center"
+        );
+    }
+
+    #[test]
     fn a_monospace_family_renders_as_inline_code() {
         let (blocks, _, _) = walk_styled(
             ".mono { font-family: \"Courier New\", monospace }",
@@ -1728,7 +1890,7 @@ mod tests {
         let (blocks, source, _) = walk(
             "<html><body><table><thead><tr><th>K</th><th>V</th></tr></thead><tbody><tr><td>a</td><td>1</td></tr></tbody></table></body></html>",
         );
-        let BlockKind::Table { header, rows } = &blocks[0].kind else {
+        let BlockKind::Table { header, rows, .. } = &blocks[0].kind else {
             panic!("expected a table, got {:?}", blocks[0].kind);
         };
         assert_eq!(header.len(), 2);
@@ -1741,7 +1903,7 @@ mod tests {
     fn headerless_table_keeps_an_empty_header() {
         let (blocks, source, _) =
             walk("<html><body><table><tr><td>a</td><td>b</td></tr></table></body></html>");
-        let BlockKind::Table { header, rows } = &blocks[0].kind else {
+        let BlockKind::Table { header, rows, .. } = &blocks[0].kind else {
             panic!("expected a table, got {:?}", blocks[0].kind);
         };
         assert!(header.is_empty());

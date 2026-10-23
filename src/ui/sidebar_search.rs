@@ -370,6 +370,10 @@ pub fn draw_field_row(
     } else {
         "Find files..."
     };
+    let previous_start = match state.view {
+        FilesView::ContentSearch => state.content_view.window.start,
+        _ => state.file_view.window.start,
+    };
     let view = draw_field(
         painter,
         theme,
@@ -379,6 +383,7 @@ pub fn draw_field_row(
         fw - 6.0,
         placeholder,
         owns_keys,
+        previous_start,
     );
     match state.view {
         FilesView::ContentSearch => {
@@ -636,7 +641,7 @@ fn draw_content_results(
                 );
                 let avail = width - PAD - 18.0;
                 let shown = crate::ui::sidebar::fit(&path, avail, |text| {
-                    painter.measure(text, BODY_FAMILY, TEXT_SIZE, 700)
+                    painter.advances(text, BODY_FAMILY, TEXT_SIZE, 700)
                 });
                 painter.text(
                     PAD + 16.0,
@@ -703,7 +708,7 @@ fn draw_hit_line(
     let accent = ui.sidebar_dir;
     let number = hit.line_number.to_string();
     let number = crate::ui::sidebar::fit(&number, GUTTER_W - 8.0, |text| {
-        painter.measure(text, CODE_FAMILY, LINE_SIZE, 400)
+        painter.advances(text, CODE_FAMILY, LINE_SIZE, 400)
     });
     painter.text(
         PAD + 2.0,
@@ -793,7 +798,7 @@ fn draw_status(painter: &mut Painter, theme: &Theme, width: f32, state: &Sidebar
     };
     let avail = width - 2.0 * PAD;
     let shown = crate::ui::sidebar::fit(&text, avail, |t| {
-        painter.measure(t, BODY_FAMILY, TEXT_SIZE, 400)
+        painter.advances(t, BODY_FAMILY, TEXT_SIZE, 400)
     });
     painter.text(
         PAD,
@@ -847,7 +852,7 @@ mod tests {
         let mut file = hit("abcdefghijklmnopqrstuvwxyz.md");
         let avail = painter.measure("abc\u{2026}", BODY_FAMILY, TEXT_SIZE, 400) + 0.1;
         let shown = crate::ui::sidebar::fit(&file.relative_path, avail, |text| {
-            painter.measure(text, BODY_FAMILY, TEXT_SIZE, 400)
+            painter.advances(text, BODY_FAMILY, TEXT_SIZE, 400)
         });
         assert_eq!(shown, "abc\u{2026}");
         // The hidden 'e' used to point inside the replacement ellipsis.
@@ -864,7 +869,7 @@ mod tests {
         let file = hit("abc/long-filename.md");
         let avail = painter.measure("abc\u{2026}", BODY_FAMILY, TEXT_SIZE, 400) + 0.1;
         let shown = crate::ui::sidebar::fit(&file.relative_path, avail, |text| {
-            painter.measure(text, BODY_FAMILY, TEXT_SIZE, 400)
+            painter.advances(text, BODY_FAMILY, TEXT_SIZE, 400)
         });
         assert_eq!(shown, "abc\u{2026}");
         // The basename starts at byte 4, inside the ellipsis at bytes 3..6.
@@ -880,7 +885,7 @@ mod tests {
         let mut content = line("a.rs", 1, "abcdefghijklmnopqrstuvwxyz");
         let avail = painter.measure("abc\u{2026}", CODE_FAMILY, LINE_SIZE, 400) + 0.1;
         let shown = crate::ui::sidebar::fit(&content.line_text, avail, |text| {
-            painter.measure(text, CODE_FAMILY, LINE_SIZE, 400)
+            painter.advances(text, CODE_FAMILY, LINE_SIZE, 400)
         });
         assert_eq!(shown, "abc\u{2026}");
         for range in [4..5, 2..4, 0..26] {

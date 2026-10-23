@@ -2924,7 +2924,7 @@ dependencies = [
 
 [[package]]
 name = "oryx"
-version = "1.2.1"
+version = "1.2.2"
 dependencies = [
  "anyhow",
  "arboard",
@@ -2940,6 +2940,7 @@ dependencies = [
  "ico",
  "ignore",
  "image",
+ "libloading",
  "lopdf",
  "markup5ever_rcdom",
  "merman",
@@ -2954,6 +2955,7 @@ dependencies = [
  "resvg",
  "rfd",
  "roxmltree 0.20.0",
+ "rustix 1.1.4",
  "serde",
  "serde_json",
  "softbuffer",
@@ -2962,6 +2964,8 @@ dependencies = [
  "tiny-skia",
  "toml",
  "ttf-parser",
+ "unicode-linebreak",
+ "unicode-properties",
  "ureq",
  "wayland-backend",
  "wayland-client",
@@ -5320,9 +5324,9 @@ dependencies = [
 
 [[package]]
 name = "webpki-root-certs"
-version = "1.0.9"
+version = "1.0.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b96554aa2acc8ccdb7e1c9a58a7a68dd5d13bccc69cd124cb09406db612a1c9b"
+checksum = "58ec80e73fd8baf57bf0d9615554c75348bda990d6d5bbeab964dd068319fecb"
 dependencies = [
  "rustls-pki-types",
 ]

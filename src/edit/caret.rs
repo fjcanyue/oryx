@@ -37,8 +37,16 @@ pub enum Motion {
     WordRight,
 }
 
+/// A character of a word: a letter, a digit, an underscore, a
+/// combining mark, which belongs to the letter before it, or a zero
+/// width joiner or non-joiner, which Persian, Kurdish, Urdu and the
+/// Indic scripts write inside a word to shape its letters.
 pub(crate) fn word_char(c: char) -> bool {
-    c.is_alphanumeric() || c == '_'
+    use unicode_properties::{GeneralCategoryGroup, UnicodeGeneralCategory};
+    c.is_alphanumeric()
+        || c == '_'
+        || matches!(c, '\u{200c}' | '\u{200d}')
+        || c.general_category_group() == GeneralCategoryGroup::Mark
 }
 
 /// The last position a caret may stand on: the text's end, or the byte
@@ -303,6 +311,10 @@ fn lines_of(lay: &LayoutDoc, doc: &Document) -> Vec<Line> {
         match lines.last_mut() {
             Some(line) if (line.y - y).abs() < 0.5 => {
                 line.h = line.h.max(h);
+                // The runs come in screen order, which on a right-to-left
+                // line is not the order of the text: the line's bytes
+                // are the smallest start and the largest end.
+                line.start = line.start.min(run.start);
                 line.end = line.end.max(run.start + run.len);
                 line.runs.push(run);
             }
@@ -472,7 +484,7 @@ fn shown_source(span: &Span, source: &str, at: usize, len: usize) -> Range<usize
 /// cells, then its rows' cells.
 fn run_spans(kind: &BlockKind) -> Vec<&Span> {
     match kind {
-        BlockKind::Table { header, rows } => header
+        BlockKind::Table { header, rows, .. } => header
             .iter()
             .flatten()
             .chain(rows.iter().flatten().flatten())
@@ -499,6 +511,22 @@ pub fn tall_block_end(lay: &LayoutDoc, doc: &Document, offset: usize, view_h: f3
     }
     let span = lay.block_span(index)?;
     (span.end - span.start > view_h).then_some(span.end)
+}
+
+/// The bottom of a tall image whose top the page is scrolled past, for
+/// the line of that image: the editor seats the image's line so that
+/// its row ends there, and the text under the image keeps its place on
+/// the screen across the crossing. None while the image's top is in
+/// view or below it, where the top is the place, and for any other
+/// line.
+pub fn image_bottom(lay: &LayoutDoc, doc: &Document, offset: usize, scroll_y: f32) -> Option<f32> {
+    let index = doc.block_at_offset(offset)?;
+    let block = &doc.blocks[index];
+    if offset >= block.range.end || !matches!(block.kind, BlockKind::Image { .. }) {
+        return None;
+    }
+    let span = lay.block_span(index)?;
+    (span.start < scroll_y).then_some(span.end)
 }
 
 /// Where an offset stands on the page, as a top and a height: its row
@@ -602,7 +630,12 @@ fn run_at(line: &Line, offset: usize) -> Option<&MappedRun> {
         .or_else(|| line.runs.last())
 }
 
-/// Advance x of an offset inside a run, shaped as paint shapes.
+/// Advance x of an offset inside a run, shaped as paint shapes: the
+/// boundary of the byte among the glyphs, which for a run reading right
+/// to left puts the first byte at the right edge and the end at the
+/// left. In the trailing whitespace the layout trimmed, the caret
+/// stands past the run's end in its reading direction, by the width of
+/// the spaces: right of a run reading left to right, left of the other.
 fn x_of(
     fonts: &mut FontStore,
     lay: &LayoutDoc,
@@ -613,28 +646,26 @@ fn x_of(
     let text_run = &lay.runs[run.index];
     let text = lay.run_text(doc, text_run);
     let byte = offset - run.start;
-    if byte == 0 {
-        return 0.0;
-    }
     let family = lay.run_family(text_run);
     if byte > text.len() {
-        // Inside the trailing whitespace layout trimmed: shape the
-        // source slice so the caret advances past each space.
         if let Some(slice) = doc.source.get(run.start..offset) {
             let buffer = selection::shape_run(fonts, text_run, slice, family);
             if let Some(line) = buffer.layout_runs().next() {
-                if let Some(glyph) = line.glyphs.last() {
-                    return glyph.x + glyph.w;
-                }
+                let advance = crate::style::fonts::line_width(line.glyphs);
+                return if line.rtl {
+                    text_run.width - advance
+                } else {
+                    advance
+                };
             }
         }
         return text_run.width;
     }
-    if byte == text.len() {
-        return text_run.width;
-    }
     let buffer = selection::shape_run(fonts, text_run, text, family);
     if let Some(line) = buffer.layout_runs().next() {
+        if byte == text.len() {
+            return if line.rtl { 0.0 } else { text_run.width };
+        }
         if let Some(x) = selection::boundary_x(line.glyphs, text, byte) {
             return x;
         }
@@ -642,9 +673,15 @@ fn x_of(
     text_run.width
 }
 
-/// The character boundary nearest an absolute x on a line. Past the
-/// last run's visible end the answer is the line's end, which extends
-/// over the trailing whitespace layout trimmed, the place End reaches.
+/// The character boundary nearest an absolute x on a line. Beside the
+/// line the answer is the line's end on that side by the line's
+/// direction, whatever the reading of the run at that side, as a click
+/// past the end of a line reaches the line's logical end: left of a
+/// line reading left to right its start and right of it its end, the
+/// reverse for a line reading right to left. In a gap between two runs
+/// the answer is the edge of the run on the right of the gap, by that
+/// run's reading. The line's end extends over the trailing whitespace
+/// the layout trimmed, the place End reaches.
 fn offset_at_x(
     fonts: &mut FontStore,
     lay: &LayoutDoc,
@@ -652,21 +689,64 @@ fn offset_at_x(
     line: &Line,
     x: f32,
 ) -> usize {
+    if line.runs.is_empty() {
+        return line.start;
+    }
+    let rtl = line_reads_rtl(fonts, lay, doc, line);
     let Some(run) = line.runs.iter().find(|r| x < r.x + r.width) else {
-        return if line.runs.is_empty() {
-            line.start
-        } else {
-            line.end
-        };
+        return if rtl { line.start } else { line.end };
     };
     if x <= run.x {
-        return run.start;
+        if run.start == line.runs[0].start {
+            return if rtl { line.end } else { line.start };
+        }
+        return if run_reads_rtl(fonts, lay, doc, run) {
+            run_end(line, run)
+        } else {
+            run.start
+        };
     }
     let text_run = &lay.runs[run.index];
     let text = lay.run_text(doc, text_run);
     let family = lay.run_family(text_run);
     let ch = selection::char_index_at(fonts, text_run, text, family, x - run.x);
     run.start + selection::byte_of_char(text, ch)
+}
+
+/// The byte after a run's last: the line's end for the run that holds
+/// the line's last bytes, the run's own end for the others.
+fn run_end(line: &Line, run: &MappedRun) -> usize {
+    let end = run.start + run.len;
+    if line.runs.iter().all(|r| r.start + r.len <= end) {
+        line.end
+    } else {
+        end
+    }
+}
+
+/// Whether a run's text reads right to left, from its shaping.
+fn run_reads_rtl(fonts: &mut FontStore, lay: &LayoutDoc, doc: &Document, run: &MappedRun) -> bool {
+    let text_run = &lay.runs[run.index];
+    let text = lay.run_text(doc, text_run);
+    let family = lay.run_family(text_run);
+    let buffer = selection::shape_run(fonts, text_run, text, family);
+    buffer.layout_runs().next().is_some_and(|r| r.rtl)
+}
+
+/// Whether a line reads right to left. With one run, the run's own
+/// reading. With several, the place of the run that holds the line's
+/// first byte: the bidi order puts it at the right end of a line
+/// reading right to left and at the left end of the other, whatever
+/// that run's own reading. The runs stand in screen order.
+fn line_reads_rtl(fonts: &mut FontStore, lay: &LayoutDoc, doc: &Document, line: &Line) -> bool {
+    match line.runs.as_slice() {
+        [] => false,
+        [run] => run_reads_rtl(fonts, lay, doc, run),
+        runs => {
+            let first = runs.iter().map(|r| r.start).min().unwrap_or(line.start);
+            first != runs[0].start
+        }
+    }
 }
 
 impl Caret {
@@ -1854,6 +1934,18 @@ mod tests {
         assert_eq!(word_left(text, 0), 0);
     }
 
+    /// The zero width joiner and non-joiner stand inside a Persian,
+    /// Kurdish, Urdu or Indic word, so a word is whole across them.
+    #[test]
+    fn the_joiners_belong_to_the_word() {
+        assert!(word_char('\u{200c}'), "the zero width non-joiner");
+        assert!(word_char('\u{200d}'), "the zero width joiner");
+        let text = "\u{645}\u{6cc}\u{200c}\u{631}\u{648}\u{645} x";
+        assert_eq!(word_right(text, 0), 13, "the Persian word is one hop");
+        assert_eq!(word_left(text, 13), 0);
+        assert_eq!(word_left(text, 9), 0, "from inside the second half");
+    }
+
     #[test]
     fn the_document_jumps_reach_both_ends() {
         let doc = code_doc("alpha alpha\nx\nbeta beta\n");
@@ -2565,6 +2657,39 @@ mod tests {
         assert_eq!(whole, image, "and so does a view with text around it");
     }
 
+    /// The page scrolled past the top of a tall image: the editor's
+    /// image line takes a row of the editor's height ending at the
+    /// image's bottom, so the text under the image keeps its place on
+    /// the screen. With the image's top in view, the top is the place.
+    #[test]
+    fn an_image_scrolled_past_its_top_holds_its_bottom() {
+        let (doc, l) = image_page();
+        let image = at(&doc, "![oryx]");
+        let place = l.images.first().expect("the image is placed");
+        let bottom = place.y + place.height;
+        assert_eq!(
+            image_bottom(&l, &doc, image, place.y + 40.0),
+            Some(bottom),
+            "the top above the view"
+        );
+        assert_eq!(
+            image_bottom(&l, &doc, image, place.y - 60.0),
+            None,
+            "the top in view"
+        );
+        assert_eq!(
+            image_bottom(&l, &doc, at(&doc, "After 2."), place.y + 40.0),
+            None,
+            "a text line"
+        );
+        let row_h = 30.0;
+        assert_eq!(
+            held(bottom - row_h, row_h, place.y + 40.0, 2000.0),
+            place.height - 70.0,
+            "the row ending at the bottom, held at its height"
+        );
+    }
+
     #[test]
     fn landing_keeps_a_remembered_blank_line() {
         let (doc, l) = image_page();
@@ -2649,5 +2774,123 @@ mod tests {
         assert_eq!(ledger.current(), "abcx\n");
         ledger.edit(caret.offset - 1..caret.offset + 1, "");
         assert_eq!(ledger.current(), "ab\n");
+    }
+
+    #[test]
+    fn home_and_end_on_a_right_to_left_line_with_a_number() {
+        // The runs of the line stand on the screen in bidi order: the
+        // number and the Latin words are runs of their own, and the
+        // leftmost run holds the last text. The line still starts at
+        // its first byte and ends at its last.
+        let doc = text_doc("كتبت 25 صفحة و abc def هنا\nسطر ثان\n");
+        let (l, mut fonts) = lay_of(&doc);
+        let end = doc.source.find('\n').unwrap();
+        let c = step(Caret::at(9), Motion::Home, &l, &doc, &mut fonts);
+        assert_eq!(c.offset, 0, "Home from the middle of the line");
+        let c = step(Caret::at(9), Motion::End, &l, &doc, &mut fonts);
+        assert_eq!(c.offset, end, "End from the middle of the line");
+    }
+
+    #[test]
+    fn a_click_beside_a_right_to_left_line_lands_at_its_ends() {
+        // The leftmost run holds the last words, read right to left, so
+        // its left edge is the line's end; the rightmost run holds the
+        // first word, so its right edge is the line's start.
+        let doc = text_doc("كتبت 25 صفحة و abc def هنا\nسطر ثان\n");
+        let (l, mut fonts) = lay_of(&doc);
+        let end = doc.source.find('\n').unwrap();
+        let row = |l: &LayoutDoc, doc: &Document| {
+            l.runs
+                .iter()
+                .find(|r| l.run_text(doc, r).contains("abc"))
+                .expect("the Latin run")
+                .y
+                + 1.0
+        };
+        let y = row(&l, &doc);
+        let c = place(&l, &doc, &mut fonts, -10.0, y).unwrap();
+        assert_eq!(c.offset, end, "left of the line");
+        let c = place(&l, &doc, &mut fonts, 10_000.0, y).unwrap();
+        assert_eq!(c.offset, 0, "right of the line");
+        let doc = text_doc("abc def\nmore\n");
+        let (l, mut fonts) = lay_of(&doc);
+        let y = row(&l, &doc);
+        let c = place(&l, &doc, &mut fonts, -10.0, y).unwrap();
+        assert_eq!(c.offset, 0, "left of a left-to-right line");
+        let c = place(&l, &doc, &mut fonts, 10_000.0, y).unwrap();
+        assert_eq!(c.offset, 7, "right of a left-to-right line");
+    }
+
+    /// Beside a line, the click lands at the line's ends by the line's
+    /// direction, not by the reading of the run at that side: a
+    /// left-to-right line that ends in Arabic, a right-to-left line
+    /// that starts or ends with a number.
+    #[test]
+    fn a_click_beside_a_mixed_line_lands_at_the_line_s_ends() {
+        let cases = [
+            ("Translation: كتاب\nnext\n", "Translation", false),
+            ("25 صفحة\nnext\n", "25", true),
+            ("صفحة 25\nnext\n", "25", true),
+        ];
+        for (source, word, rtl) in cases {
+            let doc = text_doc(source);
+            let (l, mut fonts) = lay_of(&doc);
+            let end = doc.source.find('\n').unwrap();
+            let y = l
+                .runs
+                .iter()
+                .find(|r| l.run_text(&doc, r).contains(word))
+                .expect("the run")
+                .y
+                + 1.0;
+            let left = place(&l, &doc, &mut fonts, -10.0, y).unwrap().offset;
+            let right = place(&l, &doc, &mut fonts, 10_000.0, y).unwrap().offset;
+            if rtl {
+                assert_eq!(
+                    (left, right),
+                    (end, 0),
+                    "{source:?}: left the end, right the start"
+                );
+            } else {
+                assert_eq!(
+                    (left, right),
+                    (0, end),
+                    "{source:?}: left the start, right the end"
+                );
+            }
+        }
+    }
+
+    /// The caret at the ends of a right-to-left run stands at the run's
+    /// right edge for its first byte and at its left edge for its end,
+    /// and past the left edge in the line's trailing spaces.
+    #[test]
+    fn the_caret_at_the_ends_of_a_right_to_left_run_stands_at_the_right_edges() {
+        let doc = text_doc("سطر  \nnext\n");
+        let (l, mut fonts) = lay_of(&doc);
+        let run = l
+            .runs
+            .iter()
+            .find(|r| l.run_text(&doc, r).starts_with("سطر"))
+            .expect("the Arabic run");
+        let (left, right) = (run.x, run.x + run.width);
+        let at = |offset: usize, fonts: &mut FontStore| {
+            Caret::at(offset)
+                .geometry(&l, &doc, fonts)
+                .expect("a box")
+                .x
+        };
+        assert!(
+            (at(0, &mut fonts) - right).abs() < 1.0,
+            "the first byte at the right edge"
+        );
+        assert!(
+            (at(6, &mut fonts) - left).abs() < 1.0,
+            "the end at the left edge"
+        );
+        assert!(
+            at(8, &mut fonts) < left - 1.0,
+            "after the trailing spaces, left of the run"
+        );
     }
 }

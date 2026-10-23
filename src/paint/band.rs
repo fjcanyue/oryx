@@ -1,5 +1,6 @@
 //! Paints a vertical slice of the laid-out document into a pixel buffer.
-//! Rects first, glyphs above. The result is softbuffer's 0RGB format.
+//! Rects first, glyphs above. The result is the frame's pixel format,
+//! packed by `paint::pixel`.
 
 use cosmic_text::{Attrs, Buffer, Color, Family, Metrics, Shaping, Style, Weight};
 use tiny_skia::{Pixmap, Rect, Transform};
@@ -156,7 +157,7 @@ pub fn band_numbered(
         .as_chunks::<4>()
         .0
         .iter()
-        .map(|px| ((px[0] as u32) << 16) | ((px[1] as u32) << 8) | px[2] as u32)
+        .map(|px| super::pixel(px[0], px[1], px[2]))
         .collect()
 }
 
@@ -393,7 +394,7 @@ mod tests {
     use std::path::PathBuf;
 
     fn packed(c: Rgba) -> u32 {
-        ((c.r as u32) << 16) | ((c.g as u32) << 8) | c.b as u32
+        crate::paint::pixel(c.r, c.g, c.b)
     }
 
     fn corner_pixel(doc: &Document) -> u32 {
@@ -497,5 +498,37 @@ mod tests {
             packed(theme.surface.background),
             "prose keeps the page background"
         );
+    }
+
+    /// softbuffer's `XRGB8888` buffer leaves the top byte unused, and
+    /// KWin 6.8 reads it as the pixel's opacity: a zero there drew the
+    /// window transparent. Each pixel of a band carries 0xFF there.
+    #[test]
+    fn every_pixel_of_a_band_is_opaque() {
+        let theme = Theme::default_dark();
+        let mut fonts = FontStore::new();
+        let mut media = MediaCache::offline(PathBuf::from("."));
+        let doc = load::code_document(Some("rust"), "let x = 1;\n");
+        let lay = layout(
+            &doc,
+            &theme,
+            &mut fonts,
+            &mut media,
+            &ViewConfig::default(),
+            200.0,
+        );
+        let pixels = band(
+            &lay,
+            &doc,
+            &theme,
+            &mut fonts,
+            &mut media,
+            &[],
+            0.0,
+            200,
+            60,
+        );
+        let clear = pixels.iter().find(|px| *px >> 24 != 0xFF);
+        assert_eq!(clear, None, "a pixel without 0xFF in its top byte");
     }
 }

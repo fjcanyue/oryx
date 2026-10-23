@@ -74,6 +74,7 @@ fn highlight_all(doc: &mut Document) {
                 spans,
                 seam: None,
                 converged: false,
+                reach: 0,
                 speculative: false,
             },
         );
@@ -237,6 +238,7 @@ fn unhighlighted_tail_renders_in_foreground() {
             spans: spans[0..1].to_vec(),
             seam: None,
             converged: false,
+            reach: 0,
             speculative: false,
         },
     );
@@ -345,6 +347,101 @@ fn inline_code_gets_pill() {
         .find(|r| r.color == t.text.inline_code_bg)
         .expect("pill rect");
     assert!(pill.x <= run.x && pill.x + pill.width >= run.x + run.width);
+}
+
+#[test]
+fn a_highlight_on_a_right_to_left_line_keeps_its_pill_whole() {
+    // The bidi rules place the final period of the highlight at its left
+    // end, as a run of its own; the pill must cover that run too.
+    let (doc, l) = lay2("نص عربي ثم ==highlight here.== ثم نهاية.\n", 800.0);
+    let t = Theme::default_dark();
+    let pills: Vec<&DecoRect> = l
+        .rects
+        .iter()
+        .filter(|r| r.color == t.ui.search_match_bg)
+        .collect();
+    assert_eq!(pills.len(), 1, "one pill for the highlight");
+    let pill = pills[0];
+    let mut seen = 0;
+    for r in &l.runs {
+        let text = l.run_text(&doc, r);
+        if text.trim().is_empty() || !"highlight here.".contains(text.trim()) {
+            continue;
+        }
+        seen += 1;
+        assert!(
+            pill.x <= r.x + 0.5 && pill.x + pill.width >= r.x + r.width - 0.5,
+            "the run {text:?} at {} + {} is outside the pill at {} + {}",
+            r.x,
+            r.width,
+            pill.x,
+            pill.width
+        );
+    }
+    assert!(
+        seen >= 2,
+        "the period is a run of its own: {seen} runs seen"
+    );
+}
+
+#[test]
+fn inline_code_on_a_right_to_left_line_is_one_run() {
+    // Code is drawn as written: its group is not cut where the bidi
+    // rules move its brackets to the other end.
+    let (doc, l) = lay2("نص عربي `print()` ثم نهاية.\n", 800.0);
+    let code: Vec<&str> = l
+        .runs
+        .iter()
+        .filter(|r| l.run_family(r) == CODE_FAMILY)
+        .map(|r| l.run_text(&doc, r))
+        .collect();
+    assert_eq!(code, vec!["print()"]);
+}
+
+#[test]
+fn justified_inline_code_on_a_right_to_left_line_does_not_overlap() {
+    // With justification on, the words of a code span are groups of
+    // their own, so a gap the bidi rules open is cut like any other:
+    // a group that kept it would span the bytes of the other words.
+    let src = "استخدم `--help` ثم `abc def.` هنا، و **bold words.** في النهاية.\n";
+    for w in [800.0, 1000.0] {
+        let (doc, l) = lay_justified(src, w);
+        let found = overlapping_runs(&l, &doc);
+        assert!(found.is_empty(), "runs overlap at {w} wide: {found:?}");
+        // A code span without a space is one group whatever the
+        // justification, so it is drawn as written there too.
+        let code: Vec<&str> = l
+            .runs
+            .iter()
+            .filter(|r| l.run_family(r) == CODE_FAMILY)
+            .map(|r| l.run_text(&doc, r))
+            .collect();
+        assert!(
+            code.contains(&"--help"),
+            "the code without a space is one run at {w} wide: {code:?}"
+        );
+        // A run paints its whole text from its x: a byte in two runs is
+        // drawn twice, the second time over the other run.
+        let mut ranges: Vec<(usize, u32, u32)> = l
+            .runs
+            .iter()
+            .filter_map(|r| match r.text {
+                TextRef::Model { start, len } => Some((r.span, start, start + len)),
+                TextRef::Side { .. } => None,
+            })
+            .collect();
+        ranges.sort_unstable();
+        for pair in ranges.windows(2) {
+            let (sa, _, a1) = pair[0];
+            let (sb, b0, _) = pair[1];
+            assert!(
+                sa != sb || b0 >= a1,
+                "a byte is covered twice at {w} wide: {:?} then {:?}",
+                pair[0],
+                pair[1]
+            );
+        }
+    }
 }
 
 #[test]
@@ -607,6 +704,69 @@ fn table_columns_header_and_stripes() {
     let a = find_text(&l, &doc, "a");
     assert!(a.y > alpha.y, "body row below header");
     assert!((a.x - alpha.x).abs() < 1.0, "same column aligns");
+}
+
+/// The marks of the separator row align the column: `:---:` centers the
+/// cell's lines in the column, `---:` puts them against its right edge,
+/// `:---` and `---` leave them at the left. The example of SYNTAX.md.
+/// A formula in a table cell goes through the text fallback, which
+/// reads an escaped reserved character as noad does on the page.
+#[test]
+fn a_formula_in_a_cell_shows_its_escaped_characters() {
+    let (doc, l) = lay2("| cell |\n|---|\n| $15\\%$ and $x\\_1$ |\n", 800.0);
+    find_text(&l, &doc, "15%");
+    find_text(&l, &doc, "x_1");
+}
+
+#[test]
+fn table_columns_follow_their_alignment_marks() {
+    let (doc, l) = lay2(
+        "| Left | Center | Right |\n|:-----|:------:|------:|\n| a | b | c |\n| long cells wrap | stripes alternate | columns size to content |\n",
+        800.0,
+    );
+    let t = Theme::default_dark();
+    let outline = l
+        .rects
+        .iter()
+        .find(|r| r.color == t.blocks.table_border && r.stroke > 0.0)
+        .expect("the outline");
+    let mut lines: Vec<f32> = l
+        .rects
+        .iter()
+        .filter(|r| r.color == t.blocks.table_border && r.stroke == 0.0 && r.height > r.width)
+        .map(|r| r.x)
+        .collect();
+    lines.sort_by(f32::total_cmp);
+    assert_eq!(lines.len(), 2, "two inner column lines");
+    let (x1, x2, x3) = (lines[0], lines[1], outline.x + outline.width);
+    let pad = 8.0;
+    let a = find_text(&l, &doc, "a");
+    let b = find_text(&l, &doc, "b");
+    let c = find_text(&l, &doc, "c");
+    let header = find_text(&l, &doc, "Center");
+    assert!(
+        (a.x - (outline.x + pad)).abs() < 1.5,
+        "a at the left edge: {} against {}",
+        a.x,
+        outline.x + pad
+    );
+    let mid = (x1 + x2) / 2.0;
+    assert!(
+        (b.x + b.width / 2.0 - mid).abs() < 1.5,
+        "b centered: {} against {mid}",
+        b.x + b.width / 2.0
+    );
+    assert!(
+        (header.x + header.width / 2.0 - mid).abs() < 1.5,
+        "the header is centered too: {} against {mid}",
+        header.x + header.width / 2.0
+    );
+    assert!(
+        (c.x + c.width - (x3 - pad)).abs() < 1.5,
+        "c at the right edge: {} against {}",
+        c.x + c.width,
+        x3 - pad
+    );
 }
 
 #[test]
@@ -1130,7 +1290,7 @@ fn math_glyphs_reach_the_pixels() {
     let g = &l.math_glyphs[0];
     let pixels = oryx::paint::band(&l, &doc, &t, &mut f, &mut media, &[], 0.0, 800, 400);
     let bg = t.surface.background;
-    let bgpx = ((bg.r as u32) << 16) | ((bg.g as u32) << 8) | bg.b as u32;
+    let bgpx = oryx::paint::pixel(bg.r, bg.g, bg.b);
     // Ink lands somewhere in the box around the first glyph's baseline.
     let mut inked = false;
     for y in (g.y - g.size) as usize..(g.y + 0.4 * g.size) as usize {
@@ -1207,7 +1367,7 @@ fn quote_region_paints_without_seam() {
         let bottom = panels.iter().map(|r| r.y + r.height).fold(0.0, f32::max);
         let pixels = oryx::paint::band(&l, &doc, &t, &mut fonts(), &mut media, &[], 0.0, 800, 900);
         let bg = t.surface.background;
-        let bgpx = ((bg.r as u32) << 16) | ((bg.g as u32) << 8) | bg.b as u32;
+        let bgpx = oryx::paint::pixel(bg.r, bg.g, bg.b);
         let x = (0.08 * 800.0) as usize + 30;
         for row in (top.ceil() as usize + 1)..(bottom.floor() as usize - 1) {
             assert_ne!(
@@ -3258,9 +3418,9 @@ pill x={} y={} w={}",
 
 #[test]
 fn punctuation_glued_to_an_equation_stays_on_its_line() {
-    // The continuation after the equation is too long to merge back, so
-    // it wraps below; the period glued to the equation must not go with
-    // it.
+    // The continuation after the equation is too long to merge back
+    // whole: the words that fit stay on the equation's line, the period
+    // glued to the equation first, and the rest wraps below.
     let src = "Roots take an optional degree: $\\sqrt[23]{x+1}$. Now this \
 continuation is deliberately long enough that it cannot merge back as a \
 single line and must wrap onto several more lines below the equation.";
@@ -3271,8 +3431,8 @@ single line and must wrap onto several more lines below the equation.";
     let period = l
         .runs
         .iter()
-        .find(|r| l.run_text(&doc, r).trim() == ".")
-        .expect("the period shapes as its own run");
+        .find(|r| l.run_text(&doc, r).starts_with('.'))
+        .expect("the period starts the run after the equation");
     assert!(
         (period.baseline - eq_base).abs() < 2.0,
         "the period stays on the equation's line: period baseline {} vs \
@@ -3281,14 +3441,27 @@ equation baseline {}",
         eq_base
     );
     assert!(period.x >= eq_end, "and sits right after the equation");
-    // The continuation still reads in order below, and its runs resolve
-    // the right model text after the offset shift.
-    let now = l
+    // The continuation reads in order, on the equation's line and then
+    // below it, and its runs resolve the right model text after the
+    // offset shift.
+    let mut after: Vec<&TextRun> = l
         .runs
         .iter()
-        .find(|r| l.run_text(&doc, r).contains("Now this continuation"))
-        .expect("the continuation resolves its text");
-    assert!(now.baseline > eq_base + 2.0, "the long chunk wraps below");
+        .filter(|r| {
+            r.baseline > eq_base + 2.0 || (r.x >= eq_end && (r.baseline - eq_base).abs() < 2.0)
+        })
+        .collect();
+    after.sort_by(|a, b| (a.y, a.x).partial_cmp(&(b.y, b.x)).unwrap());
+    assert!(
+        after.iter().any(|r| r.baseline > eq_base + 2.0),
+        "the long chunk wraps below"
+    );
+    let read: Vec<&str> = after.iter().map(|r| l.run_text(&doc, r)).collect();
+    let read = read.join(" ");
+    let read: Vec<&str> = read.split_whitespace().collect();
+    let chunk = &src[src.find("$.").unwrap() + 1..];
+    let expected: Vec<&str> = chunk.split_whitespace().collect();
+    assert_eq!(read, expected);
 }
 
 #[test]
@@ -5186,4 +5359,337 @@ fn a_page_that_got_much_shorter_under_the_view_shows_its_end() {
             "{what}: the end is drawn"
         );
     }
+}
+
+// Task 276: the window follows the retention bound when it jumps during
+// the pass. A jump to the bottom while the file is still being placed
+// moves the bound far past the window; the blocks between are placed
+// outside it and dropped, and the first block inside it opens a new
+// window in place of extending the old one, whose marks it would be
+// read by otherwise.
+#[test]
+fn the_window_follows_a_jump_of_the_bound_during_the_pass() {
+    let text: String = (0..800)
+        .map(|i| format!("Paragraph {i} of a page long enough to jump in while it is placed.\n\n"))
+        .collect();
+    let doc = markdown::parse(text);
+    let mut fonts = fonts();
+    let mut media = MediaCache::offline(PathBuf::from("."));
+    let vh = 600.0;
+    let (mut out, mut pass) = layout_begin(&doc, &cfg(), 800.0);
+    pass.retain_around(0.0, vh);
+    for _ in 0..40 {
+        layout_step(
+            &doc,
+            &theme(),
+            &mut fonts,
+            &mut media,
+            &cfg(),
+            &mut out,
+            &mut pass,
+        );
+    }
+    let near_top = out.window_span().expect("a windowed layout");
+    assert!(near_top.end > 0.0, "the first blocks are materialized");
+    // The jump: the bound moves far below what is placed so far.
+    let far = 15_000.0;
+    pass.retain_around(far, vh);
+    layout_more(
+        &doc,
+        &theme(),
+        &mut fonts,
+        &mut media,
+        &cfg(),
+        &mut out,
+        &mut pass,
+        None,
+    );
+    assert!(
+        out.height > far + 6.0 * vh,
+        "the page reaches past the bound: {}",
+        out.height
+    );
+    out.records_consistent()
+        .expect("the marks and the vectors agree after the jump");
+    let span = out.window_span().expect("a windowed layout");
+    assert!(
+        span.start > near_top.end,
+        "the blocks of the old window are gone: {span:?}"
+    );
+    assert!(
+        span.start < far && span.end > far,
+        "the window holds the blocks around the jump: {span:?}"
+    );
+    // The vectors hold the new window's own blocks: the first run
+    // belongs to the block at the window's start.
+    let first = out
+        .block_at(span.start + 1.0)
+        .expect("a block at the window's start");
+    assert_eq!(
+        out.runs[0].block, first,
+        "the runs are in step with the marks"
+    );
+}
+
+#[test]
+fn no_line_starts_with_a_space_after_an_inline_formula() {
+    // The sentence of the picture of 05/10/2026 (Task 261), at each
+    // width from 400 to 1200 pixels: the first run of a line never
+    // starts with a space.
+    let source = "A pendulum of length $L$ takes the same time for each swing. The period $T$ depends on the length and on gravity $g$:\n";
+    let mut fonts = fonts();
+    let doc = markdown::parse(source);
+    let mut faults = Vec::new();
+    for w in 400..=1200 {
+        let l = lay_doc(&doc, w as f32, &mut fonts);
+        let mut lines: Vec<(f32, Vec<&TextRun>)> = Vec::new();
+        for r in &l.runs {
+            match lines.iter_mut().find(|(y, _)| (*y - r.y).abs() < 0.5) {
+                Some((_, runs)) => runs.push(r),
+                None => lines.push((r.y, vec![r])),
+            }
+        }
+        for (y, runs) in &mut lines {
+            runs.sort_by(|a, b| a.x.partial_cmp(&b.x).unwrap());
+            let text = l.run_text(&doc, runs[0]);
+            // A formula that opens the line is a math glyph, not a run,
+            // and the words after it keep their space.
+            let after_formula = l
+                .math_glyphs
+                .iter()
+                .any(|g| g.y > *y && g.y < *y + 40.0 && g.x < runs[0].x);
+            if text.starts_with(' ') && !after_formula {
+                faults.push((w, text.to_string()));
+            }
+        }
+    }
+    assert!(faults.is_empty(), "lines starting with a space: {faults:?}");
+}
+
+#[test]
+fn the_words_that_fit_after_an_inline_formula_stay_on_its_line() {
+    // At 400 wide the content runs from x 32 to 368. "The period T" ends
+    // near x 170, so "depends on the" fits on that line and "length"
+    // starts the next one, at the margin and without a leading space.
+    let (doc, l) = lay2(
+        "The period $T$ depends on the length and on gravity and on nothing else at all.\n",
+        400.0,
+    );
+    let first_y = l.runs.iter().map(|r| r.y).fold(f32::MAX, f32::min);
+    let first_line: Vec<&str> = l
+        .runs
+        .iter()
+        .filter(|r| (r.y - first_y).abs() < 0.5)
+        .map(|r| l.run_text(&doc, r))
+        .collect();
+    assert_eq!(first_line, vec!["The period", " depends on the"]);
+    let second = l
+        .runs
+        .iter()
+        .filter(|r| r.y > first_y + 0.5)
+        .min_by(|a, b| a.y.partial_cmp(&b.y).unwrap())
+        .expect("a second line");
+    assert_eq!(second.x, l.runs[0].x, "at the margin");
+    assert!(
+        l.run_text(&doc, second).starts_with("length"),
+        "second line starts with {:?}",
+        l.run_text(&doc, second)
+    );
+}
+
+/// The runs of one baseline, each pair checked for an overlap in x.
+fn overlapping_runs<'a>(l: &'a LayoutDoc, doc: &'a Document) -> Vec<(&'a str, &'a str)> {
+    let mut found = Vec::new();
+    for (i, a) in l.runs.iter().enumerate() {
+        for b in &l.runs[i + 1..] {
+            let same_line = (a.baseline - b.baseline).abs() < 1.0;
+            let overlap = a.x < b.x + b.width - 1.0 && b.x < a.x + a.width - 1.0;
+            if same_line && overlap {
+                found.push((l.run_text(doc, a), l.run_text(doc, b)));
+            }
+        }
+    }
+    found
+}
+
+#[test]
+fn the_latin_words_of_a_justified_right_to_left_line_do_not_overlap() {
+    // The chunk after the formula reads right to left and ends with a
+    // Latin tail, whose final period the bidi rules place at the tail's
+    // left end, next to its first word. No run of the line may hold
+    // several words, and no two runs of a line may overlap.
+    let src = "The period of the swing $T$ يعتمد على الطول والجاذبية and on gravity and on nothing else at all here today.\n";
+    let (doc, l) = lay_justified(src, 600.0);
+    let found = overlapping_runs(&l, &doc);
+    assert!(found.is_empty(), "runs overlap: {found:?}");
+    for r in &l.runs {
+        let t = l.run_text(&doc, r);
+        assert!(!t.trim().contains(' '), "a run holds several words: {t:?}");
+    }
+}
+
+#[test]
+fn arabic_words_after_an_inline_formula_overlap_nothing() {
+    // The words after the formula read right to left, so they are not
+    // split onto the formula's line: shaped alone they would be laid
+    // out as a right-to-left line and placed over the text before it.
+    let src = "The period of the swing $T$ يعتمد على الطول والجاذبية and on gravity and on nothing else at all here today.\n";
+    for w in 540..=600 {
+        let (doc, l) = lay2(src, w as f32);
+        let found = overlapping_runs(&l, &doc);
+        assert!(found.is_empty(), "at {w} wide: {found:?}");
+    }
+}
+
+#[test]
+fn a_right_to_left_paragraph_keeps_the_words_after_a_formula_below_its_row() {
+    // The formula opens a row of its own; the words after it went below
+    // the row before Task 281, and read after the formula there.
+    let src =
+        "يعتمد زمن الدورة $T$ على طول الخيط وعلى الجاذبية الأرضية فقط ولا شيء آخر على الإطلاق هنا.\n";
+    let (doc, l) = lay2(src, 400.0);
+    let row = l.math_glyphs.iter().map(|g| g.y).fold(0.0, f32::max);
+    let after = l
+        .runs
+        .iter()
+        .find(|r| l.run_text(&doc, r).contains("على طول"))
+        .expect("the words after the formula");
+    assert!(
+        after.baseline > row + 2.0,
+        "the words after the formula sit at baseline {} with the row at {row}",
+        after.baseline
+    );
+}
+
+#[test]
+fn a_footnote_reference_alone_after_a_formula_keeps_its_raise() {
+    // The reference is the only run that fits on the formula's line,
+    // and the line's baseline is the box's, not the raised run's.
+    let src = "The period of the swing $T$[^1] depends strongly on the length and on gravity and on nothing else at all here.\n\n[^1]: A note.\n";
+    let (doc, l) = lay2(src, 400.0);
+    let text = find_text(&l, &doc, "The period of the swing");
+    let reference = l
+        .runs
+        .iter()
+        .find(|r| l.run_text(&doc, r) == "1" && (r.y - text.y).abs() < 12.0)
+        .expect("the reference on the formula's line");
+    assert!(
+        reference.baseline < text.baseline - 3.0,
+        "reference baseline {} against the text's {}",
+        reference.baseline,
+        text.baseline
+    );
+}
+
+#[test]
+fn a_word_glued_to_a_formula_is_not_cut_inside() {
+    // A word wider than the room left breaks between glyphs when
+    // shaped alone; such a cut is refused and the word goes whole to
+    // the next line.
+    let src = "The number of the steps in the walk is $n$thousandfoldnesses keeps going on and on for quite a while.\n";
+    for w in [380.0, 400.0] {
+        let (doc, l) = lay2(src, w);
+        assert!(
+            l.runs
+                .iter()
+                .any(|r| l.run_text(&doc, r).contains("thousandfoldnesses")),
+            "at {w} wide the word is cut: {:?}",
+            l.runs
+                .iter()
+                .map(|r| l.run_text(&doc, r))
+                .collect::<Vec<_>>()
+        );
+    }
+}
+
+#[test]
+fn the_words_up_to_a_hyphen_join_the_formula_line() {
+    // At 500 wide the room after "The period of the swing T" ends inside
+    // "well-known". The shaper breaks after the hyphen, a break the
+    // Unicode rules allow, so the words up to "well-" stay on the line
+    // and "known" starts the next one.
+    let (doc, l) = lay2(
+        "The period of the swing $T$ is a well-known quantity of the pendulum and gravity.\n",
+        500.0,
+    );
+    let first_y = l.runs.iter().map(|r| r.y).fold(f32::MAX, f32::min);
+    let first_line: Vec<&str> = l
+        .runs
+        .iter()
+        .filter(|r| (r.y - first_y).abs() < 0.5)
+        .map(|r| l.run_text(&doc, r))
+        .collect();
+    assert_eq!(first_line, vec!["The period of the swing", " is a well-"]);
+    let second = l
+        .runs
+        .iter()
+        .filter(|r| r.y > first_y + 0.5)
+        .min_by(|a, b| a.y.partial_cmp(&b.y).unwrap())
+        .expect("a second line");
+    assert!(
+        l.run_text(&doc, second).starts_with("known"),
+        "second line starts with {:?}",
+        l.run_text(&doc, second)
+    );
+}
+
+#[test]
+fn chinese_text_after_a_formula_joins_its_line() {
+    // Chinese has no spaces: a line may break between any two characters,
+    // so the characters that fit after the formula stay on its line and
+    // the rest starts the next one at the margin.
+    let (doc, l) = lay2(
+        "摆的周期 $T$ 取决于摆的长度和重力加速度以及其他很多很多因素的影响程度大小和方向。\n",
+        500.0,
+    );
+    let first_y = l.runs.iter().map(|r| r.y).fold(f32::MAX, f32::min);
+    let first_line: Vec<&str> = l
+        .runs
+        .iter()
+        .filter(|r| (r.y - first_y).abs() < 0.5)
+        .map(|r| l.run_text(&doc, r))
+        .collect();
+    assert_eq!(first_line.len(), 2, "the first line holds {first_line:?}");
+    assert_eq!(first_line[0], "摆的周期");
+    assert!(
+        first_line[1].starts_with(" 取决于"),
+        "the first line holds {first_line:?}"
+    );
+    let second = l
+        .runs
+        .iter()
+        .filter(|r| r.y > first_y + 0.5)
+        .min_by(|a, b| a.y.partial_cmp(&b.y).unwrap())
+        .expect("a second line");
+    assert_eq!(second.x, l.runs[0].x, "at the margin");
+    assert!(!l.run_text(&doc, second).starts_with(' '));
+}
+
+#[test]
+fn a_raised_pill_on_the_line_below_the_kept_one_is_not_kept() {
+    // The shaping in the room left emits the first visual line only,
+    // so no rectangle of the second line is carried onto the formula's
+    // line.
+    let src = "The number of the steps in the walk $x$ alphabetical numerically <sup><mark>beta</mark></sup> gamma delta epsilon zeta eta theta iota kappa lambda.\n";
+    for w in [360.0, 400.0, 440.0] {
+        let l = lay(src, w);
+        assert_eq!(l.rects.len(), 1, "at {w} wide: {:?}", l.rects);
+    }
+}
+
+#[test]
+fn a_lone_image_in_markdown_stays_at_the_left() {
+    // The standard reading of markdown: a book centers its lone images,
+    // a markdown page does not.
+    let dir = std::env::temp_dir().join(format!("oryx-laytest-left-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let img = image::RgbaImage::from_pixel(100, 50, image::Rgba([10, 20, 30, 255]));
+    img.save(dir.join("small.png")).unwrap();
+    let margin = lay("text", 800.0).runs[0].x;
+    let l = lay_with_images("![small](small.png)", 800.0, dir);
+    assert!(
+        (l.images[0].x - margin).abs() < 0.5,
+        "at {} with the margin at {margin}",
+        l.images[0].x
+    );
 }

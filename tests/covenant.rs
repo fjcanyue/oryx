@@ -1,10 +1,10 @@
 //! The byte covenant, proven over a corpus: opening a file and saving
 //! it with zero edits writes the original bytes back, and any single
 //! edit's effect on the written file stays confined to the lines it
-//! touched. The corpus is every shipped example plus this crate's own
-//! sources, read through the real loader, with synthetic mixed-ending
-//! fixtures beside them; files the loader flags lossy are skipped, as
-//! the editing door refuses them.
+//! touched. The corpus is every shipped example under 1 MB plus this
+//! crate's own sources, read through the real loader, with synthetic
+//! mixed-ending fixtures beside them; files the loader flags lossy are
+//! skipped, as the editing door refuses them.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -40,7 +40,13 @@ fn corpus() -> Vec<(String, Vec<u8>)> {
             if !matches!(ext, "md" | "txt" | "rs" | "toml") {
                 continue;
             }
+            // The examples folder ships an 8 MB challenge file, and the
+            // covenant writes each file back nine times: a file over
+            // 1 MB stays out of the corpus.
             if let Ok(bytes) = std::fs::read(&path) {
+                if bytes.len() > 1 << 20 {
+                    continue;
+                }
                 files.push((path.display().to_string(), bytes));
             }
         }

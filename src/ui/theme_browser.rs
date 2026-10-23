@@ -461,9 +461,12 @@ impl Overlay for ThemeBrowser {
                         1.0,
                         border,
                     );
+                    let positions = painter.boundaries(buffer, BODY_FAMILY, 15.0, 400);
                     if let Some(range) = field.selection() {
-                        let from = painter.measure(&buffer[..range.start], BODY_FAMILY, 15.0, 400);
-                        let to = painter.measure(&buffer[..range.end], BODY_FAMILY, 15.0, 400);
+                        let from = field.offset_of(range.start, &positions);
+                        let to = field.offset_of(range.end, &positions);
+                        // On right-to-left text the end stands left of the start.
+                        let (from, to) = (from.min(to), from.max(to));
                         painter.fill(
                             self.geometry.name_x + from,
                             ry + 7.0,
@@ -482,7 +485,7 @@ impl Overlay for ThemeBrowser {
                         400,
                         theme.ui.overlay_fg,
                     );
-                    let caret = field.caret_offset(|s| painter.measure(s, BODY_FAMILY, 15.0, 400));
+                    let caret = field.caret_offset(&positions);
                     painter.fill(
                         self.geometry.name_x + caret + 1.5,
                         ry + 7.0,
@@ -492,7 +495,7 @@ impl Overlay for ThemeBrowser {
                         theme.ui.overlay_fg,
                     );
                     rename_box = Some((
-                        field.offsets(|s| painter.measure(s, BODY_FAMILY, 15.0, 400)),
+                        positions,
                         (self.geometry.name_x - 5.0, ry + 2.0, field_w, ROW_H - 8.0),
                     ));
                 }

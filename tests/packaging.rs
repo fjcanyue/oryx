@@ -650,7 +650,7 @@ fn the_deb_installs_the_staged_tree_and_names_its_dependencies() {
         "Section: editors\n",
         "Architecture: amd64\n",
         "Maintainer: Walid Mahfoudh <walid.mahfoudh@gmail.com>\n",
-        "Depends: libc6 (>= 2.35), libssl3 (>= 3.0.0)\n",
+        "Depends: libc6 (>= 2.35), libssl3 (>= 3.0.0), libxkbcommon0, libxkbcommon-x11-0\n",
         "Homepage: https://github.com/wmahfoudh/oryx\n",
         "Description: Fast editor for markdown and code, reader for ebooks and comics\n",
     ] {
@@ -660,7 +660,7 @@ fn the_deb_installs_the_staged_tree_and_names_its_dependencies() {
 }
 
 #[test]
-fn the_rpm_requires_libssl_3_and_carries_the_metadata() {
+fn the_rpm_requires_its_libraries_and_carries_the_metadata() {
     let Some(dir) = nfpm_packages("rpm") else {
         return;
     };
@@ -675,7 +675,16 @@ fn the_rpm_requires_libssl_3_and_carries_the_metadata() {
         .output()
         .unwrap();
     let requires = String::from_utf8_lossy(&requires.stdout);
-    assert!(requires.contains("libssl.so.3()(64bit)\n"), "{requires}");
+    for library in [
+        "libssl.so.3()(64bit)\n",
+        "libxkbcommon.so.0()(64bit)\n",
+        "libxkbcommon-x11.so.0()(64bit)\n",
+    ] {
+        assert!(
+            requires.contains(library),
+            "{library:?} missing:\n{requires}"
+        );
+    }
     let info = Command::new("rpm")
         .args([
             "-qp",
@@ -786,6 +795,52 @@ fn app_run_keeps_the_default_data_dirs_when_the_variable_is_unset() {
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
+/// A stand-in for a tool, on a folder the test puts first on the PATH: a
+/// shell script with the given body.
+#[cfg(unix)]
+fn stand_in(bin: &Path, name: &str, body: &str) {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::create_dir_all(bin).unwrap();
+    let tool = bin.join(name);
+    std::fs::write(&tool, format!("#!/bin/sh\n{body}")).unwrap();
+    std::fs::set_permissions(&tool, std::fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+/// The PATH with `bin` in front of the session's.
+#[cfg(unix)]
+fn path_with(bin: &Path) -> String {
+    format!(
+        "{}:{}",
+        bin.display(),
+        std::env::var("PATH").unwrap_or_default()
+    )
+}
+
+/// The three libraries of the X11 keyboard path that the AppImage
+/// bundles, by soname.
+#[cfg(unix)]
+const KEYBOARD_LIBRARIES: [&str; 3] = [
+    "libxkbcommon.so.0",
+    "libxkbcommon-x11.so.0",
+    "libxcb-xkb.so.1",
+];
+
+/// The keyboard libraries as a distribution installs them, as small
+/// files: the soname is a link to the versioned file. The folder is what
+/// `APPIMAGE_LIBS` names in the tests of appimage.sh.
+#[cfg(unix)]
+fn keyboard_library_stubs(dir: &Path) -> PathBuf {
+    let libs = dir.join("libs");
+    std::fs::create_dir_all(&libs).unwrap();
+    for soname in KEYBOARD_LIBRARIES {
+        let file = format!("{soname}.0.0");
+        std::fs::write(libs.join(&file), format!("{soname} bytes\n")).unwrap();
+        std::os::unix::fs::symlink(&file, libs.join(soname)).unwrap();
+    }
+    libs
+}
+
+#[cfg(unix)]
 #[test]
 fn appimage_sh_packs_the_staged_tree_with_the_entry_and_the_icon_on_top() {
     // appimagetool is itself an AppImage and needs FUSE to start, so
@@ -816,11 +871,17 @@ fn appimage_sh_packs_the_staged_tree_with_the_entry_and_the_icon_on_top() {
         "#!/bin/sh\nprintf '%s\\n' \"$XDG_DATA_DIRS\" \"$@\"\n",
     )
     .unwrap();
+    // The stub binary is a shell script, which patchelf would refuse.
+    let bin = dir.join("bin");
+    stand_in(&bin, "patchelf", "");
+    let libs = keyboard_library_stubs(&dir);
     let image = dir.join("Oryx-1.2.3-x86_64.AppImage");
     let out = Command::new("sh")
         .arg(repo().join("packaging/appimage.sh"))
         .arg(&usr)
         .arg(&image)
+        .env("PATH", path_with(&bin))
+        .env("APPIMAGE_LIBS", &libs)
         .output()
         .unwrap();
     assert!(
@@ -858,6 +919,9 @@ fn appimage_sh_packs_the_staged_tree_with_the_entry_and_the_icon_on_top() {
         "usr/share/oryx/themes/dracula.toml",
         "usr/share/oryx/examples/sample.md",
         "usr/share/icons/hicolor/256x256/apps/com.steerania.Oryx.png",
+        "usr/lib/libxkbcommon.so.0",
+        "usr/lib/libxkbcommon-x11.so.0",
+        "usr/lib/libxcb-xkb.so.1",
     ] {
         assert!(root.join(file).is_file(), "{file} missing");
     }
@@ -895,7 +959,6 @@ fn appimage_sh_packs_the_staged_tree_with_the_entry_and_the_icon_on_top() {
 #[cfg(unix)]
 #[test]
 fn appimage_sh_lets_every_user_enter_the_top_folder_of_the_image() {
-    use std::os::unix::fs::PermissionsExt;
     if Command::new("rsvg-convert")
         .arg("--version")
         .output()
@@ -916,26 +979,21 @@ fn appimage_sh_lets_every_user_enter_the_top_folder_of_the_image() {
         String::from_utf8_lossy(&out.stderr)
     );
     let bin = dir.join("bin");
-    std::fs::create_dir_all(&bin).unwrap();
-    let tool = bin.join("appimagetool");
-    std::fs::write(
-        &tool,
-        "#!/bin/sh\nfor arg; do appdir=$out; out=$arg; done\nstat -c %a \"$appdir\" > \"$out\"\n",
-    )
-    .unwrap();
-    std::fs::set_permissions(&tool, std::fs::Permissions::from_mode(0o755)).unwrap();
-    let path = format!(
-        "{}:{}",
-        bin.display(),
-        std::env::var("PATH").unwrap_or_default()
+    stand_in(
+        &bin,
+        "appimagetool",
+        "for arg; do appdir=$out; out=$arg; done\nstat -c %a \"$appdir\" > \"$out\"\n",
     );
+    stand_in(&bin, "patchelf", "");
+    let libs = keyboard_library_stubs(&dir);
     let image = dir.join("Oryx-1.2.3-x86_64.AppImage");
     let out = Command::new("sh")
         .arg(repo().join("packaging/appimage.sh"))
         .arg(&usr)
         .arg(&image)
-        .env("PATH", path)
+        .env("PATH", path_with(&bin))
         .env("APPIMAGE_RUNTIME", dir.join("no-runtime"))
+        .env("APPIMAGE_LIBS", &libs)
         .output()
         .unwrap();
     assert!(
@@ -948,6 +1006,110 @@ fn appimage_sh_lets_every_user_enter_the_top_folder_of_the_image() {
         std::fs::read_to_string(&image).unwrap(),
         "755\n",
         "the mode of the AppDir handed to appimagetool"
+    );
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// The AppImage bundles the three libraries of the X11 keyboard path,
+/// which winit loads at run time and which a minimal system lacks, and
+/// gives the binary a search path to them: a RUNPATH, so that nothing
+/// leaks into the programs Oryx starts. Stand-ins for `appimagetool`
+/// (which copies the AppDir out) and `patchelf` (which records its
+/// arguments) let the test run without the tools and without an ELF.
+#[cfg(unix)]
+#[test]
+fn appimage_sh_bundles_the_keyboard_libraries_and_sets_their_search_path() {
+    if Command::new("rsvg-convert")
+        .arg("--version")
+        .output()
+        .is_err()
+    {
+        eprintln!("rsvg-convert is not installed, skipped");
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("oryx-appimage-libs-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let src = dir.join("src");
+    let usr = dir.join("usr");
+    source_folder(&src);
+    let out = stage(&src, &usr);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let libs = keyboard_library_stubs(&dir);
+    let bin = dir.join("bin");
+    stand_in(
+        &bin,
+        "appimagetool",
+        "for arg; do appdir=$out; out=$arg; done\ncp -r \"$appdir\" \"$out\"\n",
+    );
+    // The stand-in records each call as a line.
+    let record = dir.join("patchelf.args");
+    stand_in(
+        &bin,
+        "patchelf",
+        &format!("echo \"$*\" >> {}\n", record.display()),
+    );
+    let path = path_with(&bin);
+    let image = dir.join("Oryx-1.2.3-x86_64.AppImage");
+    let run = |libs: &Path| {
+        Command::new("sh")
+            .arg(repo().join("packaging/appimage.sh"))
+            .arg(&usr)
+            .arg(&image)
+            .env("PATH", &path)
+            .env("APPIMAGE_RUNTIME", dir.join("no-runtime"))
+            .env("APPIMAGE_LIBS", libs)
+            .output()
+            .unwrap()
+    };
+    let out = run(&libs);
+    assert!(
+        out.status.success(),
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    for soname in KEYBOARD_LIBRARIES {
+        let copy = image.join("usr/lib").join(soname);
+        assert!(
+            copy.is_file() && !copy.is_symlink(),
+            "{soname} is a plain file under usr/lib"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&copy).unwrap(),
+            format!("{soname} bytes\n")
+        );
+    }
+    // Each library gets a RUNPATH to its own folder, for its own needs,
+    // and the binary one to the library folder.
+    let calls = std::fs::read_to_string(&record).unwrap();
+    let calls: Vec<&str> = calls.lines().collect();
+    assert_eq!(calls.len(), 4, "{calls:?}");
+    for (call, soname) in calls.iter().zip(KEYBOARD_LIBRARIES) {
+        assert!(
+            call.starts_with("--set-rpath $ORIGIN ")
+                && call.ends_with(&format!("/usr/lib/{soname}")),
+            "{calls:?}"
+        );
+    }
+    assert!(
+        calls[3].starts_with("--set-rpath $ORIGIN/../lib ") && calls[3].ends_with("/usr/bin/oryx"),
+        "{calls:?}"
+    );
+    // A library missing from the source folder stops the script before
+    // anything is written, and the message names it.
+    std::fs::remove_file(libs.join("libxcb-xkb.so.1")).unwrap();
+    std::fs::remove_dir_all(&image).unwrap();
+    let out = run(&libs);
+    assert!(!out.status.success(), "the script stops");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("libxcb-xkb.so.1"), "{stderr}");
+    assert!(
+        !image.exists(),
+        "nothing is written when a library is missing"
     );
     std::fs::remove_dir_all(&dir).unwrap();
 }
@@ -1079,7 +1241,7 @@ fn the_source_pkgbuild_builds_the_tag_of_the_last_release_and_conflicts_with_ory
     assert_eq!(pkgbuild_field(&text, "conflicts"), "('oryx')");
     assert_eq!(
         pkgbuild_field(&text, "depends"),
-        "('openssl' 'gcc-libs' 'glibc' 'hicolor-icon-theme')"
+        "('openssl' 'gcc-libs' 'glibc' 'hicolor-icon-theme' 'libxkbcommon-x11')"
     );
     assert_eq!(pkgbuild_field(&text, "makedepends"), "('cargo' 'librsvg')");
     assert!(
@@ -1107,7 +1269,7 @@ fn the_bin_pkgbuild_fetches_the_release_files_and_provides_oryx_editor() {
     assert_eq!(pkgbuild_field(&text, "conflicts"), "('oryx' 'oryx-editor')");
     assert_eq!(
         pkgbuild_field(&text, "depends"),
-        "('openssl' 'gcc-libs' 'glibc' 'hicolor-icon-theme')"
+        "('openssl' 'gcc-libs' 'glibc' 'hicolor-icon-theme' 'libxkbcommon-x11')"
     );
     assert_eq!(pkgbuild_field(&text, "makedepends"), "('librsvg')");
     for source in [
@@ -1635,6 +1797,47 @@ fn the_arch_script_leaves_no_work_folder_behind_a_failure() {
     let left: Vec<_> = std::fs::read_dir(&tmp).unwrap().flatten().collect();
     assert!(left.is_empty(), "left behind: {left:?}");
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The toolchain file names the compiler alone. The two cross targets
+/// of `make check` and of the Windows build are asked for by the
+/// Makefile, with the line that adds them, the way `make audit` asks for
+/// its tool, so a checkout that never builds them downloads nothing.
+#[test]
+fn the_toolchain_file_names_no_target_and_the_makefile_asks_for_them() {
+    let toolchain = std::fs::read_to_string(repo().join("rust-toolchain.toml")).unwrap();
+    assert!(toolchain.contains("channel = "), "the compiler is named");
+    assert!(!toolchain.contains("targets ="), "the file names no target");
+    let makefile = std::fs::read_to_string(repo().join("Makefile")).unwrap();
+    let guard = |target: &str| {
+        format!(
+            "@rustup target list --installed | grep -qx {target} || {{ echo \"the target {target} is not installed: rustup target add {target}\"; exit 1; }}"
+        )
+    };
+    let check = makefile
+        .split("check:")
+        .nth(1)
+        .unwrap()
+        .split("\n\n")
+        .next()
+        .unwrap();
+    for target in ["x86_64-pc-windows-gnu", "aarch64-apple-darwin"] {
+        assert!(
+            check.contains(&guard(target)),
+            "the check asks for {target}"
+        );
+    }
+    let release = makefile
+        .split("release:")
+        .nth(1)
+        .unwrap()
+        .split("\n\n")
+        .next()
+        .unwrap();
+    assert!(
+        release.contains(&guard("x86_64-pc-windows-gnu")),
+        "the Windows build asks for its target"
+    );
 }
 
 #[test]
