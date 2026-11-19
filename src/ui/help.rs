@@ -21,7 +21,7 @@ pub fn welcome(tip: usize) -> String {
          `{}` opens the settings: fonts, sizes and the interface scale, \
          if the page looks too small or too large on this screen, and the \
          line numbers, the word count and autosave.\n\n\
-         `{}` lists the shortcuts and the markdown syntax.\n\n\
+         `{}` lists the shortcuts, the markdown syntax and the math commands.\n\n\
          {}\n\
          You can also drag and drop a file here.\n\n\
          Full documentation is on [GitHub](https://github.com/wmahfoudh/oryx).\n",
@@ -216,6 +216,11 @@ pub const TIPS: &[Tip] = &[
         kind: TipKind::Tip,
         area: Area::Files,
         text: r#"From a terminal, `oryx file.md` opens a file, and `oryx notes/` starts Oryx with the sidebar on that folder."#,
+    },
+    Tip {
+        kind: TipKind::Tip,
+        area: Area::Files,
+        text: r#"If `notes.md` does not exist, `oryx notes.md` opens it as a new file in editing mode."#,
     },
     Tip {
         kind: TipKind::Tip,
@@ -455,7 +460,7 @@ pub const TIPS: &[Tip] = &[
     Tip {
         kind: TipKind::Tip,
         area: Area::Editing,
-        text: r#"`Ctrl+U` changes the case of the selected text, or of the word the caret is on: lower case, then a capital on each word, then upper case. The address of a link, inline code, an HTML tag and a formula keep their letters."#,
+        text: r#"`Ctrl+U` changes the case of the selected text, or of the word under the cursor: lower case, then Capitalized Words, then UPPER CASE. Link addresses, inline code, HTML tags and formulas are unaffected."#,
     },
     Tip {
         kind: TipKind::Tip,
@@ -640,7 +645,7 @@ pub const TIPS: &[Tip] = &[
     Tip {
         kind: TipKind::Tip,
         area: Area::Export,
-        text: r#"To force a page break in the PDF, write `\newpage` on a line of its own. On screen it shows as a dashed line. `<div style="page-break-after: always"></div>` does the same."#,
+        text: r#"To force a page break in the PDF, write `\newpage` on its own line. On screen it shows as a dashed line. `<div style="page-break-after: always"></div>` does the same."#,
     },
     Tip {
         kind: TipKind::Note,
@@ -701,6 +706,11 @@ pub const TIPS: &[Tip] = &[
         kind: TipKind::Tip,
         area: Area::Markdown,
         text: r#"Math works in all four GitHub notations: `$...$`, `$$...$$`, a `math` fence and the backtick form. Prices like `$5-$10` are left alone."#,
+    },
+    Tip {
+        kind: TipKind::Tip,
+        area: Area::Markdown,
+        text: r#"Formulas accept the commands of TeX, LaTeX, AMS and MediaWiki, the math of Wikipedia. Press `F1` and follow the Math link on the first line to learn the notation and see every command, as written and as rendered."#,
     },
     Tip {
         kind: TipKind::Tip,
@@ -805,12 +815,12 @@ pub const TIPS: &[Tip] = &[
     Tip {
         kind: TipKind::Tip,
         area: Area::Books,
-        text: r#"The examples folder installed with Oryx has sample documents, a math sample, *The Adventures of Sherlock Holmes* to try the book reader, and an 8 MB markdown file to try a big one."#,
+        text: r#"The examples folder installed with Oryx has sample documents, *The Adventures of Sherlock Holmes* to try the book reader, and an 8 MB markdown file to try a big one."#,
     },
     Tip {
         kind: TipKind::Tip,
         area: Area::Help,
-        text: r#"`F1` opens the quick reference on a page of its own: every shortcut, then every markdown construct Oryx understands, as written and as rendered. Press `F1` again, or `Escape`, to close it."#,
+        text: r#"`F1` opens the quick reference: every shortcut, then every markdown construct Oryx understands, as written and as rendered. Press `F1` again, or `Escape`, to close it."#,
     },
     Tip {
         kind: TipKind::Note,
@@ -831,6 +841,7 @@ pub fn page() -> String {
     let _ = writeln!(
         out,
         "Two parts: [Shortcuts](#shortcuts) and [Markdown syntax](#markdown-syntax). \
+         Math has a dedicated [reference]({MATH_LINK}). \
          Press {} or {} to close this. \
          Full documentation is on [GitHub](https://github.com/wmahfoudh/oryx).\n\n## Shortcuts",
         keymap::display("F1"),
@@ -908,6 +919,34 @@ pub fn page() -> String {
 /// construction.
 const SYNTAX: &str = include_str!("../../SYNTAX.md");
 
+/// The math reference as shipped, the page `MATH.md`, in step with each
+/// release by construction.
+const MATH: &str = include_str!("../../MATH.md");
+
+/// The address of the math page inside the help, and of the way back.
+/// The app catches both while the help shows, as it catches the tip
+/// link; in a file of the user's they do nothing.
+pub const MATH_LINK: &str = "help:math";
+pub const QUICK_LINK: &str = "help:quick";
+
+/// The sentences of the page that send its reader to Oryx. The F1 reader
+/// is there already, so the help's copy leaves them out; a test checks
+/// that the page still has them as written here.
+const OPEN_IN_ORYX: &str = " It is written for Oryx: open it there, or press `F1` and follow the \
+                            Math link. GitHub does not render every command on it.";
+
+/// The math page of the help: `MATH.md` whole, after a line with the way
+/// back to the quick reference, less the sentences that send the reader
+/// to Oryx.
+pub fn math_page() -> String {
+    format!(
+        "Back to the [quick reference]({QUICK_LINK}). Press {} or {} to close this.\n\n{}",
+        keymap::display("F1"),
+        keymap::display("Escape"),
+        MATH.replacen(OPEN_IN_ORYX, "", 1)
+    )
+}
+
 /// Where the reference's links to files beside it reach from a page
 /// with no file behind it: the README and the test picture on GitHub.
 const README_URL: &str = "https://github.com/wmahfoudh/oryx/blob/main/README.md";
@@ -954,6 +993,7 @@ fn syntax_part() -> String {
             out.push_str(&demote_html_headings(
                 &line
                     .replace("](README.md", &format!("]({README_URL}"))
+                    .replace("](MATH.md", &format!("]({MATH_LINK}"))
                     .replace("examples/oryx-test.png", TEST_IMAGE_URL),
             ));
         }
@@ -1296,7 +1336,7 @@ mod tests {
             page.find(needle)
                 .unwrap_or_else(|| panic!("{needle} is missing: {page}"))
         };
-        let shortcuts = at("lists the shortcuts and the markdown syntax.");
+        let shortcuts = at("lists the shortcuts, the markdown syntax and the math commands.");
         let tip = at("> [!");
         let drop = at("You can also drag and drop a file here.");
         let github = at("[GitHub](https://github.com/wmahfoudh/oryx)");
@@ -1501,7 +1541,69 @@ mod tests {
             "{}",
             text.lines().next().unwrap_or("")
         );
-        assert!(welcome(0).contains("lists the shortcuts and the markdown syntax"));
+        assert!(
+            welcome(0).contains("lists the shortcuts, the markdown syntax and the math commands")
+        );
+    }
+
+    /// The first line of the quick reference offers the math page, in
+    /// the user's words of 09/11/2026, the word "reference" the link.
+    #[test]
+    fn the_first_line_offers_the_math_reference() {
+        let text = page();
+        assert!(
+            text.contains(&format!(
+                "Two parts: [Shortcuts](#shortcuts) and [Markdown syntax](#markdown-syntax). \
+                 Math has a dedicated [reference]({MATH_LINK})."
+            )),
+            "{}",
+            text.lines().nth(2).unwrap_or("")
+        );
+    }
+
+    /// The syntax part's pointer to `MATH.md` reaches the math page of
+    /// the help, not a file the page has none of.
+    #[test]
+    fn the_syntax_part_points_at_the_math_page_inside_the_help() {
+        let text = page();
+        assert!(text.contains(&format!("]({MATH_LINK})")), "{text}");
+        assert!(!text.contains("](MATH.md"), "a file link survived");
+    }
+
+    /// The math page is `MATH.md` with a way back, less the sentences
+    /// that send the reader to Oryx: the reader is already there.
+    #[test]
+    fn the_math_page_is_the_reference_with_a_way_back() {
+        let text = math_page();
+        assert!(
+            text.starts_with(&format!(
+                "Back to the [quick reference]({QUICK_LINK}). Press {} or {} to close this.\n\n# Math in Oryx\n",
+                keymap::display("F1"),
+                keymap::display("Escape")
+            )),
+            "{}",
+            text.lines().next().unwrap_or("")
+        );
+        assert!(
+            MATH.contains(OPEN_IN_ORYX),
+            "the page's sentences moved: {OPEN_IN_ORYX:?}"
+        );
+        assert!(!text.contains("open it there"), "{text}");
+        assert!(text.contains("\n## Tutorial\n") && text.contains("\n## Reference\n"));
+    }
+
+    /// The page's own links jump within it, as the quick reference's do.
+    #[test]
+    fn the_math_page_s_two_parts_resolve_to_headings() {
+        let doc = crate::doc::markdown::parse(math_page());
+        for slug in ["tutorial", "reference"] {
+            assert!(
+                doc.blocks.iter().any(
+                    |b| matches!(&b.kind, BlockKind::Heading { anchor, .. } if anchor == slug)
+                ),
+                "no heading with the anchor {slug}"
+            );
+        }
     }
 
     #[test]

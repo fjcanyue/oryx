@@ -1,12 +1,13 @@
 //! File loading and type detection by extension.
 
 use std::ops::Range;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::doc::model::{Block, BlockKind, CodeBody, Document, Span};
-use crate::style::highlight::{self, Arrival, PendingBlock, Seam};
+use crate::style::highlight::{self, PendingBlock};
+use crate::style::seams::Table;
 use std::collections::HashMap;
 
 /// Sync highlighting budget at open; whatever remains goes to the
@@ -155,11 +156,17 @@ fn refusal(bytes: &[u8]) -> Option<&'static str> {
     (unreadable * 10 > head.len() * 3).then_some("is not UTF-8 text")
 }
 
-/// Whether a file on disk holds text, read from its first bytes. A file
-/// that cannot be read is not displayable either, so it answers false.
+/// Whether a file on disk holds text, read from its first bytes. Only a
+/// regular file is opened, a link read as its target: a named pipe with
+/// no writer would block the open until a writer comes, on the window's
+/// thread, and a device or a socket is no document. A file that cannot
+/// be read is not displayable either, so it answers false.
 pub fn is_text_file(path: &Path) -> bool {
     use std::io::Read;
     if detect(path) == FileKind::Undisplayable {
+        return false;
+    }
+    if !std::fs::metadata(path).is_ok_and(|meta| meta.is_file()) {
         return false;
     }
     let Ok(mut file) = std::fs::File::open(path) else {
@@ -264,9 +271,34 @@ pub struct Opened {
     pub bom: bool,
 }
 
+/// Whether something that is neither a file nor a folder is at the
+/// path: a pipe, a device, a socket. A read of one can wait without
+/// end or never finish, so the window's own ways to open (the path
+/// field, the dialog) refuse it. The command line reads one, as `cat`
+/// does: `oryx <(command)` is a pipe.
+pub fn not_a_file(path: &Path) -> bool {
+    std::fs::metadata(path).is_ok_and(|meta| !meta.is_file() && !meta.is_dir())
+}
+
+/// As `open`, for a file that must exist: a name with nothing at it is
+/// an error. The launch alone opens a missing name as the new file it
+/// will be; a sidebar row, a link or a place of the history whose file
+/// is gone says so.
+pub fn open_existing(path: &Path, deadline: Option<Instant>) -> anyhow::Result<Opened> {
+    if let Err(e) = std::fs::symlink_metadata(path) {
+        if e.kind() == std::io::ErrorKind::NotFound {
+            anyhow::bail!("cannot open {}: the file does not exist", path.display());
+        }
+    }
+    open(path, deadline)
+}
+
 pub fn open(path: &Path, deadline: Option<Instant>) -> anyhow::Result<Opened> {
-    let bytes =
-        std::fs::read(path).map_err(|e| anyhow::anyhow!("cannot open {}: {e}", path.display()))?;
+    let bytes = match std::fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => new_file_bytes(path, &e)?,
+        Err(e) => anyhow::bail!("cannot open {}: {e}", path.display()),
+    };
     if detect(path) == FileKind::Undisplayable {
         anyhow::bail!(
             "{} is a PDF file; Oryx does not display PDF files",
@@ -419,6 +451,107 @@ pub fn open(path: &Path, deadline: Option<Instant>) -> anyhow::Result<Opened> {
     })
 }
 
+/// The canonical form of a path, the key every memory of a file is
+/// filed under. A file that does not exist yet has the form it will
+/// have once saved, its folder's canonical form and its name: `oryx
+/// notes.md` on a new name must not key the file one way before its
+/// first save and another way after. A path with no folder to resolve
+/// is returned as given, and so are an empty path and a missing name
+/// written as a folder's, which the loader refuses by that mark. A link
+/// whose target does not exist yet is the file its target will be: the
+/// save then creates the target and leaves the link.
+pub fn canonical(path: &Path) -> PathBuf {
+    canonical_within(path, LINK_HOPS)
+}
+
+/// The links followed from a link whose end does not exist, before the
+/// path is taken as it stands: a chain longer than this is a loop.
+const LINK_HOPS: u8 = 8;
+
+fn canonical_within(path: &Path, hops: u8) -> PathBuf {
+    if let Ok(found) = path.canonicalize() {
+        return found;
+    }
+    if path.as_os_str().is_empty() || names_a_folder(path) {
+        return path.to_path_buf();
+    }
+    let folder = match path.parent() {
+        Some(p) if !p.as_os_str().is_empty() => p,
+        _ => Path::new("."),
+    };
+    if hops > 0 {
+        if let Ok(target) = std::fs::read_link(path) {
+            let target = canonical_within(&folder.join(target), hops - 1);
+            let creatable = target.parent().is_some_and(Path::is_dir) && !is_link(&target);
+            if creatable {
+                return target;
+            }
+        }
+    }
+    match (folder.canonicalize(), path.file_name()) {
+        (Ok(folder), Some(name)) => folder.join(name),
+        _ => path.to_path_buf(),
+    }
+}
+
+/// Whether a path is a symbolic link, whatever it leads to.
+fn is_link(path: &Path) -> bool {
+    std::fs::symlink_metadata(path).is_ok_and(|meta| meta.file_type().is_symlink())
+}
+
+/// A path written as a folder's name: a separator at its end, or the
+/// folder's own `.` after one.
+fn names_a_folder(path: &Path) -> bool {
+    let text = path.to_string_lossy();
+    let text = text.strip_suffix('.').unwrap_or(&text);
+    text.ends_with('/') || text.ends_with(std::path::MAIN_SEPARATOR)
+}
+
+/// A file that does not exist yet, in a folder that does, opens as the
+/// empty file it will be at the first save, as the editors do, when its
+/// name says text: markdown, code, plain or unknown. A book, a comic or
+/// a PDF that does not exist is an error, since nothing can be typed
+/// into one, and so is a file in a folder that does not exist; that
+/// error names the folder. A name written as a folder's is a missing
+/// folder too. An empty path names nothing. A link that `canonical`
+/// could not follow to a file that can be created is refused: a save
+/// would replace the link itself.
+fn new_file_bytes(path: &Path, err: &std::io::Error) -> anyhow::Result<Vec<u8>> {
+    if path.as_os_str().is_empty() {
+        anyhow::bail!("cannot open a file with no name");
+    }
+    if is_link(path) {
+        anyhow::bail!(
+            "cannot open {}: the link leads to a place that does not exist",
+            path.display()
+        );
+    }
+    if names_a_folder(path) {
+        anyhow::bail!(
+            "cannot open {}: the folder {} does not exist",
+            path.display(),
+            path.display()
+        );
+    }
+    let folder = match path.parent() {
+        Some(p) if !p.as_os_str().is_empty() => p,
+        _ => Path::new("."),
+    };
+    if !folder.is_dir() {
+        anyhow::bail!(
+            "cannot open {}: the folder {} does not exist",
+            path.display(),
+            folder.display()
+        );
+    }
+    match detect(path) {
+        FileKind::Markdown | FileKind::Code(_) | FileKind::Text | FileKind::Unknown => {
+            Ok(Vec::new())
+        }
+        _ => anyhow::bail!("cannot open {}: {err}", path.display()),
+    }
+}
+
 /// Every code block whose highlight prefix is incomplete, for restarting
 /// the highlight worker after the parse swap. Unlike `apply_budget` it
 /// leaves computed highlights alone.
@@ -434,7 +567,8 @@ pub fn pending(doc: &Document) -> Vec<PendingBlock> {
         else {
             continue;
         };
-        if *exact < lines.len() {
+        // A block with no grammar has no colors to compute.
+        if language.is_some() && *exact < lines.len() {
             pending.push(PendingBlock {
                 block: index,
                 language: language.clone(),
@@ -450,13 +584,15 @@ pub fn pending(doc: &Document) -> Vec<PendingBlock> {
 /// Every code block whose highlight prefix is incomplete, each with a
 /// resume from its stored seam table when it has one: the sweep starts
 /// at the seam at or before the exact frontier and converges against
-/// the seams past it, and past `after`, the burst's end (zero for none),
-/// when a later edit of the burst stands beyond the first of them.
+/// the seams past it (`seams::Table::resume`). `cuts`, the lines of the
+/// last key, end a chunk so that a seam is filed there, on the one block
+/// of a code file or of the source view; a page's blocks take none.
 pub fn pending_from(
     doc: &Document,
-    seams: &HashMap<usize, Vec<(usize, Seam)>>,
-    after: usize,
+    seams: &HashMap<usize, Table>,
+    cuts: &[usize],
 ) -> Vec<PendingBlock> {
+    let one_block = doc.blocks.len() == 1;
     pending(doc)
         .into_iter()
         .map(|mut block| {
@@ -464,23 +600,9 @@ pub fn pending_from(
                 BlockKind::CodeBlock { exact, .. } => *exact,
                 _ => 0,
             };
-            block.resume = seams.get(&block.block).map(|table| {
-                let at = table.partition_point(|(line, _)| *line <= exact);
-                let (start_line, seam) = match at.checked_sub(1).and_then(|i| table.get(i)) {
-                    Some((line, seam)) => (*line, Some(seam.clone())),
-                    None => (0, None),
-                };
-                // A seam between the frontier and the burst's end stands
-                // on lines a later edit of the burst changed: the sweep
-                // colors them again and converges past them.
-                let past = exact.max(after.saturating_sub(1));
-                let from = table.partition_point(|(line, _)| *line <= past);
-                highlight::Resume {
-                    start_line,
-                    seam,
-                    expected: table[from..].to_vec(),
-                }
-            });
+            block.resume = seams
+                .get(&block.block)
+                .map(|table| table.resume(exact, if one_block { cuts } else { &[] }));
             block
         })
         .collect()
@@ -501,6 +623,12 @@ fn apply_budget(doc: &mut Document, deadline: Option<Instant>) -> Vec<PendingBlo
         else {
             continue;
         };
+        // A block with no grammar carries no colors, and its frontier is
+        // its line count: nothing walks it and nothing resumes it.
+        if language.is_none() {
+            *exact = lines.len();
+            continue;
+        }
         *highlights = highlight::spans_until(&source, lines, language.as_deref(), deadline);
         *exact = highlights.len();
         if *exact < lines.len() {
@@ -514,50 +642,6 @@ fn apply_budget(doc: &mut Document, deadline: Option<Instant>) -> Vec<PendingBlo
         }
     }
     pending
-}
-
-/// Copies one arrived chunk into its block's highlight prefix, growing
-/// the prefix when the chunk extends it. Out-of-range chunks and
-/// non-code blocks are ignored; arrivals are trusted only as far as the
-/// current document reaches.
-pub fn fold(doc: &mut Document, arrival: &Arrival) {
-    let Some(block) = doc.blocks.get_mut(arrival.block) else {
-        return;
-    };
-    let BlockKind::CodeBlock {
-        lines,
-        highlights,
-        exact,
-        ..
-    } = &mut block.kind
-    else {
-        return;
-    };
-    let end = (arrival.start_line + arrival.spans.len()).min(lines.len());
-    if highlights.len() < end {
-        highlights.resize(end, Vec::new());
-    }
-    // A guess that lands after the exact sweep colored a line, with
-    // colors from a cold start, leaves that line alone.
-    let first = if arrival.speculative { *exact } else { 0 };
-    for (offset, spans) in arrival.spans.iter().enumerate() {
-        let line = arrival.start_line + offset;
-        if first <= line && line < end {
-            highlights[line] = spans.clone();
-        }
-    }
-    // The exact frontier only ever advances contiguously, and a
-    // converged stop vouches for the lines up to the stored table's
-    // reach, which the earlier sweep colored: the block's end when that
-    // sweep completed, less when a keystroke cut it short.
-    if !arrival.speculative {
-        if arrival.start_line <= *exact {
-            *exact = (*exact).max(end).min(lines.len());
-        }
-        if arrival.converged {
-            *exact = (*exact).max(arrival.reach).min(lines.len());
-        }
-    }
 }
 
 /// `text` with every return before a line break removed, the way the
@@ -582,6 +666,26 @@ pub fn message(text: &str) -> Document {
     plain_document(text)
 }
 
+/// What a launch or an open shows when the file is refused: the
+/// refusal as a page, read-only, nothing streamed, no book and no line
+/// endings to write back. The page is not the file's bytes, so it is
+/// marked lossy, which keeps the editing door shut on it. A double
+/// click on such a file thus opens a window that says why, in place of
+/// a line on a terminal nobody reads.
+pub fn refused(err: &anyhow::Error) -> Opened {
+    Opened {
+        document: message(&err.to_string()),
+        pending: Vec::new(),
+        streamed: false,
+        book: None,
+        toc: Vec::new(),
+        lossy: true,
+        crlf: Vec::new(),
+        cr: false,
+        bom: false,
+    }
+}
+
 /// Every extension Oryx renders intentionally, for dialog filters.
 pub fn recognized_extensions() -> Vec<&'static str> {
     [
@@ -592,14 +696,24 @@ pub fn recognized_extensions() -> Vec<&'static str> {
     .collect()
 }
 
+/// The rows of a code file: the text between line breaks, split at `\n`
+/// alone, as `CodeBody::splice` reads them, so a return before a line
+/// break stays in its row as a lone return does. The empty piece after
+/// a final line break is no row.
 fn source_lines(text: &str) -> Vec<Range<u32>> {
-    let base = text.as_ptr() as usize;
-    text.lines()
+    let mut at = 0;
+    let mut lines: Vec<Range<u32>> = text
+        .split('\n')
         .map(|line| {
-            let start = (line.as_ptr() as usize - base) as u32;
-            start..start + line.len() as u32
+            let range = at..at + line.len() as u32;
+            at = range.end + 1;
+            range
         })
-        .collect()
+        .collect();
+    if text.is_empty() || text.ends_with('\n') {
+        lines.pop();
+    }
+    lines
 }
 
 /// The whole file as a single code block; the budget pass highlights it.
@@ -609,11 +723,15 @@ fn source_lines(text: &str) -> Vec<Range<u32>> {
 /// an Enter at the end of the file opens a row the page can scroll to;
 /// the final newline ends the last row and opens none.
 pub(crate) fn code_document(token: Option<&str>, text: &str) -> Document {
+    let lines = CodeBody::verbatim(source_lines(text));
+    // A block with no grammar carries no colors: its frontier is its
+    // line count from the start.
+    let exact = if token.is_none() { lines.len() } else { 0 };
     let mut block = Block::plain(BlockKind::CodeBlock {
         language: token.map(str::to_string),
-        lines: CodeBody::verbatim(source_lines(text)),
+        lines,
         highlights: Vec::new(),
-        exact: 0,
+        exact,
     });
     block.range = 0..text.len();
     Document {
@@ -629,11 +747,13 @@ pub(crate) fn code_document(token: Option<&str>, text: &str) -> Document {
 /// highlighting. Every line is a row, trailing blank lines included,
 /// so editing sees exactly the lines the file has.
 pub(crate) fn text_document(text: &str) -> Document {
+    let lines = CodeBody::verbatim(source_lines(text));
+    let exact = lines.len();
     let mut block = Block::plain(BlockKind::CodeBlock {
         language: None,
-        lines: CodeBody::verbatim(source_lines(text)),
+        lines,
         highlights: Vec::new(),
-        exact: 0,
+        exact,
     });
     block.range = 0..text.len();
     Document {
@@ -883,6 +1003,47 @@ pub fn kind_is_plain(kind: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    /// A file Oryx refuses at the launch opens as a page that says why,
+    /// read-only, nothing streamed and no book, so a double click on
+    /// such a file shows a window in place of a line on a terminal
+    /// (Task 340, claim 19 of the hunt of 1.3.0).
+    #[test]
+    fn a_refused_file_opens_as_the_page_of_its_refusal() {
+        let opened = super::refused(&anyhow::anyhow!(
+            "This Kindle book is damaged and cannot be opened."
+        ));
+        assert!(
+            opened
+                .document
+                .source
+                .contains("damaged and cannot be opened"),
+            "the page is the message"
+        );
+        assert!(opened.lossy, "the page is not the file's bytes: no editing");
+        assert!(!opened.streamed);
+        assert!(opened.book.is_none());
+        assert!(opened.pending.is_empty());
+        assert!(opened.toc.is_empty() && opened.crlf.is_empty() && !opened.cr && !opened.bom);
+    }
+
+    /// A code file's rows split at the line breaks alone: a return before
+    /// a line break is a character of its line, as a lone return is.
+    #[test]
+    fn a_return_before_a_line_break_stays_in_its_row() {
+        use crate::doc::model::BlockKind;
+        let doc = super::code_document(Some("rust"), "ab\r\nef\ngh\n");
+        let BlockKind::CodeBlock { lines, .. } = &doc.blocks[0].kind else {
+            panic!("a code file is one block");
+        };
+        let rows: Vec<&str> = lines.iter(&doc.source).collect();
+        assert_eq!(rows, vec!["ab\r", "ef", "gh"]);
+        let doc = super::code_document(None, "");
+        let BlockKind::CodeBlock { lines, .. } = &doc.blocks[0].kind else {
+            panic!("a code file is one block");
+        };
+        assert!(lines.is_empty(), "an empty file has no row");
+    }
+
     #[test]
     fn a_piped_text_is_named_by_what_it_is() {
         use super::{detect, piped_name, FileKind};
@@ -935,6 +1096,7 @@ mod tests {
 
     use super::*;
     use crate::doc::model::BlockKind;
+    use crate::style::highlight::Arrival;
     use std::path::PathBuf;
 
     fn detect_ext(name: &str) -> FileKind {
@@ -966,6 +1128,37 @@ mod tests {
         };
         assert!(err.to_string().contains("PDF"), "{err}");
         std::fs::remove_file(&path).ok();
+    }
+
+    /// A named pipe with no writer blocks whoever opens it to read until
+    /// a writer comes, and the sidebar's scan opened one on the window's
+    /// thread (claim 4 of the hunt of Task 328). The sniff reads the
+    /// file's type first and never opens such a file. A failed test
+    /// releases the blocked thread by opening the pipe for writing.
+    #[cfg(unix)]
+    #[test]
+    fn a_named_pipe_is_not_a_text_file() {
+        let dir = std::env::temp_dir().join(format!("oryx-pipe-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let pipe = dir.join("pipe");
+        let made = std::process::Command::new("mkfifo")
+            .arg(&pipe)
+            .status()
+            .unwrap();
+        assert!(made.success(), "mkfifo");
+        let (tx, rx) = std::sync::mpsc::channel();
+        let asked = pipe.clone();
+        std::thread::spawn(move || tx.send(is_text_file(&asked)));
+        let answer = rx.recv_timeout(std::time::Duration::from_secs(2));
+        if answer.is_err() {
+            let _ = std::fs::OpenOptions::new().write(true).open(&pipe);
+        }
+        std::fs::remove_file(&pipe).ok();
+        assert_eq!(
+            answer.ok(),
+            Some(false),
+            "the sniff blocked on the pipe, or read it as text"
+        );
     }
 
     #[test]
@@ -1470,7 +1663,8 @@ mod tests {
             };
             highlight::spans(&opened.document.source, lines, Some("rust"))
         };
-        fold(
+        let mut table = Table::default();
+        table.fold(
             &mut opened.document,
             &Arrival {
                 block: 0,
@@ -1480,13 +1674,14 @@ mod tests {
                 converged: false,
                 reach: 0,
                 speculative: false,
+                slow: Vec::new(),
             },
         );
         let BlockKind::CodeBlock { highlights, .. } = &opened.document.blocks[0].kind else {
             panic!()
         };
         assert_eq!(highlights.len(), 2);
-        fold(
+        table.fold(
             &mut opened.document,
             &Arrival {
                 block: 0,
@@ -1496,6 +1691,7 @@ mod tests {
                 converged: false,
                 reach: 0,
                 speculative: false,
+                slow: Vec::new(),
             },
         );
         let BlockKind::CodeBlock { highlights, .. } = &opened.document.blocks[0].kind else {
@@ -1521,28 +1717,30 @@ mod tests {
             // The table of a complete sweep reaches the block's end.
             reach: if converged { 1200 } else { 0 },
             speculative,
+            slow: Vec::new(),
         };
-        fold(&mut doc, &arrival(0, 512, false, false));
+        let mut table = Table::default();
+        table.fold(&mut doc, &arrival(0, 512, false, false));
         assert_eq!(
             exact_of(&doc),
             512,
             "a contiguous fold advances the frontier"
         );
-        fold(&mut doc, &arrival(1100, 100, false, true));
+        table.fold(&mut doc, &arrival(1100, 100, false, true));
         assert_eq!(exact_of(&doc), 512, "a speculative fold never advances it");
         assert!(
             !pending(&doc).is_empty(),
             "the block still wants its wash though its rows reach the end"
         );
-        fold(&mut doc, &arrival(600, 100, false, false));
+        table.fold(&mut doc, &arrival(600, 100, false, false));
         assert_eq!(exact_of(&doc), 512, "a gapped fold does not advance it");
-        fold(&mut doc, &arrival(512, 188, false, false));
+        table.fold(&mut doc, &arrival(512, 188, false, false));
         assert_eq!(
             exact_of(&doc),
             700,
             "the sweep advances through delivered rows"
         );
-        fold(&mut doc, &arrival(700, 100, true, false));
+        table.fold(&mut doc, &arrival(700, 100, true, false));
         assert_eq!(
             exact_of(&doc),
             1200,
@@ -1571,15 +1769,22 @@ mod tests {
             converged,
             reach,
             speculative: false,
+            slow: Vec::new(),
         };
-        fold(&mut doc, &arrival(0, 512, true, 1536));
+        let mut table = Table::default();
+        // The rows the earlier sweep colored up to its kill, which the
+        // stop vouches for.
+        if let BlockKind::CodeBlock { highlights, .. } = &mut doc.blocks[0].kind {
+            highlights.resize(1536, Vec::new());
+        }
+        table.fold(&mut doc, &arrival(0, 512, true, 1536));
         assert_eq!(
             exact_of(&doc),
             1536,
             "the stop vouches up to the table's reach"
         );
         assert!(!pending(&doc).is_empty(), "the tail still wants its wash");
-        fold(&mut doc, &arrival(1536, 512, false, 0));
+        table.fold(&mut doc, &arrival(1536, 512, false, 0));
         assert_eq!(
             exact_of(&doc),
             2048,
@@ -1589,22 +1794,24 @@ mod tests {
 
     /// The seam table of a complete sweep of a document's first block,
     /// as the worker files it.
-    fn table_of(doc: &Document) -> Vec<(usize, Seam)> {
+    fn table_of(doc: &Document) -> Table {
         let BlockKind::CodeBlock {
             language, lines, ..
         } = &doc.blocks[0].kind
         else {
             unreachable!()
         };
-        let mut table = Vec::new();
+        let mut table = Table::default();
         highlight::spans_chunked(
             &doc.source,
             lines,
             language.as_deref(),
             highlight::CHUNK_LINES,
+            std::time::Duration::MAX,
             None,
+            || true,
             |c| {
-                highlight::record_seam(&mut table, c.start_line + c.spans.len(), &c.seam);
+                table.fold_chunk(c.start_line, c.start_line + c.spans.len(), &c.seam, &c.slow);
                 true
             },
         );
@@ -1619,60 +1826,74 @@ mod tests {
 
     /// The resume of a block still to color, from its stored table:
     /// the sweep starts at the seam at or before the frontier and
-    /// converges against the seams past it, and past the burst's end
-    /// when a later edit of the burst stands beyond the first of them,
-    /// so the lines between the edits are colored again.
+    /// converges against the seams past it.
     #[test]
-    fn a_resume_converges_only_past_the_burst_s_end() {
+    fn a_resume_starts_before_the_frontier_and_converges_past_it() {
         let text: String = (0..3000).map(|i| format!("let v{i} = {i};\n")).collect();
         let mut doc = code_document(Some("rs"), &text);
         let table = table_of(&doc);
         assert_eq!(
-            table.iter().map(|s| s.0).collect::<Vec<_>>(),
+            table.seams().iter().map(|s| s.line).collect::<Vec<_>>(),
             [512, 1024, 1536, 2048, 2560, 3000]
         );
         let seams = HashMap::from([(0, table)]);
-        let first_expected = |after: usize, doc: &Document| {
-            let pending = pending_from(doc, &seams, after);
+        let first_expected = |doc: &Document| {
+            let pending = pending_from(doc, &seams, &[]);
             assert_eq!(pending.len(), 1, "one block still to color");
             let resume = pending[0].resume.clone().expect("a table gives a resume");
             (
                 resume.start_line,
                 resume.seam.is_some(),
-                resume.expected.first().map(|s| s.0),
+                resume.expected.first().map(|s| s.line),
             )
         };
         set_exact(&mut doc, 0, 100);
         assert_eq!(
-            first_expected(0, &doc),
+            first_expected(&doc),
             (0, false, Some(512)),
-            "no burst: from line 0, the first seam past the frontier"
-        );
-        assert_eq!(
-            first_expected(1200, &doc),
-            (0, false, Some(1536)),
-            "a burst to line 1200: the first seam at or past it"
-        );
-        assert_eq!(
-            first_expected(1024, &doc),
-            (0, false, Some(1024)),
-            "a burst ending on a seam's line keeps that seam"
+            "no seam before the frontier: from line 0, the first seam past it"
         );
         set_exact(&mut doc, 0, 600);
         assert_eq!(
-            first_expected(0, &doc),
+            first_expected(&doc),
             (512, true, Some(1024)),
             "a frontier past a seam starts from that seam"
         );
         set_exact(&mut doc, 0, 3000);
         assert!(
-            pending_from(&doc, &seams, 0).is_empty(),
+            pending_from(&doc, &seams, &[]).is_empty(),
             "a complete block is not listed"
         );
         set_exact(&mut doc, 0, 100);
         assert!(
-            pending_from(&doc, &HashMap::new(), 0)[0].resume.is_none(),
+            pending_from(&doc, &HashMap::new(), &[])[0].resume.is_none(),
             "a block without a table sweeps from line 0"
+        );
+    }
+
+    /// The cuts a resume carries: the lines of the last key, for the
+    /// first block alone, since a burst is the one block of a code file
+    /// or of the source view.
+    #[test]
+    fn the_resume_cuts_at_the_lines_of_the_last_key() {
+        let text: String = (0..1500).map(|i| format!("let v{i} = {i};\n")).collect();
+        let mut doc = code_document(Some("rs"), &text);
+        let seams = HashMap::from([(0, table_of(&doc))]);
+        set_exact(&mut doc, 0, 600);
+        let pending = pending_from(&doc, &seams, &[600, 601]);
+        assert_eq!(
+            pending[0].resume.as_ref().map(|r| r.cuts.clone()),
+            Some(vec![600, 601])
+        );
+        let doc =
+            crate::doc::markdown::parse("```rust\nlet a = 1;\n```\n\n```rust\nlet b = 2;\n```\n");
+        let seams = HashMap::from([(0, table_of(&doc)), (1, Table::default())]);
+        let pending = pending_from(&doc, &seams, &[0, 1]);
+        assert!(
+            pending
+                .iter()
+                .all(|p| p.resume.as_ref().is_none_or(|r| r.cuts.is_empty())),
+            "a page's blocks get no cuts"
         );
     }
 
@@ -1685,11 +1906,11 @@ mod tests {
             crate::doc::markdown::parse("```rust\nlet a = 1;\n```\n\n```rust\nlet b = 2;\n```\n");
         assert_eq!(doc.blocks.len(), 2);
         let seams = HashMap::from([(1, table_of(&doc))]);
-        let pending = pending_from(&doc, &seams, 0);
+        let pending = pending_from(&doc, &seams, &[]);
         assert_eq!(pending.len(), 2, "both cold");
         assert!(pending[0].resume.is_none() && pending[1].resume.is_some());
         set_exact(&mut doc, 0, 1);
-        let pending = pending_from(&doc, &seams, 0);
+        let pending = pending_from(&doc, &seams, &[]);
         assert_eq!(pending.len(), 1, "the first is complete");
         assert_eq!(pending[0].block, 1);
     }
@@ -1716,11 +1937,13 @@ mod tests {
             converged: false,
             reach: 0,
             speculative,
+            slow: Vec::new(),
         };
+        let mut table = Table::default();
         // The exact sweep colored the first 512 lines; a guess asked
         // before it reached them lands after it, for lines 500 to 600.
-        fold(&mut doc, &arrival(0, 512, &exact, false));
-        fold(&mut doc, &arrival(500, 100, &guessed, true));
+        table.fold(&mut doc, &arrival(0, 512, &exact, false));
+        table.fold(&mut doc, &arrival(500, 100, &guessed, true));
         assert_eq!(colors(&doc, 505), exact, "an exact line keeps its colors");
         assert_eq!(colors(&doc, 550), guessed, "a cold line takes the guess");
     }
@@ -1871,8 +2094,140 @@ mod tests {
     }
 
     #[test]
-    fn missing_file_is_an_error() {
-        assert!(open(Path::new("/nonexistent/oryx-missing.md"), None).is_err());
+    fn a_missing_file_in_a_missing_folder_is_an_error_naming_the_folder() {
+        let err = open(Path::new("/nonexistent/oryx-missing.md"), None)
+            .err()
+            .expect("no folder, no file");
+        let text = err.to_string();
+        assert!(
+            text.contains("folder") && text.contains("/nonexistent"),
+            "the message names the missing folder: {text}"
+        );
+    }
+
+    /// The read of Task 359: a name that ends with a separator is a
+    /// folder's, and a folder that does not exist is refused; an empty
+    /// editor under that name could never be saved.
+    #[test]
+    fn a_missing_name_that_ends_with_a_separator_is_a_missing_folder() {
+        let dir = std::env::temp_dir().join(format!("oryx-load-slash-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let named = format!("{}/newdir/", dir.display());
+        let err = open(Path::new(&named), None)
+            .err()
+            .expect("a folder's name, no file");
+        let text = err.to_string();
+        assert!(
+            text.contains("folder") && text.contains("newdir"),
+            "the message names the missing folder: {text}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The read of 10/11/2026: `newdir/.` names a folder as `newdir/`
+    /// does, and an empty path names nothing.
+    #[test]
+    fn a_missing_folder_named_with_a_final_dot_and_an_empty_path_are_refused() {
+        let dir = std::env::temp_dir().join(format!("oryx-load-dot-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let named = format!("{}/newdir/.", dir.display());
+        assert_eq!(
+            canonical(Path::new(&named)).to_string_lossy(),
+            named,
+            "the folder's name is kept as given"
+        );
+        assert!(open(Path::new(&named), None).is_err(), "a folder, no file");
+        assert!(open(Path::new(""), None).is_err(), "an empty path");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The read of 10/11/2026: a link whose target does not exist yet
+    /// opens as the new file its target will be, so a save creates the
+    /// target and leaves the link; a link to a folder that does not
+    /// exist is refused.
+    #[cfg(unix)]
+    #[test]
+    fn a_dangling_link_is_the_new_file_its_target_will_be() {
+        let dir = std::env::temp_dir().join(format!("oryx-load-link-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let real = dir.join("real");
+        std::fs::create_dir_all(&real).unwrap();
+        let link = dir.join("link.md");
+        std::os::unix::fs::symlink(real.join("target.md"), &link).unwrap();
+        let relative = dir.join("relative.md");
+        std::os::unix::fs::symlink("real/other.md", &relative).unwrap();
+        assert_eq!(
+            canonical(&link),
+            real.canonicalize().unwrap().join("target.md")
+        );
+        assert_eq!(
+            canonical(&relative),
+            real.canonicalize().unwrap().join("other.md"),
+            "a relative target is read from the link's folder"
+        );
+        let nowhere = dir.join("nowhere.md");
+        std::os::unix::fs::symlink("/nonexistent/oryx/x.md", &nowhere).unwrap();
+        assert_eq!(canonical(&nowhere), nowhere, "no folder to resolve");
+        let err = open(&nowhere, None).err().expect("a link to nowhere");
+        assert!(err.to_string().contains("link"), "{err}");
+        let looped = dir.join("loop.md");
+        std::os::unix::fs::symlink(&looped, &looped).unwrap();
+        assert!(open(&canonical(&looped), None).is_err(), "a link to itself");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The read of Task 359: a file that does not exist yet has the
+    /// canonical form it will have once saved, its folder's canonical
+    /// form and its name, so the open and the later opens agree.
+    #[test]
+    fn a_missing_file_has_the_canonical_form_it_will_have_once_saved() {
+        let dir = std::env::temp_dir().join(format!("oryx-load-canon-{}", std::process::id()));
+        let sub = dir.join("sub");
+        std::fs::create_dir_all(&sub).unwrap();
+        let typed = sub.join("..").join("sub").join("notes.md");
+        let early = canonical(&typed);
+        std::fs::write(&typed, "x").unwrap();
+        assert_eq!(early, typed.canonicalize().unwrap());
+        assert_eq!(canonical(&typed), early, "the same once it exists");
+        let nowhere = Path::new("/nonexistent/oryx/notes.md");
+        assert_eq!(canonical(nowhere), nowhere, "no folder, the path as given");
+        let folder = format!("{}/newdir/", sub.display());
+        assert_eq!(
+            canonical(Path::new(&folder)).to_string_lossy(),
+            folder,
+            "a folder's name keeps its separator"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `oryx notes.md` on a file that does not exist yet opens the empty
+    /// file it will be at the first save, as the editors do (the user's
+    /// ask of 09/11/2026); a book or a comic that does not exist is an
+    /// error, since nothing can be typed into one.
+    #[test]
+    fn a_missing_file_in_an_existing_folder_opens_as_the_empty_file_it_will_be() {
+        let dir = std::env::temp_dir().join(format!("oryx-load-new-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        for name in ["notes.md", "main.rs", "plain.txt", "odd.xxx", "noext"] {
+            let opened = open(&dir.join(name), None).unwrap_or_else(|e| panic!("{name}: {e}"));
+            assert!(opened.document.source.is_empty(), "{name}: empty");
+            assert!(!opened.lossy && !opened.streamed, "{name}: a file to edit");
+            assert!(opened.book.is_none() && opened.pending.is_empty(), "{name}");
+            assert!(
+                !dir.join(name).exists(),
+                "{name}: nothing written by the open"
+            );
+        }
+        for name in [
+            "book.epub",
+            "book.fb2",
+            "book.mobi",
+            "comic.cbz",
+            "paper.pdf",
+        ] {
+            assert!(open(&dir.join(name), None).is_err(), "{name}: no new book");
+        }
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
@@ -1938,5 +2293,33 @@ mod tests {
             FileKind::Code("Python"),
             "the kind with the text at hand, for the editor's round trip"
         );
+    }
+
+    #[test]
+    fn a_missing_file_is_new_at_the_launch_alone() {
+        let dir = std::env::temp_dir().join(format!("oryx-open-existing-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let gone = dir.join("gone.md");
+        assert!(open(&gone, None).is_ok(), "the launch's new file");
+        let err = match open_existing(&gone, None) {
+            Ok(_) => panic!("a missing file opened"),
+            Err(err) => err.to_string(),
+        };
+        assert!(err.contains("does not exist"), "{err}");
+        std::fs::write(&gone, b"# back\n").unwrap();
+        assert!(open_existing(&gone, None).is_ok());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_device_is_not_a_file() {
+        assert!(not_a_file(Path::new("/dev/null")));
+        assert!(!not_a_file(Path::new("/")));
+        assert!(!not_a_file(Path::new("/nonexistent/name.md")));
+        let file = std::env::temp_dir().join(format!("oryx-not-a-file-{}", std::process::id()));
+        std::fs::write(&file, b"x").unwrap();
+        assert!(!not_a_file(&file));
+        std::fs::remove_file(&file).ok();
     }
 }

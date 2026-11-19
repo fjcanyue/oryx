@@ -284,7 +284,7 @@ impl Viewer {
 }
 
 impl Overlay for Viewer {
-    fn draw(&mut self, painter: &mut Painter, theme: &Theme) {
+    fn draw(&mut self, painter: &mut Painter, theme: &Theme, _caret_lit: bool) {
         let window = (painter.width(), painter.height());
         let scale = painter.scale();
         if !self.sized {

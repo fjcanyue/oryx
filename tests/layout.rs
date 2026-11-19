@@ -8,8 +8,8 @@ use oryx::doc::model::{BlockKind, Document, Marker, SpanScript};
 use oryx::doc::stream::{self, Swap};
 use oryx::layout::{
     code_lines_in, layout, layout_begin, layout_extend, layout_more, layout_step, metrics,
-    recolor_batch, recolor_code_lines, window_to, DecoRect, DirectionMode, LayoutDoc, ShapePool,
-    TextRef, TextRun, ViewConfig,
+    recolor_batch, recolor_code_lines, window_to, DecoRect, DirectionMode, LayoutDoc, MathGlyph,
+    ShapePool, TextRef, TextRun, ViewConfig,
 };
 use oryx::style::fonts::{FontStore, ARABIC_FAMILY, BODY_FAMILY, CODE_FAMILY, HEBREW_FAMILY};
 use oryx::style::highlight::{self, Arrival};
@@ -47,6 +47,14 @@ fn lay2(source: &str, width: f32) -> (Document, LayoutDoc) {
     (doc, l)
 }
 
+/// As `find_text`, the run's text read without the blanks around it.
+fn find_word<'a>(l: &'a LayoutDoc, doc: &'a Document, word: &str) -> &'a TextRun {
+    l.runs
+        .iter()
+        .find(|r| l.run_text(doc, r).trim() == word)
+        .unwrap_or_else(|| panic!("no run with the word {word:?}"))
+}
+
 fn find_text<'a>(l: &'a LayoutDoc, doc: &'a Document, text: &str) -> &'a TextRun {
     l.runs
         .iter()
@@ -66,7 +74,7 @@ fn highlight_all(doc: &mut Document) {
             continue;
         };
         let spans = highlight::spans(&source, lines, language.as_deref());
-        load::fold(
+        oryx::style::seams::Table::default().fold(
             doc,
             &Arrival {
                 block: i,
@@ -76,6 +84,7 @@ fn highlight_all(doc: &mut Document) {
                 converged: false,
                 reach: 0,
                 speculative: false,
+                slow: Vec::new(),
             },
         );
     }
@@ -230,7 +239,7 @@ fn unhighlighted_tail_renders_in_foreground() {
         panic!("expected code block")
     };
     let spans = highlight::spans(&source, lines, language.as_deref());
-    load::fold(
+    oryx::style::seams::Table::default().fold(
         &mut doc,
         &Arrival {
             block: 0,
@@ -240,6 +249,7 @@ fn unhighlighted_tail_renders_in_foreground() {
             converged: false,
             reach: 0,
             speculative: false,
+            slow: Vec::new(),
         },
     );
     let l = lay_doc(&doc, 800.0, &mut fonts());
@@ -706,18 +716,615 @@ fn table_columns_header_and_stripes() {
     assert!((a.x - alpha.x).abs() < 1.0, "same column aligns");
 }
 
+/// Every math glyph of a table lies inside one of its row bands.
+fn assert_math_in_rows(l: &LayoutDoc) {
+    assert!(!l.math_glyphs.is_empty(), "the cell's formula typesets");
+    for g in &l.math_glyphs {
+        assert!(
+            l.table_rows
+                .iter()
+                .any(|r| r.top - 0.01 <= g.top && g.bottom <= r.bottom + 0.01),
+            "glyph {:?} box [{}, {}] inside a row of {:?}",
+            g.ch,
+            g.top,
+            g.bottom,
+            l.table_rows
+        );
+    }
+}
+
+/// The table's outline and the x of its column borders.
+fn table_frame(l: &LayoutDoc) -> (DecoRect, Vec<f32>) {
+    let outline = l
+        .rects
+        .iter()
+        .find(|r| r.stroke > 0.0)
+        .copied()
+        .expect("the table's outline");
+    let mut borders: Vec<f32> = l
+        .rects
+        .iter()
+        .filter(|r| r.stroke == 0.0 && r.width <= 1.5 && r.height > 20.0)
+        .map(|r| r.x)
+        .collect();
+    borders.sort_by(f32::total_cmp);
+    (outline, borders)
+}
+
+/// A formula in a cell is typeset (Task 355), its escaped characters as
+/// glyphs. Before, the cell showed the formula's text, where Task 320 had
+/// corrected the escapes.
+#[test]
+fn a_formula_in_a_cell_is_typeset_with_its_escaped_characters() {
+    let (doc, l) = lay2("| cell |\n|---|\n| $15\\%$ and $x\\_1$ |\n", 800.0);
+    let chars: Vec<char> = l.math_glyphs.iter().filter_map(|g| g.ch).collect();
+    assert!(
+        chars.contains(&'%'),
+        "the percent sign typeset, got {chars:?}"
+    );
+    assert!(
+        chars.contains(&'_'),
+        "the underscore typeset, got {chars:?}"
+    );
+    assert!(
+        l.runs.iter().all(|r| l.run_text(&doc, r) != "15%"),
+        "the text fallback is gone"
+    );
+    assert_math_in_rows(&l);
+}
+
+/// A control word as a script's argument is typeset in a cell (claim 10
+/// of the hunt of Task 328 read it whole in the text fallback).
+#[test]
+fn a_formula_in_a_cell_typesets_a_control_word_as_its_script() {
+    let l = lay("| a |\n|---|\n| $e^\\pi$ and $90^\\circ$ |\n", 800.0);
+    let pi = l
+        .math_glyphs
+        .iter()
+        .find(|g| g.ch == Some('\u{1D70B}'))
+        .expect("the italic pi");
+    let e = l
+        .math_glyphs
+        .iter()
+        .find(|g| g.ch == Some('\u{1D452}'))
+        .expect("the e");
+    assert!(pi.size < e.size, "the script smaller than its base");
+    assert!(
+        l.math_glyphs.iter().any(|g| g.ch == Some('\u{2218}')),
+        "the degree ring"
+    );
+    assert_math_in_rows(&l);
+}
+
+/// A formula between two words of a cell sits on their line, on their
+/// baseline, as in a paragraph.
+#[test]
+fn a_formula_in_a_cell_sits_on_the_text_s_line() {
+    let (doc, l) = lay2("| a |\n|---|\n| energy $E=mc^2$ inline |\n", 800.0);
+    let energy = find_text(&l, &doc, "energy");
+    let after = l
+        .runs
+        .iter()
+        .find(|r| l.run_text(&doc, r).contains("inline"))
+        .expect("the word after");
+    let first = l.math_glyphs.iter().map(|g| g.x).fold(f32::MAX, f32::min);
+    let right = l.math_glyphs.iter().map(|g| g.right).fold(0.0, f32::max);
+    assert!(
+        first > energy.x + energy.width,
+        "the formula after the word"
+    );
+    assert!(after.x >= right - 0.01, "the next word after the formula");
+    assert!(
+        l.math_glyphs
+            .iter()
+            .any(|g| (g.y - energy.baseline).abs() < 2.0),
+        "the base glyphs on the text's baseline"
+    );
+    assert_eq!(l.table_rows.len(), 2);
+    assert_math_in_rows(&l);
+}
+
+#[test]
+fn a_row_grows_to_its_formula() {
+    let l = lay("| a |\n|---|\n| plain |\n| $\\frac{a}{b}$ |\n", 800.0);
+    assert_eq!(l.table_rows.len(), 3);
+    let plain = l.table_rows[1].bottom - l.table_rows[1].top;
+    let fraction = l.table_rows[2].bottom - l.table_rows[2].top;
+    assert!(
+        fraction > plain + 4.0,
+        "the fraction's row taller: {fraction} against {plain}"
+    );
+    assert_math_in_rows(&l);
+}
+
+#[test]
+fn a_column_is_as_wide_as_its_formula() {
+    let (doc, l) = lay2(
+        "| a | b |\n|---|---|\n| $\\sum_{i=1}^{n} x_i + y_i$ | t |\n",
+        800.0,
+    );
+    let t = find_text(&l, &doc, "t");
+    let right = l.math_glyphs.iter().map(|g| g.right).fold(0.0, f32::max);
+    assert!(
+        t.x > right,
+        "the next column starts after the formula: {} against {right}",
+        t.x
+    );
+    let (outline, borders) = table_frame(&l);
+    assert!(right <= outline.x + outline.width);
+    assert_eq!(borders.len(), 1);
+    assert!(borders[0] >= right, "the border after the formula");
+    assert_math_in_rows(&l);
+    let row = l.table_rows[1];
+    assert!(
+        row.bottom - row.top < 2.5 * metrics::LINE_HEIGHT * cfg().body_size,
+        "the formula on one line of the cell"
+    );
+}
+
+/// A formula wider than its cell shrinks into it, as a display block
+/// wider than the column does.
+#[test]
+fn a_formula_wider_than_its_cell_shrinks() {
+    let body = cfg().body_size;
+    let l = lay(
+        "| a | b | c |\n|---|---|---|\n| $\\sum_{i=1}^{n} \\frac{x_i + y_i}{z_i} = \\int_0^1 f(x) \\, dx$ | t | u |\n",
+        300.0,
+    );
+    assert_math_in_rows(&l);
+    let (outline, borders) = table_frame(&l);
+    let left = l.math_glyphs.iter().map(|g| g.x).fold(f32::MAX, f32::min);
+    let right = l.math_glyphs.iter().map(|g| g.right).fold(0.0, f32::max);
+    assert!(
+        right <= outline.x + outline.width + 0.01,
+        "inside the table: {right} against {}",
+        outline.x + outline.width
+    );
+    let widest = l.math_glyphs.iter().map(|g| g.size).fold(0.0, f32::max);
+    assert!(
+        widest < body - 0.5,
+        "the glyphs shrunk: {widest} against {body}"
+    );
+    assert_eq!(borders.len(), 2);
+    assert!(
+        borders.iter().all(|&b| b <= left || b >= right),
+        "the formula crosses no border: {borders:?} against [{left}, {right}]"
+    );
+}
+
+/// A cell with a formula follows its column's mark: centered under
+/// `:-:`, at the right under `--:`, at the left without a mark.
+#[test]
+fn a_formula_in_an_aligned_column_moves_with_the_cell() {
+    let l = lay("| a | b | c |\n|:-:|--:|---|\n| $x$ | $y$ | $z$ |\n", 800.0);
+    assert_math_in_rows(&l);
+    let (outline, borders) = table_frame(&l);
+    assert_eq!(borders.len(), 2);
+    let glyph = |c: char| {
+        l.math_glyphs
+            .iter()
+            .find(|g| g.ch == Some(c))
+            .unwrap_or_else(|| panic!("{c}"))
+    };
+    let (x, y, z) = (glyph('\u{1D465}'), glyph('\u{1D466}'), glyph('\u{1D467}'));
+    let col_mid = (outline.x + borders[0]) / 2.0;
+    assert!(
+        ((x.x + x.right) / 2.0 - col_mid).abs() < 3.0,
+        "centered: {} against {col_mid}",
+        (x.x + x.right) / 2.0
+    );
+    assert!(
+        borders[1] - y.right > 4.0 && borders[1] - y.right < 12.0,
+        "at the right: {} against the border at {}",
+        y.right,
+        borders[1]
+    );
+    assert!(
+        z.x - borders[1] > 4.0 && z.x - borders[1] < 12.0,
+        "at the left: {} against the border at {}",
+        z.x,
+        borders[1]
+    );
+}
+
+#[test]
+fn an_arabic_cell_with_a_formula_stays_in_its_row() {
+    let l = lay("| a |\n|---|\n| مرحبا $x^2$ بالعالم |\n", 800.0);
+    assert_math_in_rows(&l);
+    let (outline, _) = table_frame(&l);
+    for g in &l.math_glyphs {
+        assert!(g.x >= outline.x && g.right <= outline.x + outline.width);
+    }
+}
+
+/// `$$` inside a cell is the cell's formula, in display style: the sum's
+/// limits above and below deepen the row. Before, the formula left the
+/// cell as a display block before the table.
+#[test]
+fn a_display_formula_in_a_cell_takes_display_style() {
+    let text = lay("| a |\n|---|\n| $\\sum_{i=1}^{n} i$ |\n", 800.0);
+    let (doc, display) = lay2("| a |\n|---|\n| $$\\sum_{i=1}^{n} i$$ |\n", 800.0);
+    assert_eq!(doc.blocks.len(), 1, "the formula stays in the table");
+    assert_eq!(display.table_rows.len(), 2);
+    assert_math_in_rows(&display);
+    let band = |l: &LayoutDoc| l.table_rows[1].bottom - l.table_rows[1].top;
+    assert!(
+        band(&display) > band(&text) + 4.0,
+        "the limits deepen the row: {} against {}",
+        band(&display),
+        band(&text)
+    );
+    assert!(display.math_glyphs.iter().any(|g| g.ch == Some('\u{2211}')));
+}
+
+/// An inline formula wider than its column shrinks into it, to half size
+/// at least, as a display block does (Task 355 brought the rule for the
+/// cells, and a paragraph takes it too).
+#[test]
+fn a_formula_wider_than_its_column_shrinks() {
+    let body = cfg().body_size;
+    let l = lay(
+        "Text $\\sum_{i=1}^{n} \\frac{x_i + y_i}{z_i} = \\int_0^1 f(x) \\, dx + \\prod_{k} a_k$ after.\n",
+        220.0,
+    );
+    let widest = l.math_glyphs.iter().map(|g| g.size).fold(0.0, f32::max);
+    assert!(
+        widest < body - 0.5,
+        "the glyphs shrunk: {widest} against {body}"
+    );
+    assert!(widest >= 0.5 * body - 0.5, "not below the floor: {widest}");
+    let right = l.math_glyphs.iter().map(|g| g.right).fold(0.0, f32::max);
+    assert!(right <= 220.0 + 0.01, "inside the column: {right}");
+}
+
+/// Every glyph of a formula carries the box's right edge, as it carries
+/// its top and bottom.
+#[test]
+fn math_glyphs_carry_their_box_s_right_edge() {
+    let l = lay("a $x^2 + y$ b\n", 800.0);
+    let right = l.math_glyphs[0].right;
+    assert!(
+        l.math_glyphs.iter().all(|g| g.right == right),
+        "one box, one right edge"
+    );
+    let last_x = l.math_glyphs.iter().map(|g| g.x).fold(0.0, f32::max);
+    assert!(right > last_x, "the box ends after the last glyph's origin");
+    let left = l.math_glyphs.iter().map(|g| g.x).fold(f32::MAX, f32::min);
+    assert!(
+        right - left > 2.0 * cfg().body_size,
+        "about four symbols wide"
+    );
+}
+
+/// The math glyph of a layout that renders `c`.
+fn glyph_of(l: &LayoutDoc, c: char) -> &MathGlyph {
+    l.math_glyphs
+        .iter()
+        .find(|g| g.ch == Some(c))
+        .unwrap_or_else(|| panic!("no glyph for {c}"))
+}
+
+/// A table inside a centered or right-aligned division moves with its
+/// formulas (the read of Task 355): the line aligner moves the math
+/// glyphs as it moves the runs. A paragraph in such a division had the
+/// same fault before.
+#[test]
+fn a_table_in_an_aligned_div_moves_its_formulas() {
+    for word in ["center", "right"] {
+        let l = lay(
+            &format!("<div align=\"{word}\">\n\n| a | b |\n|---|---|\n| $\\frac{{a}}{{b}}$ | t |\n\n</div>\n"),
+            800.0,
+        );
+        let (outline, _) = table_frame(&l);
+        assert!(
+            outline.x > 200.0,
+            "{word}: the table moved to {}",
+            outline.x
+        );
+        assert_math_in_rows(&l);
+        for g in &l.math_glyphs {
+            assert!(
+                g.x >= outline.x && g.right <= outline.x + outline.width + 0.01,
+                "{word}: glyph {:?} at [{}, {}] against the table [{}, {}]",
+                g.ch,
+                g.x,
+                g.right,
+                outline.x,
+                outline.x + outline.width
+            );
+        }
+    }
+}
+
+#[test]
+fn a_formula_in_a_centered_paragraph_moves_with_its_line() {
+    let (doc, l) = lay2(
+        "<div align=\"center\">\n\nsome $\\frac{a}{b}$ text\n\n</div>\n",
+        800.0,
+    );
+    let some = find_text(&l, &doc, "some");
+    let text = l
+        .runs
+        .iter()
+        .find(|r| l.run_text(&doc, r).contains("text"))
+        .expect("the word after");
+    let left = l.math_glyphs.iter().map(|g| g.x).fold(f32::MAX, f32::min);
+    let right = l.math_glyphs.iter().map(|g| g.right).fold(0.0, f32::max);
+    assert!(
+        left >= some.x + some.width - 0.01,
+        "the fraction after the first word: {left} against {}",
+        some.x + some.width
+    );
+    assert!(
+        right <= text.x + 0.01,
+        "the fraction before the second word: {right} against {}",
+        text.x
+    );
+}
+
+/// `$$a \over b$$` in a cell is the whole formula in display style: the
+/// numerator and the denominator at the body size, as in a block. The
+/// read of Task 355 found the denominator at script size when the style
+/// was written as a word before the TeX.
+#[test]
+fn a_display_formula_in_a_cell_keeps_tex_s_sizes_in_an_infix_fraction() {
+    let l = lay("| a |\n|---|\n| $$a \\over b$$ |\n", 800.0);
+    let (a, b) = (
+        glyph_of(&l, '\u{1D44E}').size,
+        glyph_of(&l, '\u{1D44F}').size,
+    );
+    assert!((a - b).abs() < 0.01, "a at {a}, b at {b}");
+    assert!(
+        (a - cfg().body_size).abs() < 0.01,
+        "the numerator at the body size: {a}"
+    );
+}
+
+/// A cell with an image and a formula shows the image's text, as every
+/// cell shows an image. The read of Task 355: the flow would have looked
+/// the image up, in the shaping pool's empty cache.
+#[test]
+fn a_cell_with_an_image_and_a_formula_shows_the_image_s_text() {
+    let (doc, l) = lay2("| a |\n|---|\n| ![alt](oryx-test.png) $x$ |\n", 800.0);
+    assert!(l.images.is_empty(), "no image placed in a cell");
+    find_text(&l, &doc, "alt");
+    assert_math_in_rows(&l);
+}
+
+/// A hard break before a formula starts a new line, in a cell as in a
+/// paragraph. The read of Task 355: the flow let the formula join the
+/// line above the break, and an empty line followed.
+#[test]
+fn a_hard_break_before_a_formula_starts_a_new_line() {
+    let lh = metrics::LINE_HEIGHT * cfg().body_size;
+    let l = lay("| a |\n|---|\n| $x$<br>$y$ |\n", 800.0);
+    let (x, y) = (glyph_of(&l, '\u{1D465}'), glyph_of(&l, '\u{1D466}'));
+    assert!(
+        y.top >= x.bottom - 0.01,
+        "y below x: {} against {}",
+        y.top,
+        x.bottom
+    );
+    let band = l.table_rows[1].bottom - l.table_rows[1].top;
+    assert!(band > 1.6 * lh && band < 2.6 * lh, "two lines: {band}");
+
+    let (doc, l) = lay2("| a |\n|---|\n| text<br>$y$ |\n", 800.0);
+    let text = find_text(&l, &doc, "text");
+    let y = glyph_of(&l, '\u{1D466}');
+    assert!(
+        y.top >= text.y + lh - 0.01,
+        "y below the text: {} against {}",
+        y.top,
+        text.y + lh
+    );
+    let band = l.table_rows[1].bottom - l.table_rows[1].top;
+    assert!(band < 2.6 * lh, "no empty line: {band}");
+
+    let (doc, l) = lay2("text<br>$y$ after\n", 800.0);
+    let text = find_text(&l, &doc, "text");
+    let y = glyph_of(&l, '\u{1D466}');
+    assert!(y.top >= text.y + lh - 0.01, "paragraph: y below the text");
+    let after = l
+        .runs
+        .iter()
+        .find(|r| l.run_text(&doc, r).contains("after"))
+        .expect("the word after");
+    assert!(
+        (after.baseline - y.y).abs() < 2.0,
+        "the word after on the formula's line: {} against {}",
+        after.baseline,
+        y.y
+    );
+}
+
+/// A right-to-left cell with a formula follows its column's mark (the
+/// read of Task 355). Under a right mark and under none, the text hugs
+/// the right edge and the formula's row stands at the right too; under a
+/// center mark the text is centered, and the formula hangs on its line
+/// inside the cell, in the flow's order for right-to-left text.
+#[test]
+fn text_after_a_formula_and_a_hard_break_starts_the_next_line() {
+    let lh = metrics::LINE_HEIGHT * cfg().body_size;
+    // In a cell: the text below the formula, at the cell's left edge,
+    // inside its row.
+    let (doc, l) = lay2("| a |\n|---|\n| $x$<br>more |\n", 800.0);
+    let (x, more) = (glyph_of(&l, '\u{1D465}'), find_text(&l, &doc, "more"));
+    assert!(
+        (more.x - x.left).abs() < 1.0,
+        "at the left edge: {} against {}",
+        more.x,
+        x.left
+    );
+    assert!(more.y >= x.bottom - 0.01, "below the formula");
+    assert!(
+        more.y + lh <= l.table_rows[1].bottom + 0.01,
+        "inside the row: {} against {}",
+        more.y + lh,
+        l.table_rows[1].bottom
+    );
+
+    // In a paragraph: below its line, at the margin, above the next block.
+    let (doc, l) = lay2("Some $x^2$\\\nmore\n\nNext\n", 800.0);
+    let (some, more, next) = (
+        find_word(&l, &doc, "Some"),
+        find_word(&l, &doc, "more"),
+        find_word(&l, &doc, "Next"),
+    );
+    assert!((more.x - some.x).abs() < 1.0, "at the margin: {}", more.x);
+    assert!(more.y >= some.y + lh - 0.01, "below the first line");
+    assert!(
+        next.y >= more.y + lh - 0.01,
+        "the next paragraph below: {} against {}",
+        next.y,
+        more.y + lh
+    );
+}
+
+#[test]
+fn a_break_that_opens_a_paragraph_leaves_a_blank_line_before_a_formula_too() {
+    let lh = metrics::LINE_HEIGHT * cfg().body_size;
+    // How far the word "Line" is below the paragraph before it.
+    let drop = |source: &str| {
+        let (doc, l) = lay2(source, 800.0);
+        let y = |word: &str| {
+            l.runs
+                .iter()
+                .find(|r| l.run_text(&doc, r).contains(word))
+                .unwrap_or_else(|| panic!("no run with {word:?}"))
+                .y
+        };
+        y("Line") - y("Before")
+    };
+    let plain = drop("Before\n\n<br>Line one\n");
+    let formula = drop("Before\n\n<br>Line one $x$\n");
+    assert!(
+        (formula - plain).abs() < 0.2 * lh,
+        "as the paragraph without a formula: {formula} against {plain}"
+    );
+    let two = drop("Before\n\n<br><br>Line one $x$\n");
+    assert!(
+        (two - formula - lh).abs() < 0.2 * lh,
+        "a second break, a second blank line: {two} against {formula}"
+    );
+}
+
+#[test]
+fn two_hard_breaks_between_two_formulas_leave_a_blank_line() {
+    let lh = metrics::LINE_HEIGHT * cfg().body_size;
+    let gap = |source: &str| {
+        let l = lay(source, 800.0);
+        glyph_of(&l, '\u{1D466}').y - glyph_of(&l, '\u{1D465}').y
+    };
+    let one = gap("| a |\n|---|\n| $x$<br>$y$ |\n");
+    let two = gap("| a |\n|---|\n| $x$<br><br>$y$ |\n");
+    assert!(
+        (two - one - lh).abs() < 0.2 * lh,
+        "a line more: {two} against {one}"
+    );
+    let two = gap("$x$<br><br>$y$\n");
+    let one = gap("$x$<br>$y$\n");
+    assert!(
+        (two - one - lh).abs() < 0.2 * lh,
+        "in a paragraph: {two} against {one}"
+    );
+}
+
+#[test]
+fn a_formula_in_a_footnote_definition_is_typeset() {
+    let (doc, l) = lay2("Text.[^1]\n\n[^1]: See $\\frac{a}{b}$ here.\n", 800.0);
+    assert!(
+        l.math_glyphs.iter().any(|g| g.ch == Some('\u{1D44E}')),
+        "the numerator is a math glyph"
+    );
+    assert!(
+        l.runs.iter().all(|r| !l.run_text(&doc, r).contains("frac")),
+        "no TeX text on the page"
+    );
+    let (see, here) = (find_word(&l, &doc, "See"), find_word(&l, &doc, "here."));
+    let a = glyph_of(&l, '\u{1D44E}');
+    assert!(a.x > see.x && a.x < here.x, "the formula between its words");
+}
+
+#[test]
+fn a_centered_line_counts_a_formula_s_leading_phantom() {
+    let x_of = |tex: &str| {
+        let l = lay(
+            &format!("<div align=\"center\">\n\n{tex} centered\n\n</div>\n"),
+            800.0,
+        );
+        glyph_of(&l, '\u{1D44E}').x
+    };
+    let (plain, phantom) = (x_of("$a$"), x_of("$\\hphantom{xxxxxxxx}a$"));
+    assert!(
+        phantom > plain + 10.0,
+        "the letter moves right by half the phantom: {phantom} against {plain}"
+    );
+}
+
+#[test]
+fn a_tall_delimiter_is_indexed_by_its_formula_s_box() {
+    let l = lay("$$\\Bigg( x \\Bigg)$$\n", 800.0);
+    let paren = glyph_of(&l, '(');
+    // A strip that only meets the top of the formula's box still finds
+    // the delimiter.
+    let (head, tail) = l.math_in(paren.top, paren.top + 0.5);
+    let found = l.math_glyphs[head]
+        .iter()
+        .chain(&l.math_glyphs[tail])
+        .any(|g| g.ch == Some('('));
+    assert!(found, "the delimiter is in the strip at its box's top");
+}
+
+#[test]
+fn a_right_to_left_cell_with_a_formula_follows_its_column_s_mark() {
+    for mark in ["--:", "---", ":-:"] {
+        let (doc, l) = lay2(
+            &format!("| a | b |\n|{mark}|---|\n| مرحبا $x^2$ بالعالم | t |\n"),
+            800.0,
+        );
+        assert_math_in_rows(&l);
+        let (outline, borders) = table_frame(&l);
+        assert_eq!(borders.len(), 1);
+        let content = (outline.x + 8.0, borders[0] - 8.0);
+        let left = l.math_glyphs.iter().map(|g| g.x).fold(f32::MAX, f32::min);
+        let right = l.math_glyphs.iter().map(|g| g.right).fold(0.0, f32::max);
+        assert!(
+            left >= content.0 - 0.01 && right <= content.1 + 0.01,
+            "{mark}: the formula [{left}, {right}] inside the content [{}, {}]",
+            content.0,
+            content.1
+        );
+        let word = l
+            .runs
+            .iter()
+            .find(|r| l.run_text(&doc, r).contains("مرحبا"))
+            .expect("the first word");
+        if mark == ":-:" {
+            let mid = (content.0 + content.1) / 2.0;
+            assert!(
+                ((word.x + word.width / 2.0) - mid).abs() < 4.0,
+                "{mark}: the word centered at {} against {mid}",
+                word.x + word.width / 2.0
+            );
+        } else {
+            assert!(
+                content.1 - right < 12.0,
+                "{mark}: the formula's row at the right: {right} against {}",
+                content.1
+            );
+            assert!(
+                content.1 - (word.x + word.width) < 12.0,
+                "{mark}: the word at the right: {} against {}",
+                word.x + word.width,
+                content.1
+            );
+        }
+    }
+}
+
 /// The marks of the separator row align the column: `:---:` centers the
 /// cell's lines in the column, `---:` puts them against its right edge,
 /// `:---` and `---` leave them at the left. The example of SYNTAX.md.
-/// A formula in a table cell goes through the text fallback, which
-/// reads an escaped reserved character as noad does on the page.
-#[test]
-fn a_formula_in_a_cell_shows_its_escaped_characters() {
-    let (doc, l) = lay2("| cell |\n|---|\n| $15\\%$ and $x\\_1$ |\n", 800.0);
-    find_text(&l, &doc, "15%");
-    find_text(&l, &doc, "x_1");
-}
-
 #[test]
 fn table_columns_follow_their_alignment_marks() {
     let (doc, l) = lay2(
@@ -5677,19 +6284,424 @@ fn a_raised_pill_on_the_line_below_the_kept_one_is_not_kept() {
     }
 }
 
-#[test]
-fn a_lone_image_in_markdown_stays_at_the_left() {
-    // The standard reading of markdown: a book centers its lone images,
-    // a markdown page does not.
-    let dir = std::env::temp_dir().join(format!("oryx-laytest-left-{}", std::process::id()));
+/// A document with a small picture beside it, laid out under a
+/// direction: the picture is 100 by 50, in a folder of its own.
+fn lay_lone(source: &str, width: f32, direction: DirectionMode) -> (Document, LayoutDoc) {
+    let dir = std::env::temp_dir().join(format!(
+        "oryx-laytest-lone-{}-{}",
+        std::process::id(),
+        source.len()
+    ));
     std::fs::create_dir_all(&dir).unwrap();
     let img = image::RgbaImage::from_pixel(100, 50, image::Rgba([10, 20, 30, 255]));
     img.save(dir.join("small.png")).unwrap();
+    let doc = markdown::parse(source);
+    let mut media = MediaCache::offline(dir);
+    let c = ViewConfig { direction, ..cfg() };
+    let l = layout(
+        &doc,
+        &Theme::default_dark(),
+        &mut fonts(),
+        &mut media,
+        &c,
+        width,
+    );
+    (doc, l)
+}
+
+/// The middle of the content column at `width`, read from a centered
+/// paragraph of one letter.
+fn content_center(width: f32) -> f32 {
+    let run = &lay("<p align=\"center\">x</p>", width).runs[0];
+    run.x + run.width / 2.0
+}
+
+fn image_center(l: &LayoutDoc) -> f32 {
+    l.images[0].x + l.images[0].width / 2.0
+}
+
+#[test]
+fn a_lone_image_in_markdown_is_centered() {
+    // The user's ask of 09/11/2026: a picture alone in its paragraph is
+    // centered, as a book's is; the standard says nothing of placement.
+    let (_, l) = lay_lone("![small](small.png)", 800.0, DirectionMode::Auto);
+    assert_eq!(l.images.len(), 1);
+    assert!(
+        (image_center(&l) - content_center(800.0)).abs() < 0.5,
+        "the image's middle at {} against the column's {}",
+        image_center(&l),
+        content_center(800.0)
+    );
+    let (_, l) = lay_lone(
+        "<img src=\"small.png\" width=\"60\">",
+        800.0,
+        DirectionMode::Auto,
+    );
+    assert!(
+        (image_center(&l) - content_center(800.0)).abs() < 0.5,
+        "a sized image alone is centered too: {}",
+        image_center(&l)
+    );
+}
+
+#[test]
+fn a_lone_linked_image_is_centered_and_clickable_there() {
+    let (doc, l) = lay_lone(
+        "[![small](small.png)](https://z.tld)",
+        800.0,
+        DirectionMode::Auto,
+    );
+    assert!(
+        (image_center(&l) - content_center(800.0)).abs() < 0.5,
+        "the linked image's middle at {}",
+        image_center(&l)
+    );
+    let img = &l.images[0];
+    assert_eq!(
+        l.link_at(&doc, img.x + 5.0, img.y + 5.0),
+        Some("https://z.tld"),
+        "the hit area moved with the image"
+    );
+}
+
+#[test]
+fn an_image_with_text_on_its_line_stays_inline() {
     let margin = lay("text", 800.0).runs[0].x;
-    let l = lay_with_images("![small](small.png)", 800.0, dir);
+    let (_, l) = lay_lone(
+        "![small](small.png) and the words after it",
+        800.0,
+        DirectionMode::Auto,
+    );
+    assert!((l.images[0].x - margin).abs() < 0.5, "at {}", l.images[0].x);
+    // A picture taller than the line takes a row of its own under the
+    // word, at the left: the text is on its line, so nothing is centered.
+    let (_, l) = lay_lone("Before ![small](small.png)", 800.0, DirectionMode::Auto);
     assert!(
         (l.images[0].x - margin).abs() < 0.5,
-        "at {} with the margin at {margin}",
+        "under the word, at {}",
         l.images[0].x
+    );
+    assert!(l.images[0].y > l.runs[0].y, "on its own row");
+}
+
+#[test]
+fn a_line_of_badges_stays_at_the_left() {
+    let margin = lay("text", 800.0).runs[0].x;
+    let (_, l) = lay_lone(
+        "![small](small.png) ![small](small.png)",
+        800.0,
+        DirectionMode::Auto,
+    );
+    assert_eq!(l.images.len(), 2);
+    assert!((l.images[0].x - margin).abs() < 0.5, "at {}", l.images[0].x);
+}
+
+#[test]
+fn an_image_placed_by_html_keeps_its_place() {
+    let margin = lay("text", 800.0).runs[0].x;
+    let (_, l) = lay_lone(
+        "<p align=\"left\"><img src=\"small.png\"></p>",
+        800.0,
+        DirectionMode::Auto,
+    );
+    assert!(
+        (l.images[0].x - margin).abs() < 0.5,
+        "left by the paragraph: {}",
+        l.images[0].x
+    );
+    let (_, l) = lay_lone(
+        "<img src=\"small.png\" align=\"left\">",
+        800.0,
+        DirectionMode::Auto,
+    );
+    assert!(
+        (l.images[0].x - margin).abs() < 0.5,
+        "left by the tag: {}",
+        l.images[0].x
+    );
+    let (_, l) = lay_lone(
+        "<p align=\"right\"><img src=\"small.png\"></p>",
+        800.0,
+        DirectionMode::Auto,
+    );
+    let right = 2.0 * content_center(800.0) - margin;
+    assert!(
+        (l.images[0].x + l.images[0].width - right).abs() < 0.5,
+        "right by the paragraph: {} wide at {}",
+        l.images[0].width,
+        l.images[0].x
+    );
+}
+
+#[test]
+fn a_lone_image_in_a_quote_is_centered_in_the_quote() {
+    // The reference is a letter centered by its own word inside a quote:
+    // the quote's content is narrower than the page's, so the middle
+    // stands right of the page's.
+    let run = &lay("> <p align=\"center\">x</p>", 800.0).runs[0];
+    let quote_center = run.x + run.width / 2.0;
+    assert!(
+        quote_center > content_center(800.0) + 5.0,
+        "the quote's middle at {quote_center}"
+    );
+    let (_, l) = lay_lone("> ![small](small.png)", 800.0, DirectionMode::Auto);
+    assert!(
+        (image_center(&l) - quote_center).abs() < 1.0,
+        "the image's middle at {} against the quote's {quote_center}",
+        image_center(&l)
+    );
+}
+
+#[test]
+fn a_lone_image_in_a_list_item_stays_at_the_item_s_text() {
+    let item_text = lay("- text", 800.0)
+        .runs
+        .iter()
+        .map(|r| r.x)
+        .fold(f32::MIN, f32::max);
+    let (_, l) = lay_lone("- ![small](small.png)", 800.0, DirectionMode::Auto);
+    assert!(
+        (l.images[0].x - item_text).abs() < 0.5,
+        "at {} against the item's text at {item_text}",
+        l.images[0].x
+    );
+}
+
+#[test]
+fn a_lone_image_in_a_right_to_left_paragraph_is_centered() {
+    let (_, l) = lay_lone("![small](small.png)", 800.0, DirectionMode::Rtl);
+    assert!(
+        (image_center(&l) - content_center(800.0)).abs() < 0.5,
+        "the image's middle at {}",
+        image_center(&l)
+    );
+}
+
+#[test]
+fn an_unloadable_lone_image_keeps_its_full_width_box() {
+    let margin = lay("text", 800.0).runs[0].x;
+    let right = 2.0 * content_center(800.0) - margin;
+    let (_, l) = lay_lone("![alt](missing.png)", 800.0, DirectionMode::Auto);
+    let outer = l
+        .rects
+        .iter()
+        .max_by(|a, b| a.width.total_cmp(&b.width))
+        .expect("the placeholder box");
+    assert!((outer.x - margin).abs() < 0.5 && (outer.x + outer.width - right).abs() < 1.0);
+}
+
+#[test]
+fn a_formula_s_color_reaches_its_glyphs_and_rules() {
+    let l = lay("$a {\\color{red} b \\frac{c}{d}}$", 600.0);
+    let red = oryx::style::theme::Rgba {
+        r: 255,
+        g: 0,
+        b: 0,
+        a: 255,
+    };
+    assert!(l.math_glyphs.iter().any(|g| g.color == red), "a red glyph");
+    assert!(
+        l.math_glyphs.iter().any(|g| g.color != red),
+        "the a in the theme's ink"
+    );
+    assert!(
+        l.rects.iter().any(|r| r.color == red),
+        "the fraction bar red"
+    );
+}
+
+/// A book's chapter through the walker, laid out beside the 100 by 50
+/// picture `small.png`.
+fn lay_book(css: &str, xhtml: &str, width: f32) -> LayoutDoc {
+    let dir = std::env::temp_dir().join(format!(
+        "oryx-laytest-book-{}-{}",
+        std::process::id(),
+        css.len() * 1000 + xhtml.len()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let img = image::RgbaImage::from_pixel(100, 50, image::Rgba([10, 20, 30, 255]));
+    img.save(dir.join("small.png")).unwrap();
+    let mut walker = oryx::doc::html::Walker::new();
+    let mut table = oryx::doc::html::EmphasisTable::default();
+    table.add_css(css);
+    walker.set_emphasis(table);
+    walker.walk_chapter(xhtml);
+    let (blocks, source, details) = walker.finish();
+    let doc = Document {
+        blocks,
+        source: source.into(),
+        details,
+        ..Document::default()
+    };
+    let mut media = MediaCache::offline(dir);
+    layout(
+        &doc,
+        &Theme::default_dark(),
+        &mut fonts(),
+        &mut media,
+        &cfg(),
+        width,
+    )
+}
+
+/// The read of Task 358: a book that places its lone image keeps the
+/// image where the book put it; only a book that says nothing gets the
+/// middle.
+#[test]
+fn a_lone_image_a_book_places_is_not_centered() {
+    let middle = content_center(800.0);
+    let l = lay_book(
+        "",
+        "<html><body><p><img src=\"small.png\"/></p></body></html>",
+        800.0,
+    );
+    assert!(
+        (image_center(&l) - middle).abs() < 0.5,
+        "no word, the middle"
+    );
+    let placed = [
+        (
+            ".fig { text-align: left }",
+            "<html><body><p class=\"fig\"><img src=\"small.png\"/></p></body></html>",
+        ),
+        (
+            "p { text-align: left }",
+            "<html><body><p><img src=\"small.png\"/></p></body></html>",
+        ),
+        (
+            "",
+            "<html><body><div align=\"left\"><p><img src=\"small.png\"/></p></div></body></html>",
+        ),
+    ];
+    for (css, xhtml) in placed {
+        let l = lay_book(css, xhtml, 800.0);
+        assert!(
+            image_center(&l) < middle - 100.0,
+            "{css} {xhtml}: the image's middle at {} against the column's {middle}",
+            image_center(&l)
+        );
+    }
+}
+
+/// The read of Task 358: the `align` of a tag in a heading or a table
+/// cell is that picture's, and the next lone picture is centered.
+#[test]
+fn the_align_of_a_tag_elsewhere_does_not_place_the_next_lone_image() {
+    let middle = content_center(800.0);
+    for source in [
+        "# Title <img src=\"small.png\" align=\"right\">\n\n![s](small.png)",
+        "<h1><img src=\"small.png\" align=\"left\" width=\"20\"> Project</h1>\n\n![s](small.png)",
+        "| <img src=\"small.png\" align=\"left\"> | b |\n|---|---|\n| c | d |\n\n![s](small.png)",
+    ] {
+        let (_, l) = lay_lone(source, 800.0, DirectionMode::Auto);
+        let last = l.images.last().expect("the lone image");
+        let center = last.x + last.width / 2.0;
+        assert!(
+            (center - middle).abs() < 0.5,
+            "{source}: the lone image's middle at {center} against {middle}"
+        );
+    }
+}
+
+/// The read of Task 358: the title of an alert stays at the left when
+/// the alert opens with a lone picture, or with a centered paragraph.
+#[test]
+fn an_alert_s_title_stays_at_the_left_above_a_centered_block() {
+    let title_x = |l: &LayoutDoc| l.runs.first().expect("the title").x;
+    let (_, text) = lay_lone("> [!NOTE]\n> words", 800.0, DirectionMode::Auto);
+    let (_, image) = lay_lone("> [!NOTE]\n> ![s](small.png)", 800.0, DirectionMode::Auto);
+    assert!(
+        (title_x(&image) - title_x(&text)).abs() < 0.5,
+        "the title above a lone image at {} against {}",
+        title_x(&image),
+        title_x(&text)
+    );
+    let (_, centered) = lay_lone(
+        "> [!NOTE]\n> <p align=\"center\">words</p>",
+        800.0,
+        DirectionMode::Auto,
+    );
+    assert!(
+        (title_x(&centered) - title_x(&text)).abs() < 0.5,
+        "the title above a centered paragraph at {} against {}",
+        title_x(&centered),
+        title_x(&text)
+    );
+    let (_, l) = lay_lone("> [!NOTE]\n> ![s](small.png)", 800.0, DirectionMode::Auto);
+    assert!(
+        image_center(&l) > title_x(&text) + 150.0,
+        "the image itself is still centered in the alert"
+    );
+}
+
+/// The read of Task 358: a lone `<img>` tag with a word and no file
+/// keeps the box the width of the column, as a markdown image does.
+#[test]
+fn an_unloadable_lone_image_tag_with_a_word_keeps_its_full_width_box() {
+    let margin = lay("text", 800.0).runs[0].x;
+    let right = 2.0 * content_center(800.0) - margin;
+    let (_, l) = lay_lone(
+        "<img src=\"missing.png\" align=\"center\">",
+        800.0,
+        DirectionMode::Auto,
+    );
+    let outer = l
+        .rects
+        .iter()
+        .max_by(|a, b| a.width.total_cmp(&b.width))
+        .expect("the placeholder box");
+    assert!(
+        (outer.x - margin).abs() < 0.5 && (outer.x + outer.width - right).abs() < 1.0,
+        "the box from {} wide {}",
+        outer.x,
+        outer.width
+    );
+}
+
+/// The read of Task 358: a picture alone in a definition stays with the
+/// definition, as one in a list item stays with its marker.
+#[test]
+fn a_lone_image_in_a_definition_is_not_centered() {
+    let middle = content_center(800.0);
+    for source in [
+        "Term\n: ![s](small.png)",
+        "<dl><dt><img src=\"small.png\"></dt><dd>words</dd></dl>",
+    ] {
+        let (_, l) = lay_lone(source, 800.0, DirectionMode::Auto);
+        assert!(
+            image_center(&l) < middle - 100.0,
+            "{source}: the image's middle at {}",
+            image_center(&l)
+        );
+    }
+}
+
+/// The user's ask of 10/11/2026: two footnote references that touch are
+/// drawn apart, a raised comma between them.
+#[test]
+fn footnote_references_that_touch_are_drawn_apart() {
+    let (doc, l) = lay2("word[^a][^b]\n\n[^a]: one\n\n[^b]: two", 800.0);
+    let run_of = |link: &str| {
+        l.runs
+            .iter()
+            .find(|r| l.run_link(&doc, r) == Some(link))
+            .unwrap_or_else(|| panic!("no run for {link}"))
+    };
+    let (first, second) = (run_of("footnote:a"), run_of("footnote:b"));
+    let comma = l
+        .runs
+        .iter()
+        .find(|r| l.run_text(&doc, r) == ",")
+        .expect("the comma between them");
+    assert!(
+        second.x >= first.x + first.width + comma.width - 0.5 && comma.width > 1.0,
+        "the second number at {} after the first's end {} and a comma {} wide",
+        second.x,
+        first.x + first.width,
+        comma.width
+    );
+    assert!(
+        (comma.size - first.size).abs() < 0.1 && (comma.baseline - first.baseline).abs() < 0.1,
+        "the comma is raised and sized as the numbers"
     );
 }

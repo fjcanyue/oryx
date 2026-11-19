@@ -20,6 +20,17 @@ pub enum AtomClass {
     Inner,
 }
 
+/// The four TeX styles. Cramped variants are tracked inside the layout.
+/// A construct that forces its own style (`\dfrac`, `\tfrac`) carries
+/// one; the layout takes the style around it otherwise.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MathStyle {
+    Display,
+    Text,
+    Script,
+    ScriptScript,
+}
+
 /// A nucleus, superscript, or subscript content. Constructs are nuclei,
 /// so scripts, spacing, and demotion see every noad as an atom.
 #[derive(Debug, Clone, PartialEq)]
@@ -36,6 +47,13 @@ pub enum Field {
         denominator: MathList,
         /// False for `\binom` and `\atop`: the stack constants take over.
         bar: bool,
+        /// The style the fraction is laid out in whatever the style
+        /// around it: `\tfrac` and `\tbinom` force text style, `\dfrac`,
+        /// `\dbinom` and `\cfrac` display style. `\frac` carries none.
+        style: Option<MathStyle>,
+        /// `\cfrac`: each part stands on a strut, so that nested
+        /// continued fractions keep even rows.
+        continued: bool,
     },
     /// A radical with an optional degree.
     Radical {
@@ -49,6 +67,36 @@ pub enum Field {
         close: Option<char>,
         body: MathList,
     },
+    /// A delimiter at one of TeX's four fixed sizes, `\big` to `\Bigg`
+    /// (the size 1 to 4), with the class of the word's form on the atom:
+    /// Ord bare, Open for `l`, Close for `r`, Rel for `m`. `None` is the
+    /// dot form, TeX's invisible box of the size.
+    Sized { ch: Option<char>, size: u8 },
+    /// `\overline` and `\underline`: a rule over or under the base.
+    Line { base: MathList, under: bool },
+    /// `\overbrace` and `\underbrace`: a brace stretched over or under the
+    /// base; the atom is an operator with limits, so its scripts stack
+    /// beyond the brace.
+    Brace { base: MathList, under: bool },
+    /// `\xrightarrow` and its kin: an arrow stretched past the texts set
+    /// above and below it.
+    Arrow {
+        ch: char,
+        above: MathList,
+        below: MathList,
+    },
+    /// `\phantom`, `\vphantom`, `\hphantom`: the size of the body with no
+    /// ink, the width kept or zero, the height and depth kept or zero.
+    Phantom {
+        body: MathList,
+        width: bool,
+        height: bool,
+    },
+    /// `\textcolor{c}{...}`: the body in a color.
+    Colored { color: [u8; 3], body: MathList },
+    /// `\not` before a symbol with no negated form of its own: the
+    /// combining long solidus drawn over it; a relation, as `\not` is.
+    Negated { base: MathList },
     /// An accented base: the combining accent character, whether wide
     /// forms may stretch horizontally, and the accented list.
     Accent {
@@ -126,6 +174,14 @@ pub struct Atom {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Noad {
     Atom(Atom),
+    /// TeX's style noad, `\displaystyle` and its kin: the style of the
+    /// rest of the list, uncramped. It is no atom: the binary rules and
+    /// the scripts see through it, and the spacing after it is read in
+    /// the new style.
+    Style(MathStyle),
+    /// `\color{c}`: the rest of the list in the color, the glyphs and the
+    /// rules, an inner color winning. No atom either.
+    Color([u8; 3]),
 }
 
 /// A parsed math list.
@@ -134,8 +190,86 @@ pub struct MathList(pub Vec<Noad>);
 
 impl MathList {
     pub fn atoms(&self) -> impl Iterator<Item = &Atom> {
-        self.0.iter().map(|n| match n {
-            Noad::Atom(a) => a,
+        self.0.iter().filter_map(|n| match n {
+            Noad::Atom(a) => Some(a),
+            Noad::Style(_) | Noad::Color(_) => None,
         })
+    }
+
+    /// The TeX the parser did not understand: the text of every
+    /// `Field::Literal` through every field and script, in the order of
+    /// the list, a superscript before a subscript. Empty means the whole
+    /// formula typesets.
+    pub fn literals(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        self.collect_literals(&mut out, false);
+        out
+    }
+
+    /// What the page shows as written: the literals, and with them the
+    /// texts that hold a backslash (`\text{\alpha}`), which a text shows
+    /// as written. The probe of a file and the test of the math page
+    /// read this.
+    pub fn shown_as_written(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        self.collect_literals(&mut out, true);
+        out
+    }
+
+    fn collect_literals(&self, out: &mut Vec<String>, texts: bool) {
+        for atom in self.atoms() {
+            // Exhaustive on purpose: a field added later must say where
+            // its literals are.
+            match &atom.nucleus {
+                Field::Literal(text) => out.push(text.clone()),
+                Field::List(list) => list.collect_literals(out, texts),
+                Field::Fraction {
+                    numerator,
+                    denominator,
+                    ..
+                } => {
+                    numerator.collect_literals(out, texts);
+                    denominator.collect_literals(out, texts);
+                }
+                Field::Radical { radicand, degree } => {
+                    if let Some(degree) = degree {
+                        degree.collect_literals(out, texts);
+                    }
+                    radicand.collect_literals(out, texts);
+                }
+                Field::LeftRight { body, .. }
+                | Field::Phantom { body, .. }
+                | Field::Colored { body, .. } => body.collect_literals(out, texts),
+                Field::Line { base, .. } | Field::Brace { base, .. } | Field::Negated { base } => {
+                    base.collect_literals(out, texts)
+                }
+                Field::Arrow { above, below, .. } => {
+                    above.collect_literals(out, texts);
+                    below.collect_literals(out, texts);
+                }
+                Field::Accent { base, .. } => base.collect_literals(out, texts),
+                Field::Table { rows, .. } => {
+                    for row in rows {
+                        for cell in row {
+                            cell.collect_literals(out, texts);
+                        }
+                    }
+                }
+                // A backslash left in a text is shown: `\text{\alpha}`,
+                // `\text{G\"odel}`, where TeX would typeset the letter.
+                Field::Text(text) if texts && text.contains('\\') => out.push(text.clone()),
+                Field::Symbol(_)
+                | Field::Sized { .. }
+                | Field::Text(_)
+                | Field::Kern(_)
+                | Field::Empty => {}
+            }
+            if let Some(list) = &atom.sup {
+                list.collect_literals(out, texts);
+            }
+            if let Some(list) = &atom.sub {
+                list.collect_literals(out, texts);
+            }
+        }
     }
 }

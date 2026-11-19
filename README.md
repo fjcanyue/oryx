@@ -57,13 +57,13 @@ Oryx opens files fast enough that it does not need tabs: you save, click another
 
 Oryx reads CommonMark and GitHub Flavored Markdown: tables, task lists, strikethrough, footnotes, alerts and math. It also renders the HTML that GitHub allows in a README, like centered blocks, badges and collapsible sections, so a README looks in Oryx the way it looks on GitHub. Remote images and badges are saved on disk: they still show when you are offline.
 
-Oryx also reads the extended syntax of the Markdown Guide, which GitHub does not: highlight, subscript and superscript, definition lists and abbreviations. Math written in TeX is typeset with the STIX Two Math font, and it looks the same in the PDF. A fenced `mermaid` block renders as the diagram itself, drawn by a native renderer with no browser inside, and a click on a picture or a diagram opens it full size in the viewer, where the wheel zooms under the pointer and `Ctrl+C` copies the picture. [SYNTAX.md](SYNTAX.md) shows every supported construct. `F1` opens a mini help that shows the same reference and Oryx shortcuts.
+Oryx also reads the extended syntax of the Markdown Guide, which GitHub does not: highlight, subscript and superscript, definition lists and abbreviations. Math written in TeX is typeset with the STIX Two Math font, and it looks the same in the PDF. A fenced `mermaid` block renders as the diagram itself, drawn by a native renderer with no browser inside, and a click on a picture or a diagram opens it full size in the viewer, where the wheel zooms under the pointer and `Ctrl+C` copies the picture. [SYNTAX.md](SYNTAX.md) shows every supported construct, and [MATH.md](MATH.md) teaches the math and lists the commands. `F1` opens a mini help with the same reference, the math page and Oryx shortcuts.
 
 <p align="center"><img src="images/markdown.png" alt="Oryx rendering an alert, a table and typeset math" width="800"></p>
 
 ### Themes and PDF export
 
-Oryx comes with 34 themes, 12 of them made for Oryx. Each theme sets 51 colors, so every markdown element can have its own color. `Ctrl+T` opens the list of themes: navigating the themes shows a live preview on the open document, `Enter` keeps it and `Escape` cancels. The theme editor lets you create new themes and edit existing ones, also with a live preview.
+Oryx comes with 34 themes, 12 of them made for Oryx. Each theme sets 51 colors, so every markdown element can have its own color. `Ctrl+T` opens the list of themes. The arrow keys show each theme on the open document, `Enter` keeps it and `Escape` cancels. The theme editor lets you create new themes and edit existing ones, also with a live preview.
 
 `Ctrl+P` exports the document to PDF. The PDF is made by the same engine that draws the page, so it has the same layout, fonts, syntax colors and math, and the headings are converted to PDF outlines. Oryx avoids cutting a line, an image or a table row across two pages, and does not leave a heading alone at the bottom of a page. The export has its own theme, fonts and page size, set with `Ctrl+Shift+P`, so you can read in a dark theme and export in a light one without switching each time. A `black-and-white` theme exists, in case you prefer to have monochrome PDFs.
 
@@ -87,7 +87,7 @@ For everyday text files, Oryx is a good replacement for Notepad, Notepad++ and s
 
 Oryx opens EPUB, MOBI, AZW3 (Kindle) and FB2 books. It shows them in the active theme and fonts instead of the book's own style, and justifies the text like a printed book (`Ctrl+J` turns it off). The sidebar shows the book's table of contents, and Oryx remembers your last reading position. To try it, *The Adventures of Sherlock Holmes* comes with Oryx in the examples folder.
 
-Oryx supports RTL for Arabic and Hebrew. Oryx finds the direction of each paragraph from its text, so in a book that mixes English and Arabic, each paragraph reads in its own direction. Two fonts made for these scripts are built in: Amiri for Arabic and David Libre for Hebrew.
+Arabic and Hebrew are read from right to left. Oryx finds the direction of each paragraph from its text, so in a book that mixes English and Arabic, each paragraph reads in its own direction. Two fonts made for these scripts are built in: Amiri for Arabic and David Libre for Hebrew.
 
 Oryx also opens CBZ and CBR comics. A comic starts as a vertical strip of pages, which suits webtoons. `Ctrl+Minus` switches to one page per screen, and again to two pages side by side, like an open book. `Ctrl+D` toggles the page order for manga.
 
@@ -99,7 +99,7 @@ Oryx also opens CBZ and CBR comics. A comic starts as a vertical strip of pages,
 
 Oryx has no menus and no toolbars. Everything is done with the keyboard and mouse, using familiar shortcuts like `Ctrl+F` to find, `Ctrl+S` to save, `Ctrl+B` for bold, etc. The keyboard flow has no modes and is certainly less powerful than what Vim can offer, but it's a good compromise that can accommodate most people.
 
-A few rules hold everywhere: `Escape` closes whatever is open (when nothing is open, it quits Oryx), formatting shortcuts are toggles and in the dialogs the arrow keys move and change values. `F1` shows the full list of shortcuts and the supported markdown syntax, and can be searched. The shortcuts and the command line options are also listed in [SHORTCUTS.md](SHORTCUTS.md).
+A few rules apply everywhere: `Escape` closes whatever is open (when nothing is open, it quits Oryx), formatting shortcuts are toggles and in the dialogs the arrow keys move and change values. `F1` shows the full list of shortcuts and the supported markdown syntax, and can be searched. The shortcuts and the command line options are also listed in [SHORTCUTS.md](SHORTCUTS.md).
 
 <img src="images/editor-tricks.gif" alt="Editing markdown in Oryx with the keyboard only: lists, tasks, headings, links, pictures, moving lines and find and replace">
 
@@ -142,10 +142,10 @@ The first table is about time. "First screen" is the time from reading the file 
 
 | File | First screen | Rest read | Rest laid out | Code colors | PDF export |
 |---|---|---|---|---|---|
-| 1 MB markdown | 40 ms | 31 ms | 0.19 s | 0.70 s | 0.97 s |
-| 1 MB source code | 40 ms | 0 ms | 0.11 s | 3.0 s | 0.87 s |
-| 8 MB markdown | 40 ms | 260 ms | 1.6 s | 6.0 s | 9.0 s |
-| 8 MB source code | 40 ms | 0 ms | 0.86 s | 25.4 s | 8.2 s |
+| 1 MB markdown | 40 ms | 29 ms | 0.18 s | 0.68 s | 1.0 s |
+| 1 MB source code | 40 ms | 0 ms | 0.11 s | 2.9 s | 0.88 s |
+| 8 MB markdown | 40 ms | 246 ms | 1.5 s | 5.9 s | 9.3 s |
+| 8 MB source code | 40 ms | 0 ms | 0.85 s | 24.5 s | 8.0 s |
 
 The second table is about memory. "Once loaded" is what the file takes once all of this is done. "Highest" is the most it takes on the way there. "PDF export" is what an export adds while it runs.
 
@@ -156,7 +156,7 @@ The second table is about memory. "Once loaded" is what the file takes once all 
 | 8 MB markdown | 172 MB | 255 MB | +34 MB |
 | 8 MB source code | 88 MB | 95 MB | +11 MB |
 
-The [examples](examples/) folder ships an 8 MB markdown file of real text, `markdown-challenge.md`, to try a big file yourself.
+The [examples](examples/) folder has an 8 MB markdown file of real text, `markdown-challenge.md`, to try a big file yourself.
 
 Books open the same way: the first chapters show at once, and the rest loads in the background. The third table gives the time before the first chapters of a book, or the first pages of a comic, show.
 
@@ -165,7 +165,7 @@ Books open the same way: the first chapters show at once, and the rest loads in 
 | *The Adventures of Sherlock Holmes* | EPUB | 5 ms |
 | A book of 300 chapters (1.6 MB) | FB2 | 15 ms |
 | A book of 300 chapters (1.6 MB) | MOBI | 9 ms |
-| A comic of 40 pages | CBZ | under 1 ms |
+| A comic of 40 pages | CBZ | 1 ms |
 | The same comic | CBR | 5 ms |
 
 The 211 pages of *The Adventures of Sherlock Holmes* export to PDF in 0.6 s.

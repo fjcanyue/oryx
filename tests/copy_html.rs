@@ -548,6 +548,70 @@ fn math_becomes_a_picture_or_stays_text() {
     );
 }
 
+/// A formula in a table cell is a picture in the copy, as a paragraph's
+/// (Task 355).
+#[test]
+fn a_formula_in_a_cell_is_a_picture() {
+    let doc = markdown::parse("| a |\n|---|\n| $x^2$ |\n");
+    let sel = selection::all(&doc).unwrap();
+    let html = Page::parse(selection_html(
+        &sel,
+        &doc,
+        &Theme::default_dark(),
+        &mut OnePixel,
+    ));
+    let images = html.elements("img");
+    assert_eq!(images.len(), 1, "{html}");
+    assert_eq!(attr(&images[0], "alt").as_deref(), Some("x^2"));
+    assert_eq!(html.elements("td").len(), 1);
+}
+
+/// A `$$` formula in a cell is pictured in display style with its TeX as
+/// the alt, and the plain copy reads its TeX with no style word (the read
+/// of Task 355).
+#[test]
+fn a_display_formula_in_a_cell_is_pictured_in_display_style() {
+    struct Recording(Vec<(String, bool)>);
+    impl Pictures for Recording {
+        fn image(&mut self, _src: &str) -> Option<Picture> {
+            None
+        }
+
+        fn math(&mut self, tex: &str, display: bool) -> Option<Picture> {
+            self.0.push((tex.to_string(), display));
+            Some(Picture {
+                mime: "image/png",
+                bytes: vec![1, 2, 3],
+                width: 30,
+                height: 12,
+            })
+        }
+    }
+    let doc = markdown::parse("| a |\n|---|\n| $$\\sum_{i=1}^{n} i$$ and $y$ |\n");
+    let sel = selection::all(&doc).unwrap();
+    let mut pictures = Recording(Vec::new());
+    let html = Page::parse(selection_html(
+        &sel,
+        &doc,
+        &Theme::default_dark(),
+        &mut pictures,
+    ));
+    assert_eq!(
+        pictures.0,
+        [
+            ("\\sum_{i=1}^{n} i".to_string(), true),
+            ("y".to_string(), false)
+        ]
+    );
+    let images = html.elements("img");
+    assert_eq!(
+        attr(&images[0], "alt").as_deref(),
+        Some("\\sum_{i=1}^{n} i")
+    );
+    let plain = html_of(&doc);
+    assert!(!format!("{plain}").contains("displaystyle"), "{plain}");
+}
+
 /// The plain reading of a display formula shows an escaped reserved
 /// character as the page does.
 #[test]
@@ -555,6 +619,18 @@ fn the_copy_of_a_display_formula_reads_its_escaped_characters() {
     let doc = markdown::parse("$$\n15\\% \\# x\\_1\n$$\n");
     let plain = html_of(&doc);
     assert_eq!(plain.texts("p"), ["15% # x_1".to_string()]);
+}
+
+/// The plain reading of a display formula takes a control word as a
+/// script whole (claim 10 of the hunt of Task 328).
+#[test]
+fn the_copy_of_a_display_formula_reads_a_control_word_as_its_script() {
+    let doc = markdown::parse("$$\n\\int_0^\\infty e^\\pi\n$$\n");
+    let plain = html_of(&doc);
+    assert_eq!(
+        plain.texts("p"),
+        ["\u{222B}0\u{221E} e\u{03C0}".to_string()]
+    );
 }
 
 #[test]
@@ -716,6 +792,34 @@ fn page_pictures<'a>(
 }
 
 #[test]
+fn a_colored_formula_paints_with_its_colors() {
+    // Task 353: the picture keeps `\color`, read back from two papers.
+    let theme = Theme::default_dark();
+    let cfg = oryx::layout::ViewConfig::default();
+    let mut fonts = oryx::style::fonts::FontStore::new();
+    let mut media = oryx::doc::images::MediaCache::offline("tests/fixtures".into());
+    let mut pictures = page_pictures(&theme, &cfg, &mut fonts, &mut media);
+    let picture = pictures.math("x \\color{red} y", false).expect("a picture");
+    let decoded = image::load_from_memory(&picture.bytes)
+        .expect("a PNG")
+        .into_rgba8();
+    let ink = theme.surface.foreground;
+    assert!(
+        decoded
+            .pixels()
+            .any(|p| p[3] == 255 && p[0] == ink.r && p[1] == ink.g && p[2] == ink.b),
+        "the x in the ink"
+    );
+    assert!(
+        decoded
+            .pixels()
+            .any(|p| p[3] == 255 && p[0] == 255 && p[1] == 0 && p[2] == 0),
+        "the y in red"
+    );
+    assert_eq!(decoded.get_pixel(0, 0)[3], 0, "the corner clear");
+}
+
+#[test]
 fn a_formula_paints_as_a_transparent_picture() {
     let theme = Theme::default_dark();
     let cfg = oryx::layout::ViewConfig::default();
@@ -846,4 +950,44 @@ fn a_nested_alert_marks_the_inner_quote() {
         "the outer quote holds only the inner one: {html}"
     );
     assert_eq!(html.texts("strong"), ["Note"]);
+}
+
+/// A picture alone in its paragraph is centered on the page, and the
+/// copy places it the same way, plain, linked or placed by its tag.
+#[test]
+fn a_lone_image_keeps_its_place_in_the_copy() {
+    let doc = markdown::parse(
+        "![a](a.png)\n\n[![b](b.png)](https://example.org)\n\n<img src=\"c.png\" align=\"right\">\n\n![d](d.png) and words\n",
+    );
+    let sel = selection::all(&doc).expect("something to select");
+    let mut pictures = Counting { asked: Vec::new() };
+    let page = Page::parse(selection_html(
+        &sel,
+        &doc,
+        &Theme::default_dark(),
+        &mut pictures,
+    ));
+    let styles: Vec<String> = page
+        .elements("p")
+        .iter()
+        .map(|p| attr(p, "style").unwrap_or_default())
+        .collect();
+    assert!(styles[0].contains("text-align:center"), "plain: {styles:?}");
+    assert!(
+        styles[1].contains("text-align:center"),
+        "linked: {styles:?}"
+    );
+    assert!(styles[2].contains("text-align:right"), "placed: {styles:?}");
+    assert!(!styles[3].contains("text-align"), "with words: {styles:?}");
+}
+
+/// Two footnote references that touch are parted by a raised comma in
+/// the copy too.
+#[test]
+fn footnote_references_that_touch_are_parted_in_the_copy() {
+    let html = html_of_markdown("word[^a][^b]\n\n[^a]: one\n\n[^b]: two\n");
+    assert!(
+        html.contains("<sup>1</sup><sup>,</sup><sup>2</sup>"),
+        "{html}"
+    );
 }

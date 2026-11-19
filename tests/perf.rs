@@ -480,7 +480,8 @@ fn wash_guess_measured() {
 fn wash_edit_measured() {
     use oryx::doc::model::BlockKind;
     use oryx::edit::{self, splice::Ledger};
-    use oryx::style::highlight::{self, Seam, CHUNK_LINES};
+    use oryx::style::highlight::{self, CHUNK_LINES};
+    use oryx::style::seams::Table;
     let source = large_gen::generate_code(8 * 1024 * 1024);
     let (_, _, mut doc) = measure_open(&source, "rs");
     let (language, lines) = match &doc.blocks[0].kind {
@@ -489,16 +490,18 @@ fn wash_edit_measured() {
         } => (language.clone(), lines.clone()),
         _ => panic!("a code file is one code block"),
     };
-    let mut table: Vec<(usize, Seam)> = Vec::new();
+    let mut table = Table::default();
     let started = Instant::now();
     highlight::spans_chunked(
         &doc.source,
         &lines,
         language.as_deref(),
         CHUNK_LINES,
+        std::time::Duration::MAX,
         None,
+        || true,
         |c| {
-            table.push((c.start_line + c.spans.len(), c.seam));
+            table.fold_chunk(c.start_line, c.start_line + c.spans.len(), &c.seam, &c.slow);
             true
         },
     );
@@ -506,7 +509,7 @@ fn wash_edit_measured() {
     println!(
         "wash edit 8MB: full sweep {full_ms}ms over {} lines, {} seams",
         lines.len(),
-        table.len()
+        table.seams().len()
     );
     let len = doc.source.len();
     for (name, pos) in [("top", 100), ("middle", len / 2), ("bottom", len - 2)] {
@@ -517,23 +520,14 @@ fn wash_edit_measured() {
         let started = Instant::now();
         let (old_eff, new_eff) = edit::splice_document(&mut doc, &current, pos..pos, touched)
             .expect("the fixture edit stays on the fast path");
-        highlight::shift_seams(&mut table, old_eff, new_eff.clone());
+        table.shift(&old_eff, &new_eff);
         // The splice reshaped the block's lines; the sweep reads them
         // as the app would, never the pre-edit clone.
         let lines = match &doc.blocks[0].kind {
             BlockKind::CodeBlock { lines, .. } => lines.clone(),
             _ => unreachable!(),
         };
-        let at = table.partition_point(|(line, _)| *line <= new_eff.start);
-        let (start_line, seam) = match at.checked_sub(1).and_then(|i| table.get(i)) {
-            Some((line, seam)) => (*line, Some(seam.clone())),
-            None => (0, None),
-        };
-        let resume = highlight::Resume {
-            start_line,
-            seam,
-            expected: table[at..].to_vec(),
-        };
+        let resume = table.resume(new_eff.start, &[]);
         let mut delivered = 0usize;
         let mut converged = false;
         let complete = highlight::spans_chunked(
@@ -541,7 +535,9 @@ fn wash_edit_measured() {
             &lines,
             language.as_deref(),
             CHUNK_LINES,
+            std::time::Duration::MAX,
             Some(&resume),
+            || true,
             |c| {
                 delivered += c.spans.len();
                 converged |= c.converged;
@@ -1222,4 +1218,75 @@ fn top_offset_measured() {
          code {code_ms:.2}ms (offset {code_top}); landing with a blank line remembered near \
          the end of 8 MB code: {land_ms:.2}ms (offset {landed})"
     );
+}
+
+/// What one line costs the grammar, the figure that sizes a coloring of
+/// the typed line on the key (Task 327): per grammar and per kind of
+/// file, the mean over the file by `spans`, and the distribution by a
+/// chunked sweep of one line per chunk, which clones the seam at every
+/// line as the typed line's coloring would.
+#[test]
+#[ignore = "measurement only"]
+fn line_cost_measured() {
+    use oryx::doc::load::FileKind;
+    use oryx::doc::model::Document;
+    use oryx::edit::source_document;
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let read = |p: &str| std::fs::read_to_string(root.join(p)).expect(p);
+    let ts = read("examples/sample.ts").repeat(200);
+    let app = read("src/app.rs");
+    let readme = read("README.md").repeat(4);
+    let generated = large_gen::generate_code(1024 * 1024);
+    let cases: Vec<(&str, Document)> = vec![
+        ("ts sample x200", measure_open(&ts, "ts").2),
+        ("rs src/app.rs", measure_open(&app, "rs").2),
+        ("rs generated 1MB", measure_open(&generated, "rs").2),
+        (
+            "md README x4 (source view)",
+            source_document(FileKind::Markdown, &readme).expect("the markdown source view"),
+        ),
+    ];
+    for (name, doc) in &cases {
+        let (language, lines) = match &doc.blocks[0].kind {
+            BlockKind::CodeBlock {
+                language, lines, ..
+            } => (language.clone(), lines.clone()),
+            _ => panic!("one code block"),
+        };
+        // The first pass pays the grammar's load; the second is the figure.
+        let _ = highlight::spans(&doc.source, &lines, language.as_deref());
+        let started = Instant::now();
+        let _ = highlight::spans(&doc.source, &lines, language.as_deref());
+        let total = started.elapsed();
+        let mut per: Vec<u128> = Vec::with_capacity(lines.len());
+        let mut last = Instant::now();
+        highlight::spans_chunked(
+            &doc.source,
+            &lines,
+            language.as_deref(),
+            1,
+            std::time::Duration::MAX,
+            None,
+            || true,
+            |_| {
+                let now = Instant::now();
+                per.push((now - last).as_nanos());
+                last = now;
+                true
+            },
+        );
+        per.sort_unstable();
+        let n = per.len().max(1);
+        let at = |q: f64| per[((n as f64 - 1.0) * q) as usize] as f64 / 1000.0;
+        println!(
+            "line cost {name}: {} lines, {:.1}ms whole, {:.1}us a line by spans; one line a \
+             chunk: median {:.1}us, p99 {:.1}us, max {:.1}us",
+            lines.len(),
+            total.as_secs_f64() * 1000.0,
+            total.as_micros() as f64 / lines.len().max(1) as f64,
+            at(0.5),
+            at(0.99),
+            at(1.0),
+        );
+    }
 }

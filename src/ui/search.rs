@@ -130,8 +130,15 @@ impl SearchState {
 
 /// The floating pill over the document's top-right corner: query on the
 /// left, match counter on the right, in the theme's overlay colors. The
-/// fields' views are refreshed for the mouse.
-pub fn draw_bar(painter: &mut Painter, theme: &Theme, state: &mut SearchState, width: f32) {
+/// fields' views are refreshed for the mouse. `caret_lit` is the blink's
+/// lit half while the bar has the keys.
+pub fn draw_bar(
+    painter: &mut Painter,
+    theme: &Theme,
+    state: &mut SearchState,
+    width: f32,
+    caret_lit: bool,
+) {
     let ui = &theme.ui;
     let x = (width - BAR_WIDTH - MARGIN).max(MARGIN);
     let y = MARGIN;
@@ -222,6 +229,7 @@ pub fn draw_bar(painter: &mut Painter, theme: &Theme, state: &mut SearchState, w
         avail,
         "find",
         !state.replace_focused(),
+        caret_lit,
         state.query_view.window.start,
     );
 
@@ -256,6 +264,7 @@ pub fn draw_bar(painter: &mut Painter, theme: &Theme, state: &mut SearchState, w
             BAR_WIDTH - 2.0 * PAD - hint_w - 12.0,
             "replace",
             row.focused,
+            caret_lit,
             state.replace_view.window.start,
         );
     }
@@ -290,8 +299,9 @@ pub fn bar_hit(width: f32, replace_row: bool, px: f32, py: f32) -> Option<BarHit
 }
 
 /// One field row: windowed text with the caret kept visible, the
-/// placeholder when empty, selection and caret drawn only on the field
-/// the keyboard feeds. Answers where the text stands, for the mouse.
+/// placeholder when empty, the selection drawn only on the field the
+/// keyboard feeds, and its caret only on the blink's lit half
+/// (`caret_lit`). Answers where the text stands, for the mouse.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn draw_field(
     painter: &mut Painter,
@@ -302,6 +312,7 @@ pub(crate) fn draw_field(
     avail: f32,
     placeholder: &str,
     focused: bool,
+    caret_lit: bool,
     previous_start: usize,
 ) -> FieldView {
     let ui = &theme.ui;
@@ -357,7 +368,7 @@ pub(crate) fn draw_field(
             ui.overlay_fg,
         );
     }
-    if focused {
+    if focused && caret_lit {
         let caret_x = left + x_of(field.caret()) + 1.0;
         painter.line(caret_x, top + 1.0, caret_x, top + 19.0, 1.0, ui.overlay_fg);
     }
@@ -567,6 +578,9 @@ struct Seg {
 struct Haystack {
     text: String,
     segs: Vec<Seg>,
+    /// Where each block separator stands in `text`, in order: the
+    /// regex walks the text between two of them as one block.
+    seps: Vec<usize>,
 }
 
 impl Haystack {
@@ -574,6 +588,7 @@ impl Haystack {
         let mut hay = Haystack {
             text: String::new(),
             segs: Vec::new(),
+            seps: Vec::new(),
         };
         for index in 0..doc.blocks.len() {
             let mut opened = false;
@@ -602,16 +617,31 @@ impl Haystack {
 
     /// Plants the block boundary ahead of a block's first character:
     /// newline, separator, newline, so `^` and `$` treat every block as
-    /// its own line while the separator keeps any match from crossing.
+    /// its own line, and the regex walk stops each block at its
+    /// separator.
     fn open(&mut self, opened: &mut bool) {
         if !*opened {
             if !self.text.is_empty() {
                 self.text.push('\n');
+                self.seps.push(self.text.len());
                 self.text.push(BLOCK_SEP);
                 self.text.push('\n');
             }
             *opened = true;
         }
+    }
+
+    /// The stretch of `text` each block takes, from just past the
+    /// separator before it to the separator after it, in order.
+    fn blocks(&self) -> impl Iterator<Item = Range<usize>> + '_ {
+        let starts =
+            std::iter::once(0).chain(self.seps.iter().map(|&at| at + BLOCK_SEP.len_utf8()));
+        let ends = self
+            .seps
+            .iter()
+            .copied()
+            .chain(std::iter::once(self.text.len()));
+        starts.zip(ends).map(|(start, end)| start..end)
     }
 
     fn push_inert(&mut self, opened: &mut bool, text: &str) {
@@ -729,29 +759,48 @@ pub fn text_matches(doc: &Document, text: &str) -> Vec<Selection> {
 /// not compile or exceeds the engine's backtracking limit, which the bar
 /// reports as an invalid pattern. `^` and `$` match at line starts and
 /// ends. Case follows smart case read from the pattern's literal
-/// characters. A match covering the block separator converts to no
-/// selection, so matches still never cross blocks.
+/// characters. Each block is searched on its own (`walk_blocks`), so a
+/// match never crosses blocks.
 pub fn regex_matches(doc: &Document, pattern: &str) -> Option<Vec<Selection>> {
     if pattern.is_empty() {
         return Some(Vec::new());
     }
     let regex = compile(pattern)?;
     let hay = Haystack::build(doc);
+    let found = walk_blocks(&hay, |text, pos| {
+        let found = regex.find_from_pos(text, pos).ok()?;
+        Some(found.map(|m| (m.start()..m.end(), ())))
+    })?;
+    Some(found.into_iter().map(|(selection, ())| selection).collect())
+}
+
+/// The regex walk over a page, one block at a time: the pattern runs on
+/// the text up to the block's separator, so no match reaches into the
+/// next block and the page is read once. The text before the block
+/// stays in view for a lookbehind. `find` answers the first match from
+/// a position, beside what the caller keeps of it, or `None` when the
+/// engine fails. A match that converts to no selection (an empty one,
+/// or the line breaks beside a separator alone) resumes one character
+/// on, so the real matches it covered are still found.
+fn walk_blocks<T>(
+    hay: &Haystack,
+    mut find: impl FnMut(&str, usize) -> Option<Option<(Range<usize>, T)>>,
+) -> Option<Vec<(Selection, T)>> {
     let mut out = Vec::new();
-    let mut pos = 0;
-    while pos <= hay.text.len() {
-        let Some(found) = regex.find_from_pos(&hay.text, pos).ok()? else {
-            break;
-        };
-        match hay.selection(found.start()..found.end()) {
-            Some(selection) => {
-                out.push(selection);
-                pos = found.end();
+    for block in hay.blocks() {
+        let text = &hay.text[..block.end];
+        let mut pos = block.start;
+        while pos <= block.end {
+            let Some((found, kept)) = find(text, pos)? else {
+                break;
+            };
+            match hay.selection(found.clone()) {
+                Some(selection) => {
+                    out.push((selection, kept));
+                    pos = found.end;
+                }
+                None => pos = next_boundary(text, found.start),
             }
-            // A zero-width or boundary-covering candidate: resume just
-            // inside it, so a greedy match crossing a block cannot hide
-            // the real matches it covered.
-            None => pos = next_boundary(&hay.text, found.start()),
         }
     }
     Some(out)
@@ -769,7 +818,8 @@ fn next_boundary(text: &str, at: usize) -> usize {
 /// Every regex match beside its expanded replacement: `$1`, `$0` and
 /// `${name}` read the match's own captures and `$$` is a literal dollar.
 /// The selections equal `regex_matches` for the same pattern, index for
-/// index, and `None` reports the same failures.
+/// index, since both take the walk of `walk_blocks`, and `None` reports
+/// the same failures.
 pub fn regex_replacements(
     doc: &Document,
     pattern: &str,
@@ -782,24 +832,16 @@ pub fn regex_replacements(
     let hay = Haystack::build(doc);
     let template = unescape_template(template);
     let expander = fancy_regex::Expander::default();
-    let mut out = Vec::new();
-    // The walk mirrors `regex_matches` exactly, discard recovery
-    // included, which is what keeps the pairs aligned with the matches.
-    let mut pos = 0;
-    while pos <= hay.text.len() {
-        let Some(captures) = regex.captures_from_pos(&hay.text, pos).ok()? else {
-            break;
-        };
-        let found = captures.get(0).expect("a match always captures group 0");
-        match hay.selection(found.start()..found.end()) {
-            Some(selection) => {
-                out.push((selection, expander.expansion(&template, &captures)));
-                pos = found.end();
-            }
-            None => pos = next_boundary(&hay.text, found.start()),
-        }
-    }
-    Some(out)
+    walk_blocks(&hay, |text, pos| {
+        let captures = regex.captures_from_pos(text, pos).ok()?;
+        Some(captures.map(|captures| {
+            let found = captures.get(0).expect("a match always captures group 0");
+            (
+                found.start()..found.end(),
+                expander.expansion(&template, &captures),
+            )
+        }))
+    })
 }
 
 /// The replacement with its escapes read, the way VS Code's replace box
@@ -914,6 +956,49 @@ mod tests {
     use crate::ui::selection::ModelPos;
     use tiny_skia::Pixmap;
 
+    /// The field that has the keys paints its caret on the lit half of
+    /// the blink only: the dark half, and a field without the keys, leave
+    /// the pixels of the text alone, and the lit half differs from them
+    /// by the caret's column only.
+    #[test]
+    fn a_field_paints_its_caret_on_the_lit_half_only() {
+        let field = TextField::new("abc".to_string());
+        let mut fonts = FontStore::new();
+        let theme = Theme::default_dark();
+        let mut drawn = |focused: bool, caret_lit: bool| {
+            let mut pixmap = Pixmap::new(200, 40).unwrap();
+            let mut painter = Painter::new(&mut pixmap, &mut fonts, None, 1.0);
+            draw_field(
+                &mut painter,
+                &theme,
+                &field,
+                10.0,
+                10.0,
+                160.0,
+                "",
+                focused,
+                caret_lit,
+                0,
+            );
+            drop(painter);
+            pixmap
+        };
+        let lit = drawn(true, true);
+        let dark = drawn(true, false);
+        let unfocused = drawn(false, true);
+        let columns: Vec<u32> = (0..200)
+            .filter(|&x| (0..40).any(|y| lit.pixel(x, y) != dark.pixel(x, y)))
+            .collect();
+        assert!(
+            !columns.is_empty() && columns.len() <= 3,
+            "the caret alone differs: {columns:?}"
+        );
+        assert!(
+            dark.data() == unfocused.data(),
+            "a field without the keys paints no caret"
+        );
+    }
+
     /// A query longer than the pill, the caret at its start: the drawn
     /// window stops short of the text's end, and the boundaries beyond
     /// it keep growing, so a click right of the pill reaches them.
@@ -926,7 +1011,18 @@ mod tests {
         let mut fonts = FontStore::new();
         let mut painter = Painter::new(&mut pixmap, &mut fonts, None, 1.0);
         let theme = Theme::default_dark();
-        let view = draw_field(&mut painter, &theme, &field, 0.0, 0.0, 120.0, "", true, 0);
+        let view = draw_field(
+            &mut painter,
+            &theme,
+            &field,
+            0.0,
+            0.0,
+            120.0,
+            "",
+            true,
+            true,
+            0,
+        );
         assert_eq!(view.offsets.len(), 61);
         assert!(
             view.offsets.windows(2).all(|w| w[0] < w[1]),
@@ -948,7 +1044,18 @@ mod tests {
         let mut fonts = FontStore::new();
         let mut painter = Painter::new(&mut pixmap, &mut fonts, None, 1.0);
         let theme = Theme::default_dark();
-        let view = draw_field(&mut painter, &theme, &field, 0.0, 0.0, 120.0, "", true, 0);
+        let view = draw_field(
+            &mut painter,
+            &theme,
+            &field,
+            0.0,
+            0.0,
+            120.0,
+            "",
+            true,
+            true,
+            0,
+        );
         let (window, cut) = window_fit(&mut painter, query, 0, 120.0, 0);
         assert!(!cut && window.start == 0 && window.end < query.len());
         let boundaries: Vec<usize> = field.boundaries().collect();
@@ -990,7 +1097,18 @@ mod tests {
         let theme = Theme::default_dark();
         painter.measure("warm", CODE_FAMILY, QUERY_SIZE, 400);
         let started = std::time::Instant::now();
-        let view = draw_field(&mut painter, &theme, &field, 0.0, 0.0, 300.0, "", true, 0);
+        let view = draw_field(
+            &mut painter,
+            &theme,
+            &field,
+            0.0,
+            0.0,
+            300.0,
+            "",
+            true,
+            true,
+            0,
+        );
         let took = started.elapsed();
         assert!(view.offsets.windows(2).all(|w| w[0] < w[1]));
         assert!(took.as_secs_f32() < 2.0, "one frame took {took:?}");
@@ -1017,6 +1135,7 @@ mod tests {
                 0.0,
                 120.0,
                 "",
+                true,
                 true,
                 previous,
             )
@@ -1078,6 +1197,7 @@ mod tests {
                 0.0,
                 120.0,
                 "",
+                true,
                 true,
                 previous,
             )
@@ -1161,7 +1281,18 @@ mod tests {
         let mut fonts = FontStore::new();
         let mut painter = Painter::new(&mut pixmap, &mut fonts, None, 1.0);
         let theme = Theme::default_dark();
-        let view = draw_field(&mut painter, &theme, &field, 0.0, 0.0, 120.0, "", true, 0);
+        let view = draw_field(
+            &mut painter,
+            &theme,
+            &field,
+            0.0,
+            0.0,
+            120.0,
+            "",
+            true,
+            true,
+            0,
+        );
         let (window, cut) = window_fit(&mut painter, &query, 0, 120.0, 0);
         assert!(!cut && window.start == 0 && window.end < query.len());
         let boundaries: Vec<usize> = field.boundaries().collect();
@@ -1198,7 +1329,18 @@ mod tests {
         let query = format!("{}abc مقدمة def ghi", "abcdefghij".repeat(3));
         let mut field = TextField::new(query.clone());
         field.set_caret(0);
-        let view = draw_field(&mut painter, &theme, &field, 0.0, 0.0, 120.0, "", true, 0);
+        let view = draw_field(
+            &mut painter,
+            &theme,
+            &field,
+            0.0,
+            0.0,
+            120.0,
+            "",
+            true,
+            true,
+            0,
+        );
         let (window, _) = window_fit(&mut painter, &query, 0, 120.0, 0);
         assert!(
             window.end < 30,
@@ -1214,7 +1356,18 @@ mod tests {
         // The side before the window: the caret at the end.
         let query = format!("abc مقدمة def {}", "abcdefghij".repeat(4));
         let field = TextField::new(query.clone());
-        let view = draw_field(&mut painter, &theme, &field, 0.0, 0.0, 120.0, "", true, 0);
+        let view = draw_field(
+            &mut painter,
+            &theme,
+            &field,
+            0.0,
+            0.0,
+            120.0,
+            "",
+            true,
+            true,
+            0,
+        );
         let (window, _) = window_fit(&mut painter, &query, query.len(), 120.0, 0);
         assert!(
             window.start > 20,
@@ -1391,6 +1544,46 @@ mod tests {
                     byte: 10
                 },
             }]
+        );
+    }
+
+    /// A regex runs on each block on its own: a pattern that would run
+    /// through the whole page matches each paragraph whole, and the
+    /// replacements pair with the same selections.
+    #[test]
+    fn a_regex_matches_each_block_on_its_own() {
+        let doc = markdown::parse("alpha one.\n\nbeta two.\n\ngamma three.\n");
+        let found = regex_matches(&doc, r"[\s\S]+").expect("valid pattern");
+        let spans: Vec<(usize, usize, usize)> = found
+            .iter()
+            .map(|s| (s.start.block, s.start.byte, s.end.byte))
+            .collect();
+        assert_eq!(spans, vec![(0, 0, 10), (1, 0, 9), (2, 0, 12)]);
+        let paired: Vec<Selection> = regex_replacements(&doc, r"[\s\S]+", "x")
+            .expect("valid pattern")
+            .into_iter()
+            .map(|(selection, _)| selection)
+            .collect();
+        assert_eq!(paired, found);
+    }
+
+    /// The walk is one pass over the page: a pattern that would run
+    /// through every paragraph costs one match per paragraph, not a scan
+    /// to the end of the page from each of its characters.
+    #[test]
+    fn a_regex_over_many_blocks_costs_one_pass() {
+        const PARAGRAPHS: usize = 500;
+        let page: String = (0..PARAGRAPHS)
+            .map(|n| format!("Paragraph number {n} of a long page of text.\n\n"))
+            .collect();
+        let doc = markdown::parse(page.as_str());
+        let started = std::time::Instant::now();
+        let found = regex_matches(&doc, r"[\s\S]+").expect("valid pattern");
+        let took = started.elapsed();
+        assert!(
+            found.len() == PARAGRAPHS && took < std::time::Duration::from_secs(1),
+            "{} matches in {took:?}",
+            found.len()
         );
     }
 

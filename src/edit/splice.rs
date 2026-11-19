@@ -25,10 +25,85 @@ pub struct Splice {
     pub text: String,
 }
 
-/// Combines ordered, non-overlapping per-match edits into one region
-/// splice: the covering range and its replacement text, built in one
-/// pass over the source. `None` for no edits, or for edits out of order
-/// or overlapping, which a caller treats as a refused burst.
+/// An edit as the ledger and the history replay it: the range of the
+/// current text and its new text, the form the page takes, and for a
+/// unit of several pieces (Replace All) those pieces, ordered and apart,
+/// which the ledger takes as edits of their own so that the text between
+/// them stays the baseline's. No pieces is a single edit.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Replay {
+    pub range: Range<usize>,
+    pub text: String,
+    pub pieces: Vec<(Range<usize>, String)>,
+}
+
+impl Replay {
+    /// A single edit: `range` of the current text replaced by `text`.
+    pub fn single(range: Range<usize>, text: &str) -> Replay {
+        Replay {
+            range,
+            text: text.to_string(),
+            pieces: Vec::new(),
+        }
+    }
+}
+
+/// A rewrite of whole lines as pieces inside the lines, the form a line
+/// command reaches the ledger in: for each line that changed, the part
+/// between what its old and new forms share at the start and at the
+/// end. No piece holds a line break, so each line keeps its ending. `at`
+/// is where `old` stands in the current text. `None` when the rewrite
+/// changes the number of lines, which no line command does.
+pub fn line_pieces(old: &str, new: &str, at: usize) -> Option<Vec<(Range<usize>, String)>> {
+    if old.matches('\n').count() != new.matches('\n').count() {
+        return None;
+    }
+    let mut pieces = Vec::new();
+    let mut start = at;
+    for (was, now) in old.split('\n').zip(new.split('\n')) {
+        if was != now {
+            let head = shared_head(was, now);
+            let tail = shared_tail(&was[head..], &now[head..]);
+            pieces.push((
+                start + head..start + was.len() - tail,
+                now[head..now.len() - tail].to_string(),
+            ));
+        }
+        start += was.len() + 1;
+    }
+    Some(pieces)
+}
+
+/// The bytes two texts share at their start, in whole characters.
+fn shared_head(a: &str, b: &str) -> usize {
+    a.chars()
+        .zip(b.chars())
+        .take_while(|(x, y)| x == y)
+        .map(|(x, _)| x.len_utf8())
+        .sum()
+}
+
+/// The bytes two texts share at their end, in whole characters.
+fn shared_tail(a: &str, b: &str) -> usize {
+    a.chars()
+        .rev()
+        .zip(b.chars().rev())
+        .take_while(|(x, y)| x == y)
+        .map(|(x, _)| x.len_utf8())
+        .sum()
+}
+
+/// The baseline offset of a current offset that no splice covers, with
+/// `shift` the length the splices before it added.
+fn base_of(current: usize, shift: isize) -> usize {
+    (current as isize - shift) as usize
+}
+
+/// Combines ordered, non-overlapping per-match edits into one region:
+/// the covering range and its replacement text, built in one pass over
+/// the source, the form the page and the history take. `None` for no
+/// edits, or for edits out of order or overlapping, which a caller
+/// treats as a refused burst.
 pub fn combine(source: &str, edits: &[(Range<usize>, String)]) -> Option<(Range<usize>, String)> {
     let first = edits.first()?;
     let last = edits.last()?;
@@ -44,6 +119,16 @@ pub fn combine(source: &str, edits: &[(Range<usize>, String)]) -> Option<(Range<
         at = range.end;
     }
     Some((region, text))
+}
+
+/// Where a baseline offset stands in the current text (`place_of`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Placed {
+    /// Outside every replaced range: the offset moved by the edits
+    /// before it.
+    Exact(usize),
+    /// Inside a replaced range, whose current start this is.
+    Replaced(usize),
 }
 
 pub struct Ledger {
@@ -140,7 +225,116 @@ impl Ledger {
     pub fn edit(&mut self, range: Range<usize>, text: &str) -> Range<usize> {
         let start_line = self.newlines_before(range.start);
         let touched = start_line..start_line + text.matches('\n').count() + 1;
+        self.splice(range, text);
+        touched
+    }
 
+    /// Replaces several ranges of the current text at once, each an edit
+    /// of its own: `pieces` ordered and apart, in current coordinates;
+    /// `range` and `text` the same edit seen whole, which give the lines
+    /// touched, as `edit` returns them. The bytes between the pieces stay
+    /// the baseline's, so their line endings are written back as they
+    /// were. A piece merges with the pieces and the splices it touches, as
+    /// one edit at a time would, in one pass over both lists.
+    pub fn edit_each(
+        &mut self,
+        range: Range<usize>,
+        text: &str,
+        pieces: &[(Range<usize>, String)],
+    ) -> Range<usize> {
+        if pieces.is_empty() {
+            return self.edit(range, text);
+        }
+        debug_assert!(
+            pieces.windows(2).all(|w| w[0].0.end <= w[1].0.start),
+            "the pieces are ordered and apart"
+        );
+        debug_assert!(
+            pieces[0].0.start == range.start && pieces[pieces.len() - 1].0.end == range.end,
+            "the range covers the pieces"
+        );
+        let start_line = self.newlines_before(range.start);
+        let touched = start_line..start_line + text.matches('\n').count() + 1;
+        let (spans, deltas) = self.spans();
+        let mut standing = std::mem::take(&mut self.splices).into_iter();
+        let mut merged = Vec::with_capacity(spans.len() + pieces.len());
+        let (mut k, mut p) = (0, 0);
+        while p < pieces.len() {
+            let first = pieces[p].0.start;
+            // The splices ending before the piece stay as they are.
+            while k < spans.len() && spans[k].end < first {
+                merged.extend(standing.next());
+                k += 1;
+            }
+            // The group: the piece, the splices and the pieces it touches,
+            // and those touching them in turn, boundaries included.
+            let (k0, p0) = (k, p);
+            let mut end = pieces[p].0.end;
+            p += 1;
+            loop {
+                if k < spans.len() && spans[k].start <= end {
+                    end = end.max(spans[k].end);
+                    k += 1;
+                } else if p < pieces.len() && pieces[p].0.start <= end {
+                    end = end.max(pieces[p].0.end);
+                    p += 1;
+                } else {
+                    break;
+                }
+            }
+            let start = if k > k0 {
+                first.min(spans[k0].start)
+            } else {
+                first
+            };
+            // The group's current text, the splices' own and the
+            // baseline between them, then the pieces applied to it.
+            let mut current = String::new();
+            let mut at = start;
+            for (i, splice) in standing.by_ref().take(k - k0).enumerate() {
+                let (span, shift) = (&spans[k0 + i], deltas[k0 + i]);
+                current.push_str(&self.base[base_of(at, shift)..base_of(span.start, shift)]);
+                current.push_str(&splice.text);
+                at = span.end;
+            }
+            current.push_str(&self.base[base_of(at, deltas[k])..base_of(end, deltas[k])]);
+            let mut new = String::with_capacity(current.len());
+            let mut at = start;
+            for (piece, replacement) in &pieces[p0..p] {
+                new.push_str(&current[at - start..piece.start - start]);
+                new.push_str(replacement);
+                at = piece.end;
+            }
+            new.push_str(&current[at - start..]);
+            let base = base_of(start, deltas[k0])..base_of(end, deltas[k]);
+            // As in `splice`: a group back to the baseline is no edit.
+            if new != self.base[base.clone()] {
+                merged.push(Splice {
+                    range: base,
+                    text: new,
+                });
+            }
+        }
+        merged.extend(standing);
+        debug_assert!(
+            merged
+                .windows(2)
+                .all(|w| w[0].range.end <= w[1].range.start),
+            "the splices stay ordered and do not overlap"
+        );
+        self.splices = merged;
+        touched
+    }
+
+    /// Applies an edit of the history: its pieces when it has some, or
+    /// its one range. Returns the lines touched, as `edit` does.
+    pub fn replay(&mut self, step: &Replay) -> Range<usize> {
+        self.edit_each(step.range.clone(), &step.text, &step.pieces)
+    }
+
+    /// The edit alone, without the line count: what a park's ledger
+    /// records at each key, where only the places matter.
+    pub fn splice(&mut self, range: Range<usize>, text: &str) {
         let (a, b) = (range.start, range.end);
         let (spans, deltas) = self.spans();
         // The splices the edit touches, boundaries inclusive so typing
@@ -171,7 +365,6 @@ impl Ledger {
         // newlines in the dominant ending instead of their own bytes.
         let keep = merged.text != self.base[merged.range.clone()];
         self.splices.splice(i0..j, keep.then_some(merged));
-        touched
     }
 
     /// The current text: the baseline with every splice applied.
@@ -204,16 +397,54 @@ impl Ledger {
         (base_offset as isize + delta) as usize
     }
 
+    /// The current place of a baseline offset, for the outline of a
+    /// parked page: an edit at or before it moves it, exactly. An edit
+    /// around it replaced its region, whose current start is answered:
+    /// what stood at the offset may be gone, or stand inside the new
+    /// text, which the splices cannot tell once they merged. `to_current`
+    /// keeps an offset before text inserted at it; here the inserted
+    /// text goes before the place, since the place is a heading's and
+    /// the text was typed above it.
+    pub fn place_of(&self, base_offset: usize) -> Placed {
+        let mut delta = 0isize;
+        for s in &self.splices {
+            if base_offset >= s.range.end {
+                delta += s.text.len() as isize - s.range.len() as isize;
+            } else if base_offset >= s.range.start {
+                // At the start of a non-empty range too: what stood at the
+                // offset was replaced, and may stand inside the new text.
+                return Placed::Replaced((s.range.start as isize + delta) as usize);
+            } else {
+                break;
+            }
+        }
+        Placed::Exact((base_offset as isize + delta) as usize)
+    }
+
+    /// The text the edits began from and its line ending record, for a
+    /// discard: the file as last read or written.
+    pub fn into_base(self) -> (Arc<str>, Vec<u32>) {
+        (self.base, self.crlf)
+    }
+
     /// Lines of the current text the splices touch, the save notice's
     /// figure: the union of each splice's line span, so splices sharing
     /// a line never count it twice.
     pub fn touched_lines(&self) -> usize {
         let mut count = 0;
         let mut last: Option<usize> = None;
-        let (spans, _) = self.spans();
-        for (splice, span) in self.splices.iter().zip(spans) {
-            let start = self.newlines_before(span.start);
-            let end = start + splice.text.matches('\n').count();
+        // The line breaks of the current text before the walk's place,
+        // counted once over the pieces: a line command leaves a splice
+        // per line, and a count from the start for each cost the square
+        // of their number.
+        let mut line = 0;
+        let mut base = 0;
+        for splice in &self.splices {
+            line += self.base[base..splice.range.start].matches('\n').count();
+            let start = line;
+            line += splice.text.matches('\n').count();
+            let end = line;
+            base = splice.range.end;
             let from = match last {
                 Some(l) if l >= start => l + 1,
                 _ => start,
@@ -333,6 +564,90 @@ mod tests {
 
     fn ledger(base: &str) -> Ledger {
         Ledger::new(Arc::from(base), Vec::new())
+    }
+
+    /// Replace All in a file of mixed endings: each match is its own
+    /// edit, so the line between the two matches keeps its own ending,
+    /// and the save notice counts the lines with a match only.
+    #[test]
+    fn replace_all_keeps_the_endings_between_its_matches() {
+        // `x1\r\nmid\nx2\r\n`, normalized with its two returns on record.
+        let mut led = Ledger::new(Arc::from("x1\nmid\nx2\n"), vec![2, 9]);
+        let pieces = vec![(0..1, "y".to_string()), (7..8, "y".to_string())];
+        led.edit_each(0..8, "y1\nmid\ny", &pieces);
+        assert_eq!(led.current(), "y1\nmid\ny2\n");
+        assert_eq!(led.emit(), b"y1\r\nmid\ny2\r\n");
+        assert_eq!(led.splice_count(), 2);
+        assert_eq!(led.touched_lines(), 2);
+    }
+
+    /// A line command's rewrite as pieces inside the lines: a prefix, a
+    /// mark taken off, a line wrapped in marks, a box flipped, characters of
+    /// several bytes and a right-to-left line. No piece holds a line
+    /// break, and an unchanged line has none; a rewrite that changes the
+    /// number of lines has no line pieces.
+    #[test]
+    fn the_line_pieces_hold_the_changes_inside_the_lines() {
+        let owned = |list: &[(Range<usize>, &str)]| -> Vec<(Range<usize>, String)> {
+            list.iter()
+                .map(|(range, text)| (range.clone(), text.to_string()))
+                .collect()
+        };
+        assert_eq!(
+            line_pieces("a\nb\nc", "- a\n- b\n- c", 10),
+            Some(owned(&[(10..10, "- "), (12..12, "- "), (14..14, "- ")]))
+        );
+        assert_eq!(
+            line_pieces("> a\n\n> b", "a\n\nb", 0),
+            Some(owned(&[(0..2, ""), (5..7, "")]))
+        );
+        assert_eq!(
+            line_pieces("x\ny", "/* x */\n/* y */", 0),
+            Some(owned(&[(0..1, "/* x */"), (2..3, "/* y */")]))
+        );
+        assert_eq!(
+            line_pieces("- [ ] a\n- [x] b", "- [x] a\n- [ ] b", 0),
+            Some(owned(&[(3..4, "x"), (11..12, " ")]))
+        );
+        assert_eq!(
+            line_pieces("été\nשלום", "  été\n- שלום", 0),
+            Some(owned(&[(0..0, "  "), (6..6, "- ")]))
+        );
+        assert_eq!(line_pieces("a\nb", "a\nb\nc", 0), None);
+    }
+
+    /// The pieces merge with the splices they touch and with each other,
+    /// as one edit at a time would, and a piece that brings the text back
+    /// to the baseline leaves no entry.
+    #[test]
+    fn the_pieces_merge_as_single_edits_would() {
+        let pieces = |list: &[(Range<usize>, &str)]| -> Vec<(Range<usize>, String)> {
+            list.iter()
+                .map(|(range, text)| (range.clone(), text.to_string()))
+                .collect()
+        };
+        // Apart from a standing splice: four entries.
+        let mut led = ledger("aa bb aa\ncc aa\n");
+        led.edit(3..5, "BB");
+        led.edit_each(
+            0..14,
+            "x BB x\ncc x",
+            &pieces(&[(0..2, "x"), (6..8, "x"), (12..14, "x")]),
+        );
+        assert_eq!(led.current(), "x BB x\ncc x\n");
+        assert_eq!(led.splice_count(), 4);
+        // Touching a standing splice on both sides: one entry.
+        let mut led = ledger("abc");
+        led.edit(1..2, "X");
+        led.edit_each(0..3, "1X3", &pieces(&[(0..1, "1"), (2..3, "3")]));
+        assert_eq!(led.current(), "1X3");
+        assert_eq!(led.splice_count(), 1);
+        // Back to the baseline: no entry.
+        let mut led = ledger("abc");
+        led.edit(1..2, "X");
+        led.edit_each(1..2, "b", &pieces(&[(1..2, "b")]));
+        assert_eq!(led.current(), "abc");
+        assert!(!led.is_dirty());
     }
 
     #[test]
@@ -622,5 +937,124 @@ mod tests {
         );
         let mut led = ledger("aaa\nbbb\nccc\n");
         assert_eq!(led.edit(3..4, ""), 0..1, "a join dirties the joined line");
+    }
+
+    /// The ledger a park keeps over its page's text, the heading of the
+    /// hunt's claim 1: the line above it deleted, then the heading
+    /// clicked. An edit at or before the heading moves it, an edit
+    /// around it puts it at the edit's start, and a deletion undone
+    /// leaves no splice and places it exactly.
+    #[test]
+    fn a_park_ledger_places_a_heading_after_the_edits_since_the_park() {
+        let page = "# One\n\nSome text here.\n\n## End\n";
+        let heading = 27;
+        assert_eq!(&page[heading..heading + 3], "End");
+        let mut led = ledger(page);
+        led.splice(7..23, "");
+        assert_eq!(
+            led.place_of(heading),
+            Placed::Exact(11),
+            "the line above deleted"
+        );
+        assert_eq!(&led.current()[11..14], "End");
+        led.splice(0..0, "## Zero\n\n");
+        assert_eq!(
+            led.place_of(heading),
+            Placed::Exact(20),
+            "text inserted above"
+        );
+        led.splice(23..24, "");
+        assert_eq!(led.place_of(heading), Placed::Exact(20), "an edit after it");
+        let mut led = ledger(page);
+        led.splice(20..30, "x");
+        assert_eq!(
+            led.place_of(heading),
+            Placed::Replaced(20),
+            "inside a replaced range: its start, and no more is known"
+        );
+        let mut led = ledger(page);
+        led.splice(27..30, "Fin");
+        assert_eq!(
+            led.place_of(heading),
+            Placed::Replaced(27),
+            "the heading's own text replaced: not known to stand"
+        );
+        let mut led = ledger(page);
+        led.splice(27..27, "x");
+        assert_eq!(
+            led.place_of(heading),
+            Placed::Exact(28),
+            "typed at the heading: it moves"
+        );
+        let mut led = ledger(page);
+        led.splice(7..23, "");
+        led.splice(7..7, "Some text here.\n");
+        assert_eq!(
+            led.place_of(heading),
+            Placed::Exact(heading),
+            "a deletion undone"
+        );
+        assert!(!led.is_dirty(), "the undone edit leaves no splice");
+        // The region deleted with text typed into it first, then the
+        // deletion undone: one splice stands, the heading inside it.
+        let mut led = ledger(page);
+        led.splice(0..0, " ");
+        led.splice(1..31, "");
+        led.splice(1..1, &page[1..31].replace("One", "One "));
+        assert_eq!(led.place_of(heading), Placed::Replaced(0));
+    }
+
+    /// Discard goes back to the text the edits began from, with the
+    /// line ending record of that text: the file's at the open, the
+    /// saved one after a save.
+    #[test]
+    fn into_base_gives_the_text_and_the_record_the_edits_began_from() {
+        let mut led = Ledger::new(Arc::from("ab\ncd\n"), vec![2, 5]);
+        led.edit(0..0, "x");
+        led.edit(4..5, "");
+        let (base, crlf) = led.into_base();
+        assert_eq!(&*base, "ab\ncd\n");
+        assert_eq!(crlf, vec![2, 5]);
+        let mut led = Ledger::new(Arc::from("ab\ncd\n"), vec![2, 5]);
+        led.edit(0..0, "x\n");
+        led.commit();
+        led.edit(0..1, "");
+        let (base, crlf) = led.into_base();
+        assert_eq!(&*base, "x\nab\ncd\n", "after a save, the saved text");
+        assert_eq!(crlf, vec![1, 4, 7], "with the record the save wrote");
+    }
+
+    #[test]
+    fn the_touched_lines_of_many_splices_cost_their_count() {
+        let old = "let v = 1;\n".repeat(20_000);
+        let new = "// let v = 1;\n".repeat(20_000);
+        let mut led = ledger(&old);
+        let pieces = line_pieces(&old, &new, 0).expect("the same line count");
+        assert_eq!(pieces.len(), 20_000);
+        let (range, joined) = combine(&old, &pieces).expect("some pieces");
+        led.edit_each(range, &joined, &pieces);
+        let slow: usize = {
+            // The count as it was, a walk from the start per splice.
+            let (spans, _) = led.spans();
+            let mut count = 0;
+            let mut last: Option<usize> = None;
+            for (splice, span) in led.splices.iter().zip(spans).take(200) {
+                let start = led.newlines_before(span.start);
+                let end = start + splice.text.matches('\n').count();
+                let from = match last {
+                    Some(l) if l >= start => l + 1,
+                    _ => start,
+                };
+                count += (end + 1).saturating_sub(from);
+                last = Some(end.max(last.unwrap_or(0)));
+            }
+            count
+        };
+        assert_eq!(slow, 200, "the first 200 splices, counted the old way");
+        let start = std::time::Instant::now();
+        assert_eq!(led.touched_lines(), 20_000);
+        let took = start.elapsed();
+        println!("the touched lines of 20,000 splices: {took:?}");
+        assert!(took < std::time::Duration::from_secs(1), "{took:?}");
     }
 }

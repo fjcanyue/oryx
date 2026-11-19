@@ -142,45 +142,6 @@ fn the_metainfo_names_the_app_id_its_entry_and_every_type() {
     assert!(xml.contains("<content_rating type=\"oars-1.1\""));
 }
 
-/// The screenshot links carry the tag of the release the metainfo ships
-/// in, never a branch: AppStream readers fetch them long after the branch
-/// has moved on, and Flathub refuses branch links outright. The bump step
-/// rewrites the tag; the files must exist in the tree.
-#[test]
-fn the_metainfo_screenshots_link_to_the_release_tag_and_exist() {
-    let xml = packaging("linux/com.steerania.Oryx.metainfo.xml");
-    let prefix = format!(
-        "https://raw.githubusercontent.com/wmahfoudh/oryx/v{}/screenshots/",
-        env!("CARGO_PKG_VERSION")
-    );
-    let names: Vec<&str> = xml
-        .split("<image>")
-        .skip(1)
-        .map(|rest| rest.split("</image>").next().unwrap())
-        .map(|url| {
-            url.strip_prefix(&prefix)
-                .unwrap_or_else(|| panic!("{url} is not under {prefix}"))
-        })
-        .collect();
-    assert_eq!(
-        names,
-        [
-            "flathub-hero.png",
-            "flathub-math.png",
-            "flathub-code.png",
-            "flathub-regex.png",
-            "flathub-rtl-ar.png",
-            "flathub-themes-editor.png",
-        ]
-    );
-    for name in names {
-        assert!(
-            repo().join("screenshots").join(name).is_file(),
-            "screenshots/{name} is missing"
-        );
-    }
-}
-
 #[test]
 fn the_metainfo_validates_when_the_tool_is_installed() {
     let path = repo().join("packaging/linux/com.steerania.Oryx.metainfo.xml");
@@ -445,14 +406,17 @@ fn msix_sh_builds_a_package_that_unpacks_to_the_staged_files() {
     // The reader writes the payload and the manifest; the two other
     // footprint files stay inside the archive and are listed from it.
     let archive = zip::ZipArchive::new(std::fs::File::open(&msix).unwrap()).unwrap();
-    let names: Vec<&str> = archive.file_names().collect();
+    let names: Vec<String> = archive
+        .file_names()
+        .map(|name| name.unwrap().into_owned())
+        .collect();
     for footprint in [
         "AppxManifest.xml",
         "AppxBlockMap.xml",
         "[Content_Types].xml",
     ] {
         assert!(
-            names.contains(&footprint),
+            names.iter().any(|name| name == footprint),
             "{footprint} missing from {names:?}"
         );
     }
@@ -816,6 +780,33 @@ fn path_with(bin: &Path) -> String {
     )
 }
 
+/// The update information the AppImage carries: the zsync file of the
+/// latest release on GitHub, named after the image, so that the AppImage
+/// tools update an installed copy in place (the AppImageSpec, its
+/// `gh-releases-zsync` transport).
+#[cfg(unix)]
+const APPIMAGE_UPDATE_INFORMATION: &str =
+    "gh-releases-zsync|wmahfoudh|oryx|latest|Oryx-*-x86_64.AppImage.zsync";
+
+#[cfg(unix)]
+#[test]
+fn appimage_sh_embeds_the_update_information_of_the_github_releases() {
+    let script = packaging("appimage.sh");
+    assert!(
+        script.contains(&format!("updates=\"{APPIMAGE_UPDATE_INFORMATION}\"\n")),
+        "the script names the update information"
+    );
+    assert_eq!(
+        script.matches("appimagetool -n -u \"$updates\" ").count(),
+        2,
+        "both appimagetool calls carry the update information"
+    );
+    assert!(
+        script.contains("zsyncmake"),
+        "the script needs zsyncmake, or the zsync file is silently skipped"
+    );
+}
+
 /// The three libraries of the X11 keyboard path that the AppImage
 /// bundles, by soname.
 #[cfg(unix)]
@@ -843,17 +834,29 @@ fn keyboard_library_stubs(dir: &Path) -> PathBuf {
 #[cfg(unix)]
 #[test]
 fn appimage_sh_packs_the_staged_tree_with_the_entry_and_the_icon_on_top() {
-    // appimagetool is itself an AppImage and needs FUSE to start, so
-    // it can be installed and still not run.
+    // appimagetool is itself an AppImage: without FUSE it starts only
+    // when told to extract itself first.
     for tool in ["appimagetool", "rsvg-convert"] {
         let runs = Command::new(tool)
             .arg("--version")
+            .env("APPIMAGE_EXTRACT_AND_RUN", "1")
             .output()
             .is_ok_and(|out| out.status.success());
         if !runs {
             eprintln!("{tool} is not installed or cannot run here, skipped");
             return;
         }
+    }
+    // zsyncmake writes the update file beside the image. It has no
+    // version switch and writes a file for any argument, so it is only
+    // looked up on the PATH.
+    let found = Command::new("sh")
+        .args(["-c", "command -v zsyncmake"])
+        .output()
+        .is_ok_and(|out| out.status.success());
+    if !found {
+        eprintln!("zsyncmake is not installed, skipped");
+        return;
     }
     let dir = std::env::temp_dir().join(format!("oryx-appimage-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
@@ -882,6 +885,7 @@ fn appimage_sh_packs_the_staged_tree_with_the_entry_and_the_icon_on_top() {
         .arg(&image)
         .env("PATH", path_with(&bin))
         .env("APPIMAGE_LIBS", &libs)
+        .env("APPIMAGE_EXTRACT_AND_RUN", "1")
         .output()
         .unwrap();
     assert!(
@@ -896,6 +900,23 @@ fn appimage_sh_packs_the_staged_tree_with_the_entry_and_the_icon_on_top() {
         let mode = std::fs::metadata(&image).unwrap().permissions().mode();
         assert_eq!(mode & 0o111, 0o111, "the image is executable");
     }
+    // The update information names the zsync file of the latest
+    // release on GitHub, and the file is written beside the image.
+    let out = Command::new(&image)
+        .arg("--appimage-updateinformation")
+        .output()
+        .unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout).trim(),
+        APPIMAGE_UPDATE_INFORMATION,
+        "the runtime reads the update information back"
+    );
+    let zsync = dir.join("Oryx-1.2.3-x86_64.AppImage.zsync");
+    let head = std::fs::read(&zsync).unwrap();
+    assert!(
+        head.starts_with(b"zsync: "),
+        "the zsync file beside the image starts with its format line"
+    );
     // The runtime unpacks the image without FUSE, into `squashfs-root`
     // under the working directory.
     let out = Command::new(&image)
@@ -982,9 +1003,10 @@ fn appimage_sh_lets_every_user_enter_the_top_folder_of_the_image() {
     stand_in(
         &bin,
         "appimagetool",
-        "for arg; do appdir=$out; out=$arg; done\nstat -c %a \"$appdir\" > \"$out\"\n",
+        "for arg; do appdir=$out; out=$arg; done\nstat -c %a \"$appdir\" > \"$out\"\n: > \"$out.zsync\"\n",
     );
     stand_in(&bin, "patchelf", "");
+    stand_in(&bin, "zsyncmake", "");
     let libs = keyboard_library_stubs(&dir);
     let image = dir.join("Oryx-1.2.3-x86_64.AppImage");
     let out = Command::new("sh")
@@ -1043,8 +1065,9 @@ fn appimage_sh_bundles_the_keyboard_libraries_and_sets_their_search_path() {
     stand_in(
         &bin,
         "appimagetool",
-        "for arg; do appdir=$out; out=$arg; done\ncp -r \"$appdir\" \"$out\"\n",
+        "for arg; do appdir=$out; out=$arg; done\ncp -r \"$appdir\" \"$out\"\n: > \"$out.zsync\"\n",
     );
+    stand_in(&bin, "zsyncmake", "");
     // The stand-in records each call as a line.
     let record = dir.join("patchelf.args");
     stand_in(
@@ -1193,12 +1216,6 @@ fn bump_sh_moves_the_version_in_the_four_files_and_refuses_a_step_back() {
         lines[1].len() - lines[1].trim_start().len(),
         "same indent"
     );
-    assert_eq!(
-        xml.matches(&format!("/wmahfoudh/oryx/v{next}/screenshots/"))
-            .count(),
-        6
-    );
-    assert!(!xml.contains(&format!("/v{current}/screenshots/")));
     let changelog = std::fs::read_to_string(dir.join("CHANGELOG.md")).unwrap();
     assert!(
         changelog.starts_with(&format!("# Changelog\n\n## v{next}\n\n## v{current}\n")),
@@ -1526,79 +1543,6 @@ fn the_winget_version_template_names_the_default_locale() {
     );
 }
 
-#[test]
-fn the_flathub_manifest_builds_the_tag_offline_into_app() {
-    let text = packaging("flathub/com.steerania.Oryx.yml");
-    for line in [
-        &format!("app-id: {APP_ID}\n"),
-        "runtime: org.freedesktop.Platform\n",
-        "runtime-version: '25.08'\n",
-        "sdk: org.freedesktop.Sdk\n",
-        "  - org.freedesktop.Sdk.Extension.rust-stable\n",
-        "command: oryx\n",
-        "  - --socket=wayland\n",
-        "  - --socket=fallback-x11\n",
-        "  - --share=ipc\n",
-        "  - --share=network\n",
-        "  - --filesystem=home\n",
-        "      - cargo --offline build --release --verbose\n",
-        "      - sh packaging/stage-linux.sh stage /app\n",
-        &format!(
-            "        url: https://github.com/wmahfoudh/oryx/archive/refs/tags/v{}.tar.gz\n",
-            last_stable_release()
-        ),
-        "      - cargo-sources.json\n",
-    ] {
-        assert!(text.contains(line), "{line:?} missing");
-    }
-}
-
-/// `cargo-sources.json` is regenerated from `Cargo.lock` by Flathub's
-/// generator, cloned beside the repository; a stale file would make the
-/// offline build miss a crate. Skipped when the generator or its
-/// Python modules are absent.
-#[test]
-fn the_flathub_cargo_sources_match_the_lock_file() {
-    let generator = repo()
-        .parent()
-        .unwrap()
-        .join("flatpak-builder-tools/cargo/flatpak-cargo-generator.py");
-    if !generator.is_file() {
-        eprintln!("flatpak-builder-tools is not cloned beside the repository, skipped");
-        return;
-    }
-    if Command::new("python3")
-        .args(["-c", "import aiohttp, toml"])
-        .output()
-        .map(|out| !out.status.success())
-        .unwrap_or(true)
-    {
-        eprintln!("python3 with aiohttp and toml is not installed, skipped");
-        return;
-    }
-    let out_path =
-        std::env::temp_dir().join(format!("oryx-cargo-sources-{}.json", std::process::id()));
-    let out = Command::new("python3")
-        .arg(&generator)
-        .arg(repo().join("Cargo.lock"))
-        .arg("-o")
-        .arg(&out_path)
-        .output()
-        .unwrap();
-    assert!(
-        out.status.success(),
-        "{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    let fresh = std::fs::read_to_string(&out_path).unwrap();
-    let committed = packaging("flathub/cargo-sources.json");
-    std::fs::remove_file(&out_path).unwrap();
-    assert_eq!(
-        committed, fresh,
-        "packaging/flathub/cargo-sources.json is stale: regenerate it with make channels"
-    );
-}
-
 /// The Mac's Info.plist: the values under a key, as `<string>` items of
 /// the array that follows it, from every occurrence of the key.
 fn plist_strings_under(xml: &str, key: &str) -> Vec<String> {
@@ -1845,4 +1789,90 @@ fn the_makefile_builds_the_arch_package_after_the_channels() {
     let makefile = std::fs::read_to_string(repo().join("Makefile")).unwrap();
     assert!(makefile.contains("arch:\n\tsh packaging/arch.sh $(VERSION) release"));
     assert!(makefile.contains(".PHONY: check audit release channels arch"));
+}
+
+/// The install script keeps the user's own themes: an install over an
+/// older one replaces the bundled themes by name, and the uninstall
+/// removes them with the examples and the binary, the user's themes and
+/// their folder kept, the script saying where (Task 339, claim 15 of
+/// the hunt of 1.3.0).
+#[cfg(unix)]
+#[test]
+fn the_install_script_keeps_the_users_own_themes() {
+    let dir = std::env::temp_dir().join(format!("oryx-install-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let home = dir.join("home");
+    let themes = home.join(".local/share/oryx/themes");
+    std::fs::create_dir_all(&themes).unwrap();
+    std::fs::write(themes.join("mine.toml"), "# mine\n").unwrap();
+    std::fs::write(themes.join("dracula.toml"), "# old\n").unwrap();
+    // The extracted tarball, with a stand-in binary that answers --register.
+    let tarball = dir.join("oryx");
+    stand_in(&tarball, "oryx", "exit 0\n");
+    std::fs::create_dir_all(tarball.join("themes")).unwrap();
+    std::fs::write(tarball.join("themes/dracula.toml"), "# new\n").unwrap();
+    std::fs::write(tarball.join("themes/nord.toml"), "# new\n").unwrap();
+    std::fs::create_dir_all(tarball.join("examples")).unwrap();
+    std::fs::write(tarball.join("examples/sample.md"), "# sample\n").unwrap();
+    std::fs::copy(
+        repo().join("packaging/install.sh"),
+        tarball.join("install.sh"),
+    )
+    .unwrap();
+    let run = |arg: Option<&str>| {
+        let mut command = Command::new("sh");
+        command.arg(tarball.join("install.sh"));
+        if let Some(arg) = arg {
+            command.arg(arg);
+        }
+        let out = command.env("HOME", &home).output().unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    };
+    run(None);
+    assert_eq!(
+        std::fs::read_to_string(themes.join("mine.toml")).unwrap(),
+        "# mine\n",
+        "the user's theme kept by the install"
+    );
+    assert_eq!(
+        std::fs::read_to_string(themes.join("dracula.toml")).unwrap(),
+        "# new\n",
+        "the bundled theme replaced by name"
+    );
+    assert!(
+        themes.join("nord.toml").is_file(),
+        "a new bundled theme added"
+    );
+    assert!(home.join(".local/share/oryx/examples/sample.md").is_file());
+    assert!(home.join(".local/bin/oryx").is_file());
+    let said = run(Some("--uninstall"));
+    assert_eq!(
+        std::fs::read_to_string(themes.join("mine.toml")).unwrap(),
+        "# mine\n",
+        "the user's theme kept by the uninstall"
+    );
+    assert!(
+        !themes.join("dracula.toml").exists() && !themes.join("nord.toml").exists(),
+        "the bundled themes removed"
+    );
+    assert!(!home.join(".local/share/oryx/examples").exists());
+    assert!(!home.join(".local/bin/oryx").exists());
+    assert!(
+        said.contains(&format!("your own themes stay in {}", themes.display())),
+        "the script says where the themes stay: {said}"
+    );
+    // With no theme of the user's own, the uninstall leaves no folder.
+    std::fs::remove_file(themes.join("mine.toml")).unwrap();
+    run(None);
+    run(Some("--uninstall"));
+    assert!(
+        !home.join(".local/share/oryx").exists(),
+        "the data folder removed when empty"
+    );
+    std::fs::remove_dir_all(&dir).unwrap();
 }

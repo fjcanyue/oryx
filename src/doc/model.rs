@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use crate::style::highlight::SyntaxRole;
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Document {
     pub blocks: Vec<Block>,
     /// The text the document was parsed from; block and span ranges index
@@ -414,6 +414,27 @@ impl CodeBody {
         self.owned.as_ref().map(|owned| &*owned.text)
     }
 
+    /// The lines of `range` as a body of their own, line 0 the range's
+    /// first: what a job off the window's thread carries when it reads
+    /// a few lines of a big file, in place of the whole line table.
+    pub fn window(&self, range: Range<usize>) -> CodeBody {
+        let range = range.start.min(self.lines.len())..range.end.min(self.lines.len());
+        let owned = self.owned.as_ref().map(|owned| {
+            Box::new(OwnedBody {
+                text: owned.text.clone(),
+                source_lines: if owned.source_lines.is_empty() {
+                    Vec::new()
+                } else {
+                    owned.source_lines[range.clone()].to_vec()
+                },
+            })
+        });
+        CodeBody {
+            owned,
+            lines: self.lines[range].to_vec(),
+        }
+    }
+
     pub fn len(&self) -> usize {
         self.lines.len()
     }
@@ -429,6 +450,16 @@ impl CodeBody {
     pub fn line<'a>(&'a self, source: &'a str, index: usize) -> &'a str {
         let base = self.owned_text().unwrap_or(source);
         slice(base, &self.lines[index])
+    }
+
+    /// The line an offset falls on: the last line starting at or before
+    /// it, its line break included, and the last line past the end;
+    /// None for a body without lines. The offset is a source offset for
+    /// a verbatim body, an offset into its own text for an owned one.
+    pub fn line_at(&self, offset: usize) -> Option<usize> {
+        self.lines
+            .partition_point(|range| range.start as usize <= offset)
+            .checked_sub(1)
     }
 
     /// The source byte range of a line, only when the body slices the
@@ -615,6 +646,9 @@ pub struct Span {
     pub mark: bool,
     pub code: bool,
     pub math: bool,
+    /// A formula written as `$$...$$` where no block can stand (a table
+    /// cell): set in display style.
+    pub display: bool,
     pub script: SpanScript,
     /// Link target: a URL, a `#anchor`, or `footnote:<label>`.
     pub link: Option<String>,
@@ -644,6 +678,7 @@ impl Default for Span {
             mark: false,
             code: false,
             math: false,
+            display: false,
             script: SpanScript::None,
             link: None,
             abbr: None,
@@ -746,17 +781,43 @@ pub(crate) fn seal_blocks(blocks: &mut [Block], source: &str) {
 mod tests {
     use super::*;
 
+    /// The line an offset falls on: the last line starting at or before
+    /// it, the line break included, and the last line past the end.
+    #[test]
+    fn the_line_of_an_offset_is_the_last_starting_at_or_before_it() {
+        let body = CodeBody::from_text("ab\ncd");
+        assert_eq!(body.line_at(0), Some(0));
+        assert_eq!(
+            body.line_at(2),
+            Some(0),
+            "the line break belongs to its line"
+        );
+        assert_eq!(body.line_at(3), Some(1));
+        assert_eq!(body.line_at(4), Some(1));
+        assert_eq!(body.line_at(99), Some(1), "past the end, the last line");
+        assert_eq!(
+            CodeBody::from_text("").line_at(0).is_some(),
+            !CodeBody::from_text("").is_empty()
+        );
+    }
+
     /// The loader's construction over the edited source, the splice's
-    /// referee: `str::lines` ranges, every line a row.
+    /// referee: the text between line breaks, every line a row, and no
+    /// row after a final line break.
     fn fresh(source: &str) -> Vec<Range<u32>> {
-        let base = source.as_ptr() as usize;
-        source
-            .lines()
+        let mut at = 0;
+        let mut lines: Vec<Range<u32>> = source
+            .split('\n')
             .map(|line| {
-                let start = (line.as_ptr() as usize - base) as u32;
-                start..start + line.len() as u32
+                let range = at..at + line.len() as u32;
+                at = range.end + 1;
+                range
             })
-            .collect()
+            .collect();
+        if source.is_empty() || source.ends_with('\n') {
+            lines.pop();
+        }
+        lines
     }
 
     fn body(source: &str) -> CodeBody {

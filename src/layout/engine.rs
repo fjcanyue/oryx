@@ -657,8 +657,27 @@ pub struct MathGlyph {
     pub ch: Option<char>,
     pub top: f32,
     pub bottom: f32,
+    /// The left and right edges of the formula's box, as `top` and
+    /// `bottom` are its vertical edges: a table's measuring pass and the
+    /// alignment of a line read them, a space or a phantom that opens or
+    /// ends the formula counted.
+    pub left: f32,
+    pub right: f32,
     pub color: crate::style::theme::Rgba,
     pub block: usize,
+}
+
+impl MathGlyph {
+    /// The vertical extent the glyph's ink lies in, for the index and
+    /// the paint of a strip: its formula's box, which holds a sized
+    /// delimiter and a display operator whole, and a margin around the
+    /// baseline for a glyph whose ink passes the box.
+    pub fn ink(&self) -> (f32, f32) {
+        (
+            self.top.min(self.y - 1.2 * self.size),
+            self.bottom.max(self.y + 0.6 * self.size),
+        )
+    }
 }
 
 /// One table row's vertical band, stripe and padding included.
@@ -770,8 +789,8 @@ impl LayoutDoc {
         }
         index.images.indexed = self.images.len();
         for (i, g) in self.math_glyphs.iter().enumerate().skip(index.math.indexed) {
-            // Conservative extent around the baseline; buckets tolerate slack.
-            index.math.note(i, g.y - 1.2 * g.size, g.y + 0.6 * g.size);
+            let (top, bottom) = g.ink();
+            index.math.note(i, top, bottom);
         }
         index.math.indexed = self.math_glyphs.len();
     }
@@ -1098,6 +1117,7 @@ impl LayoutPass {
         };
         open.counts.runs = moved(open.counts.runs);
         open.frame.marks.runs = moved(open.frame.marks.runs);
+        open.frame.lines.runs = moved(open.frame.lines.runs);
         open.counts.families = open.counts.families.max(lay.families.len());
     }
 
@@ -1114,14 +1134,35 @@ impl LayoutPass {
     }
 
     /// Shifts the indices the pass holds into the layout's vectors
-    /// after a consumer drained emitted geometry from their front. The
-    /// open code block's panel is never part of what such a consumer
-    /// may drop.
-    pub(crate) fn rebase(&mut self, rects: usize) {
+    /// after a consumer drained emitted geometry from their front: the
+    /// open code block's panel, which is never part of what such a
+    /// consumer may drop, and the places the block noted at its start
+    /// (its marks and its counts), which its end reads again to align
+    /// its lines and to insert a quote's decoration. A place the drain
+    /// passed is the front of what remains.
+    pub(crate) fn rebase(
+        &mut self,
+        runs: usize,
+        rects: usize,
+        images: usize,
+        math: usize,
+        code: usize,
+    ) {
         if let Some(open) = &mut self.open {
             if open.framed {
                 open.panel -= rects;
             }
+            for marks in [&mut open.frame.marks, &mut open.frame.lines] {
+                marks.runs = marks.runs.saturating_sub(runs);
+                marks.rects = marks.rects.saturating_sub(rects);
+                marks.images = marks.images.saturating_sub(images);
+                marks.math = marks.math.saturating_sub(math);
+            }
+            open.counts.runs = open.counts.runs.saturating_sub(runs);
+            open.counts.rects = open.counts.rects.saturating_sub(rects);
+            open.counts.images = open.counts.images.saturating_sub(images);
+            open.counts.math = open.counts.math.saturating_sub(math);
+            open.counts.code = open.counts.code.saturating_sub(code);
         }
     }
 
@@ -1604,12 +1645,16 @@ struct Marks {
     rects: usize,
     runs: usize,
     images: usize,
+    math: usize,
 }
 
 /// What a block derives on entry and needs again when it finishes.
 #[derive(Clone, Copy)]
 struct Frame {
     marks: Marks,
+    /// Where the block's own lines start, after the title of an alert
+    /// it opens: the block's alignment moves these and leaves the title.
+    lines: Marks,
     x_base: f32,
     avail: f32,
     gap: f32,
@@ -2247,6 +2292,7 @@ fn place_block(
         rects: out.rects.len(),
         runs: out.runs.len(),
         images: out.images.len(),
+        math: out.math_glyphs.len(),
     };
 
     // The first block of an alert region gets the bold title line; the
@@ -2271,9 +2317,16 @@ fn place_block(
         out.splice(&mut scratch, pass.cursor);
         pass.cursor += title_h + 0.25 * base_size;
     }
+    let lines = Marks {
+        rects: out.rects.len(),
+        runs: out.runs.len(),
+        images: out.images.len(),
+        math: out.math_glyphs.len(),
+    };
 
     let frame = Frame {
         marks,
+        lines,
         x_base,
         avail,
         gap,
@@ -2511,6 +2564,7 @@ pub(crate) fn shape_kind(
             theme,
             cfg,
             source,
+            media,
             header,
             rows,
             aligns,
@@ -2567,6 +2621,7 @@ pub(crate) fn shape_kind(
             theme,
             cfg,
             source,
+            media,
             label,
             *number,
             *continued,
@@ -2858,8 +2913,15 @@ impl LayoutDoc {
     /// Drops emitted geometry from the vectors' front: the fused
     /// export's drain behind its pagination cursor. Code line records
     /// fully behind the run frontier go with it, the rest shift. The
-    /// caller rebases everything of its own that indexes the vectors.
-    pub(crate) fn drain_front(&mut self, runs: usize, rects: usize, images: usize, math: usize) {
+    /// caller rebases everything of its own that indexes the vectors;
+    /// the answer is the count of code line records that went.
+    pub(crate) fn drain_front(
+        &mut self,
+        runs: usize,
+        rects: usize,
+        images: usize,
+        math: usize,
+    ) -> usize {
         debug_assert!(self.window.is_none(), "the drain and the window exclude");
         let code = self.code_lines.partition_point(|c| c.runs.end <= runs);
         self.runs.drain(..runs);
@@ -2871,6 +2933,7 @@ impl LayoutDoc {
             record.runs = record.runs.start - runs..record.runs.end - runs;
         }
         self.index = YIndex::default();
+        code
     }
 
     /// Rebuilds the side buffer over the live references once evictions
@@ -3139,9 +3202,7 @@ fn replay_position(
         block_metrics(block, cfg, doc.plain_file).expect("a non-silent entry has metrics");
     let (x_base, avail) =
         block_geometry(block, table.margin, table.content_width, cfg, &doc.source);
-    let run_mark = out.runs.len();
     let rect_mark = out.rects.len();
-    let image_mark = out.images.len();
     let mut scratch = LayoutDoc::default();
     if entry.flags & ENTRY_ALERT_TITLE != 0 {
         let kind = block.alert.expect("an alert title has a kind");
@@ -3158,6 +3219,14 @@ fn replay_position(
         );
         out.splice(&mut scratch, entry.y);
     }
+    // The block's own lines start here, after the title of an alert it
+    // opens: the alignment moves them and leaves the title.
+    let lines_mark = Marks {
+        rects: out.rects.len(),
+        runs: out.runs.len(),
+        images: out.images.len(),
+        math: out.math_glyphs.len(),
+    };
     let mut lines = 0..0;
     if entry.flags & ENTRY_CODE != 0 {
         if code_framed(doc) {
@@ -3209,7 +3278,16 @@ fn replay_position(
         }
     }
     if let Some(factor) = block.align_factor() {
-        align_lines(out, run_mark, rect_mark, image_mark, x_base, avail, factor);
+        align_lines(
+            out,
+            lines_mark.runs,
+            lines_mark.rects,
+            lines_mark.images,
+            lines_mark.math,
+            x_base,
+            avail,
+            factor,
+        );
     }
     if entry.deco_top.is_finite() {
         let decoration = quote_decoration(
@@ -3321,9 +3399,10 @@ fn finish_block(
     if let Some(factor) = block.align_factor() {
         align_lines(
             out,
-            frame.marks.runs,
-            frame.marks.rects,
-            frame.marks.images,
+            frame.lines.runs,
+            frame.lines.rects,
+            frame.lines.images,
+            frame.lines.math,
             frame.x_base,
             frame.avail,
             factor,
@@ -3939,7 +4018,9 @@ fn shape_block_lines(
             } else if i < shaped.len() {
                 height += line_height;
             }
-        } else {
+        } else if !shaped[i].text(source).is_empty() {
+            // A piece with no text (a span the flow masked out) joins no
+            // segment: alone after a break it would make an empty line.
             segment.push(i);
         }
         i += 1;
@@ -4476,6 +4557,7 @@ fn layout_table(
     theme: &Theme,
     cfg: &ViewConfig,
     source: &str,
+    media: &mut MediaCache,
     header: &[Vec<Span>],
     rows: &[Vec<Vec<Span>>],
     aligns: &[ColumnAlign],
@@ -4504,28 +4586,45 @@ fn layout_table(
         return 0.0;
     }
 
-    let measure = |fonts: &mut FontStore, spans: &[Span], bold: bool| -> f32 {
-        let mut tmp = LayoutDoc::default();
-        let base = BlockStyle {
-            size,
-            color: theme.text.body,
-            bold,
-            block_index,
-            justify: false,
-            align: None,
+    // A cell with a formula goes through the paragraph's flow, which
+    // typesets the formula and sets it on the text's line or on a row of
+    // its own; a cell without one keeps the plain shaper.
+    let has_math = |spans: &[Span]| spans.iter().any(|s| s.math);
+    let measure =
+        |fonts: &mut FontStore, media: &mut MediaCache, spans: &[Span], bold: bool| -> f32 {
+            let mut tmp = LayoutDoc::default();
+            let base = BlockStyle {
+                size,
+                color: theme.text.body,
+                bold,
+                block_index,
+                justify: false,
+                align: None,
+            };
+            if has_math(spans) {
+                let spans = cell_without_images(spans);
+                layout_flow(
+                    fonts, theme, cfg, source, media, &spans, &base, 0.0, 0.0, 100_000.0, &mut tmp,
+                );
+            } else {
+                shape_block(
+                    fonts, theme, cfg, source, spans, true, &base, 0.0, 0.0, 100_000.0, &mut tmp,
+                );
+            }
+            cell_right_edge(&tmp)
         };
-        shape_block(
-            fonts, theme, cfg, source, spans, true, &base, 0.0, 0.0, 100_000.0, &mut tmp,
-        );
-        tmp.runs.iter().map(|r| r.x + r.width).fold(0.0, f32::max)
-    };
 
     let empty_cell: Vec<Span> = Vec::new();
     let mut widths = vec![0.0f32; ncols];
     for (c, w) in widths.iter_mut().enumerate() {
-        let mut natural = measure(fonts, header.get(c).unwrap_or(&empty_cell), true);
+        let mut natural = measure(fonts, media, header.get(c).unwrap_or(&empty_cell), true);
         for row in rows {
-            natural = natural.max(measure(fonts, row.get(c).unwrap_or(&empty_cell), false));
+            natural = natural.max(measure(
+                fonts,
+                media,
+                row.get(c).unwrap_or(&empty_cell),
+                false,
+            ));
         }
         // One pixel of slack: the measuring pass shapes the cell without a
         // wrap width and the layout pass shapes it inside the column, and
@@ -4588,27 +4687,47 @@ fn layout_table(
         for (c, col_width) in widths.iter().enumerate() {
             let spans = cells.get(c).unwrap_or(&empty_cell);
             let mut tmp = LayoutDoc::default();
+            let align = aligns.get(c).copied().and_then(cell_align);
+            let math = has_math(spans);
+            let rtl = math && cell_reads_rtl(spans, source);
+            // The flow sets a formula after its text: a centered or
+            // right-aligned cell with a formula is laid out at the left
+            // and moved as a block afterwards, so the formula moves with
+            // its text. A right-to-left cell keeps its mark instead: its
+            // text sits at the right by nature, and the flow puts the
+            // formula's row at the marked side, the right when unmarked.
             let base = BlockStyle {
                 size,
                 color: theme.text.body,
                 bold: *is_header,
                 block_index,
                 justify: false,
-                align: aligns.get(c).copied().and_then(cell_align),
+                align: match align {
+                    Some(Align::Center) | Some(Align::Right) if math && !rtl => None,
+                    None if rtl => Some(Align::Right),
+                    a => a,
+                },
             };
-            let h = shape_block(
-                fonts,
-                theme,
-                cfg,
-                source,
-                spans,
-                true,
-                &base,
-                0.0,
-                0.0,
-                (col_width - 2.0 * pad).max(20.0),
-                &mut tmp,
-            );
+            let content_w = (col_width - 2.0 * pad).max(20.0);
+            let h = if math {
+                let spans = cell_without_images(spans);
+                let h = layout_flow(
+                    fonts, theme, cfg, source, media, &spans, &base, 0.0, 0.0, content_w, &mut tmp,
+                );
+                let factor = if rtl { 0.0 } else { align_factor(align) };
+                // The room is the column's own, not the content floor's,
+                // which a very narrow column falls under: the cell never
+                // moves past its column.
+                let room = (col_width - 2.0 * pad) - cell_right_edge(&tmp);
+                if factor > 0.0 && room > 0.0 {
+                    shift_cell_right(&mut tmp, room * factor);
+                }
+                h
+            } else {
+                shape_block(
+                    fonts, theme, cfg, source, spans, true, &base, 0.0, 0.0, content_w, &mut tmp,
+                )
+            };
             for run in &mut tmp.runs {
                 if run.span != usize::MAX {
                     run.span += span_base;
@@ -4664,6 +4783,20 @@ fn layout_table(
                 rect.y += dy;
                 out.rects.push(rect);
             }
+            for mut g in tmp.math_glyphs {
+                g.x += dx;
+                g.left += dx;
+                g.right += dx;
+                g.y += dy;
+                g.top += dy;
+                g.bottom += dy;
+                out.math_glyphs.push(g);
+            }
+            for mut image in tmp.images {
+                image.x += dx;
+                image.y += dy;
+                out.images.push(image);
+            }
             for (name, ay) in tmp.anchors {
                 out.anchors.push((name, ay + dy));
             }
@@ -4687,6 +4820,63 @@ fn layout_table(
             .stroked(t),
     );
     y - y0
+}
+
+/// A cell's spans for the paragraph's flow: an image span becomes its
+/// text, as every cell shows an image, and the pool's worker, which
+/// shapes tables, has no media cache to look one up in.
+fn cell_without_images(spans: &[Span]) -> std::borrow::Cow<'_, [Span]> {
+    if spans.iter().all(|s| s.image.is_none()) {
+        return std::borrow::Cow::Borrowed(spans);
+    }
+    std::borrow::Cow::Owned(
+        spans
+            .iter()
+            .map(|s| {
+                let mut c = s.clone();
+                c.image = None;
+                c
+            })
+            .collect(),
+    )
+}
+
+/// Whether a cell's text reads right to left: its first strong character,
+/// the formulas' TeX left out.
+fn cell_reads_rtl(spans: &[Span], source: &str) -> bool {
+    spans
+        .iter()
+        .filter(|s| !s.math)
+        .flat_map(|s| s.text(source).chars())
+        .find_map(crate::style::fonts::strong_rtl)
+        .unwrap_or(false)
+}
+
+/// The right edge of a cell laid out alone: its runs, its formulas' boxes
+/// and its images.
+fn cell_right_edge(cell: &LayoutDoc) -> f32 {
+    let runs = cell.runs.iter().map(|r| r.x + r.width);
+    let math = cell.math_glyphs.iter().map(|g| g.right);
+    let images = cell.images.iter().map(|i| i.x + i.width);
+    runs.chain(math).chain(images).fold(0.0, f32::max)
+}
+
+/// Moves a cell laid out alone to the right, as a block.
+fn shift_cell_right(cell: &mut LayoutDoc, dx: f32) {
+    for run in &mut cell.runs {
+        run.x += dx;
+    }
+    for rect in &mut cell.rects {
+        rect.x += dx;
+    }
+    for g in &mut cell.math_glyphs {
+        g.x += dx;
+        g.left += dx;
+        g.right += dx;
+    }
+    for image in &mut cell.images {
+        image.x += dx;
+    }
 }
 
 /// How much of its natural size an image is drawn at. Pixels are all an
@@ -5148,10 +5338,10 @@ pub fn math_display(tex: &str) -> String {
 }
 
 /// Splits a TeX literal into script segments: `^` and `_` bind the next
-/// character, an escaped character or a braced group, as in TeX, and a
-/// backslash escapes the character after it, so the `_` of `x\_1` is a
-/// character. Anything unmatched stays literal. Each segment's text
-/// goes through `tex_symbols`.
+/// character, a control sequence (`\pi`, `\%`) or a braced group, as in
+/// TeX, and a backslash escapes the character after it, so the `_` of
+/// `x\_1` is a character. Anything unmatched stays literal. Each
+/// segment's text goes through `tex_symbols`.
 fn math_scripts(tex: &str) -> Vec<(String, Script)> {
     fn flush(normal: &mut String, out: &mut Vec<(String, Script)>) {
         if !normal.is_empty() {
@@ -5186,12 +5376,23 @@ fn math_scripts(tex: &str) -> Vec<(String, Script)> {
                         continue;
                     }
                 }
-                Some('\\') if i + 2 < chars.len() => {
-                    flush(&mut normal, &mut out);
-                    let escaped: String = chars[i + 1..i + 3].iter().collect();
-                    out.push((tex_symbols(&escaped), script));
-                    i += 3;
-                    continue;
+                Some('\\') => {
+                    // A control sequence is one token, as in TeX: the
+                    // backslash with its letters (`\pi`, `\infty`), or
+                    // with the one character after it (`\%`). A
+                    // backslash that ends the text binds nothing.
+                    let letters = chars[i + 2..]
+                        .iter()
+                        .take_while(|ch| ch.is_ascii_alphabetic())
+                        .count();
+                    let end = if letters > 0 { i + 2 + letters } else { i + 3 };
+                    if end <= chars.len() {
+                        flush(&mut normal, &mut out);
+                        let word: String = chars[i + 1..end].iter().collect();
+                        out.push((tex_symbols(&word), script));
+                        i = end;
+                        continue;
+                    }
                 }
                 Some(&arg) => {
                     flush(&mut normal, &mut out);
@@ -5367,7 +5568,7 @@ impl noad::MathFont for OryxMathFont {
 }
 
 /// Emits a laid-out equation into the document at `x` with its baseline at
-/// `baseline`: glyphs into the math vector in the foreground ink, rules as
+/// `baseline`: glyphs into the math vector in their color or the foreground ink, rules as
 /// filled rects, and literal fallbacks as code-family runs in the theme's
 /// math color, which is that role's job under rendered math.
 #[allow(clippy::too_many_arguments)]
@@ -5382,8 +5583,18 @@ fn emit_math_layout(
     out: &mut LayoutDoc,
 ) {
     let ink = theme.surface.foreground;
+    // A color the formula set (`\color`, `\textcolor`) over the theme's ink.
+    let color = |c: Option<[u8; 3]>| {
+        c.map_or(ink, |[r, g, b]| crate::style::theme::Rgba {
+            r,
+            g,
+            b,
+            a: 255,
+        })
+    };
     let top = baseline - m.ascent;
     let bottom = baseline + m.descent;
+    let right = x + m.width;
     for g in &m.glyphs {
         out.math_glyphs.push(MathGlyph {
             glyph: g.glyph.0,
@@ -5393,13 +5604,16 @@ fn emit_math_layout(
             ch: g.ch,
             top,
             bottom,
-            color: ink,
+            left: x,
+            right,
+            color: color(g.color),
             block: block_index,
         });
     }
     for r in &m.rules {
-        out.rects
-            .push(DecoRect::fill(x + r.x, baseline + r.y, r.width, r.height, ink).smooth());
+        out.rects.push(
+            DecoRect::fill(x + r.x, baseline + r.y, r.width, r.height, color(r.color)).smooth(),
+        );
     }
     for lit in &m.literals {
         let (runs, _) = shape_side_text(
@@ -5496,6 +5710,7 @@ fn layout_footnote_def(
     theme: &Theme,
     cfg: &ViewConfig,
     source: &str,
+    media: &mut MediaCache,
     label: &str,
     number: u32,
     continued: bool,
@@ -5556,19 +5771,39 @@ fn layout_footnote_def(
         justify: false,
         align: None,
     };
-    let text_h = shape_block(
-        fonts,
-        theme,
-        cfg,
-        source,
-        spans,
-        true,
-        &base,
-        x0 + indent,
-        y0,
-        (avail - indent).max(40.0),
-        out,
-    );
+    let width = (avail - indent).max(40.0);
+    // A definition with a formula flows as a paragraph does, its
+    // pictures as their text, as in a table cell.
+    let text_h = if spans.iter().any(|s| s.math) {
+        let spans = cell_without_images(spans);
+        layout_flow(
+            fonts,
+            theme,
+            cfg,
+            source,
+            media,
+            &spans,
+            &base,
+            x0 + indent,
+            y0,
+            width,
+            out,
+        )
+    } else {
+        shape_block(
+            fonts,
+            theme,
+            cfg,
+            source,
+            spans,
+            true,
+            &base,
+            x0 + indent,
+            y0,
+            width,
+            out,
+        )
+    };
     text_h.max(metrics::LINE_HEIGHT * base_size)
 }
 
@@ -5831,6 +6066,43 @@ fn cut_at_a_break(
     }
 }
 
+/// Closes the flow's open line: a row of its own, whose height the flow
+/// books when the line closes, moves the pen below it.
+fn close_line(line: &mut Option<FlowLine>, y: &mut f32, size: f32) {
+    if let Some(l) = line.take() {
+        if l.row {
+            *y = l.top + l.height + 0.25 * size;
+        }
+    }
+}
+
+/// A hard break in the flow: it closes the open line, and with no line
+/// open after another break it leaves a blank line.
+fn hard_break(
+    line: &mut Option<FlowLine>,
+    y: &mut f32,
+    size: f32,
+    line_height: f32,
+    broke: &mut bool,
+) {
+    if line.is_some() {
+        close_line(line, y, size);
+    } else if *broke {
+        *y += line_height;
+    }
+    *broke = true;
+}
+
+/// Where a box alone on its row sits in the room left: at the left, in
+/// the middle or at the right, by the block's alignment.
+fn align_factor(align: Option<Align>) -> f32 {
+    match align {
+        Some(Align::Center) => 0.5,
+        Some(Align::Right) => 1.0,
+        _ => 0.0,
+    }
+}
+
 /// Text with inline images or equations. Text shapes normally; an image
 /// or equation joins the last text line when it fits there, otherwise it
 /// opens its own row. A one-line text chunk that follows an equation on an
@@ -5854,10 +6126,22 @@ fn layout_flow(
     let gap = 8.0 * cfg.zoom;
     let mut y = y0;
     let mut line: Option<FlowLine> = None;
+    // The last thing the flow met was a hard break: the next one in a
+    // row is a blank line. The paragraph's start counts as one, so a
+    // break that opens the paragraph leaves a blank line, as it does in
+    // a paragraph of text alone.
+    let mut broke = true;
+    let is_break = |s: &Span| s.image.is_none() && !s.math && s.text(source) == "\n";
 
     let mut i = 0;
     while i < spans.len() {
-        if spans[i].image.is_none() && !spans[i].math {
+        if is_break(&spans[i]) {
+            // A hard break that opens a piece of text is the flow's own:
+            // it closes the open line, so the text after it starts a line
+            // below at the margin and is no part of a formula's line.
+            hard_break(&mut line, &mut y, base.size, line_height, &mut broke);
+            i += 1;
+        } else if spans[i].image.is_none() && !spans[i].math {
             // The text chunk up to the next image or equation, masked into
             // a full-length span list so run span indices keep mapping to
             // the model.
@@ -5865,12 +6149,20 @@ fn layout_flow(
             while i < spans.len() && spans[i].image.is_none() && !spans[i].math {
                 i += 1;
             }
+            // A hard break closes the open line: the next box starts a
+            // line of its own below it, as the text after the break does.
+            let ends_with_break = spans[i - 1].text(source) == "\n";
             if spans[start..i]
                 .iter()
                 .all(|s| s.text(source).trim().is_empty())
             {
-                // Whitespace between two placed boxes keeps its word gap.
-                if let Some(l) = line.as_mut() {
+                let breaks = spans[start..i].iter().filter(|s| is_break(s)).count();
+                for _ in 0..breaks {
+                    hard_break(&mut line, &mut y, base.size, line_height, &mut broke);
+                }
+                if breaks > 0 {
+                } else if let Some(l) = line.as_mut() {
+                    // Whitespace between two placed boxes keeps its word gap.
                     if l.baseline.is_some() {
                         l.end_x += 0.25 * base.size;
                     }
@@ -5905,7 +6197,12 @@ fn layout_flow(
                     rects_mark, out,
                 );
                 if out.runs.len() == rm {
-                    // The whole chunk joined the line, which stays open.
+                    // The whole chunk joined the line, which stays open
+                    // unless the chunk ended with a hard break.
+                    broke = false;
+                    if ends_with_break {
+                        hard_break(&mut line, &mut y, base.size, line_height, &mut broke);
+                    }
                     continue;
                 }
                 (rh, rm, rcm, false)
@@ -5988,15 +6285,28 @@ fn layout_flow(
                     },
                 });
             }
+            broke = false;
+            if ends_with_break {
+                hard_break(&mut line, &mut y, base.size, line_height, &mut broke);
+            }
         } else if spans[i].math {
+            broke = false;
             let span = &spans[i];
             let font = OryxMathFont::new();
-            let m = noad::layout::layout(
-                span.text(source).trim(),
-                noad::layout::MathStyle::Text,
-                base.size,
-                &font,
-            );
+            let style = if span.display {
+                noad::layout::MathStyle::Display
+            } else {
+                noad::layout::MathStyle::Text
+            };
+            let mut m = noad::layout::layout(span.text(source).trim(), style, base.size, &font);
+            // A formula wider than the width at hand (a table cell, a
+            // narrow column) shrinks into it, down to the half-size floor,
+            // as a display block wider than the column does; past the
+            // floor it overflows.
+            if m.width > avail {
+                let s = (avail / m.width).max(0.5);
+                scale_math_layout(&mut m, s);
+            }
             let w = m.width.max(1.0);
             // A space the author typed before the equation is the trailing
             // byte of the preceding text chunk, and shaping drops trailing
@@ -6046,12 +6356,15 @@ fn layout_flow(
                     math: out.math_glyphs.len(),
                 };
                 let baseline = y + m.ascent.max(0.75 * line_height);
-                emit_math_layout(fonts, theme, cfg, &m, x0, baseline, base.block_index, out);
+                // A row of its own follows the block's alignment, as the
+                // text lines do: centered or at the right under a mark.
+                let x = x0 + (avail - w).max(0.0) * align_factor(base.align);
+                emit_math_layout(fonts, theme, cfg, &m, x, baseline, base.block_index, out);
                 let height = (baseline - y) + m.descent.max(0.25 * line_height);
                 line = Some(FlowLine {
                     top: y,
                     height,
-                    end_x: x0 + w,
+                    end_x: x + w,
                     baseline: Some(baseline),
                     row: true,
                     marks,
@@ -6059,6 +6372,7 @@ fn layout_flow(
             }
             i += 1;
         } else {
+            broke = false;
             let span = &spans[i];
             let image = span.image.as_ref().expect("image span");
             let (w, h, loaded) = image_size(fonts, media, span, image, cfg, source, avail);
@@ -6301,16 +6615,19 @@ fn fit_side_text(
 /// A line may move either way, since right-to-left text starts on the
 /// right; a line wider than the content stays where it is. Lines are
 /// clustered by vertical overlap.
+#[allow(clippy::too_many_arguments)]
 fn align_lines(
     out: &mut LayoutDoc,
     runs_mark: usize,
     rects_mark: usize,
     images_mark: usize,
+    math_mark: usize,
     x0: f32,
     avail: f32,
     factor: f32,
 ) {
-    // (top, bottom, kind, index) per element; kinds: 0 runs, 1 rects, 2 images.
+    // (top, bottom, kind, index) per element; kinds: 0 runs, 1 rects,
+    // 2 images, 3 math glyphs.
     let mut items: Vec<(f32, f32, u8, usize)> = Vec::new();
     for (i, r) in out.runs.iter().enumerate().skip(runs_mark) {
         items.push((r.y, r.y + metrics::LINE_HEIGHT * r.size, 0, i));
@@ -6320,6 +6637,9 @@ fn align_lines(
     }
     for (i, im) in out.images.iter().enumerate().skip(images_mark) {
         items.push((im.y, im.y + im.height, 2, i));
+    }
+    for (i, g) in out.math_glyphs.iter().enumerate().skip(math_mark) {
+        items.push((g.top, g.bottom, 3, i));
     }
     items.sort_by(|a, b| a.0.total_cmp(&b.0));
     let mut start = 0;
@@ -6335,7 +6655,11 @@ fn align_lines(
             match item.2 {
                 0 => (out.runs[item.3].x, out.runs[item.3].width),
                 1 => (out.rects[item.3].x, out.rects[item.3].width),
-                _ => (out.images[item.3].x, out.images[item.3].width),
+                2 => (out.images[item.3].x, out.images[item.3].width),
+                _ => {
+                    let g = &out.math_glyphs[item.3];
+                    (g.left, g.right - g.left)
+                }
             }
         };
         let min_x = group.iter().map(|it| span_x(it).0).fold(f32::MAX, f32::min);
@@ -6352,7 +6676,12 @@ fn align_lines(
                 match item.2 {
                     0 => out.runs[item.3].x += dx,
                     1 => out.rects[item.3].x += dx,
-                    _ => out.images[item.3].x += dx,
+                    2 => out.images[item.3].x += dx,
+                    _ => {
+                        out.math_glyphs[item.3].x += dx;
+                        out.math_glyphs[item.3].left += dx;
+                        out.math_glyphs[item.3].right += dx;
+                    }
                 }
             }
         }
@@ -7620,6 +7949,53 @@ mod tests {
                 seg("i=1", Script::Sub),
                 seg("n", Script::Sup)
             ]
+        );
+    }
+
+    /// A control word as a bare script's argument (`e^\pi`,
+    /// `\int_0^\infty`) is the whole word, as in TeX, where a control
+    /// sequence is one token (claim 10 of the hunt of Task 328). Before,
+    /// the script took two characters and cut the word after its first
+    /// letter.
+    #[test]
+    fn a_control_word_as_a_script_is_taken_whole() {
+        assert_eq!(
+            math_scripts(r"x^\alpha"),
+            [seg("x", Script::Normal), seg("\u{03B1}", Script::Sup)]
+        );
+        assert_eq!(math_display(r"e^\pi"), "e\u{03C0}");
+        assert_eq!(
+            math_scripts(r"\int_0^\infty e^{-x}"),
+            [
+                seg("\u{222B}", Script::Normal),
+                seg("0", Script::Sub),
+                seg("\u{221E}", Script::Sup),
+                seg(" e", Script::Normal),
+                seg("-x", Script::Sup)
+            ]
+        );
+        assert_eq!(
+            math_scripts(r"e^\pi r"),
+            [
+                seg("e", Script::Normal),
+                seg("\u{03C0}", Script::Sup),
+                seg(" r", Script::Normal)
+            ],
+            "the word ends at the first character that is not a letter"
+        );
+        assert_eq!(
+            math_scripts(r"x^\foo+1"),
+            [
+                seg("x", Script::Normal),
+                seg(r"\foo", Script::Sup),
+                seg("+1", Script::Normal)
+            ],
+            "an unknown word stays literal, whole"
+        );
+        assert_eq!(
+            math_scripts(r"a^\"),
+            [seg(r"a^\", Script::Normal)],
+            "a backslash with nothing after it stays literal"
         );
     }
 

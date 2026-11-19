@@ -1442,27 +1442,373 @@ enum CaseForm {
 
 const CASE_CYCLE: [CaseForm; 3] = [CaseForm::Lower, CaseForm::Title, CaseForm::Upper];
 
-/// The stretches of a text between its blank lines, each with the line
-/// breaks it holds.
-fn paragraphs(text: &str) -> Vec<std::ops::Range<usize>> {
+/// What the lines read so far leave open for the next one: a fence, the
+/// items of a list, a paragraph. The case key reads the lines above a
+/// paragraph through it (`above`), since a paragraph alone does not say
+/// whether it is code inside a fence or text under a list item.
+#[derive(Debug, Clone, Default)]
+struct Blocks {
+    /// The open fence: its character, the length of its run, and the
+    /// column of its container, the margin or the text of the list item
+    /// it is in.
+    fence: Option<(u8, usize, usize)>,
+    /// The column of the text of each open list item, the outermost
+    /// first.
+    items: Vec<usize>,
+    /// The line before was blank.
+    blank_before: bool,
+    /// A paragraph is open, which an indented line continues: indented
+    /// code cannot interrupt a paragraph.
+    in_para: bool,
+}
+
+/// How `Blocks` reads a line.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Line {
+    Blank,
+    /// A fence line, or a line inside a fenced block.
+    Fence,
+    /// A line of an indented code block: four columns past the text of
+    /// the list item it is under, or past the margin.
+    Code,
+    Text,
+}
+
+impl Blocks {
+    fn read(&mut self, line: &str) -> Line {
+        let (cols, bytes) = indent_span(line);
+        let body = &line[bytes..];
+        if let Some((ch, run, base)) = self.fence {
+            let l = body.trim_end();
+            // The page's parser ends a fence with its list item, at the
+            // first line with text left of the item's text. That line
+            // is read below as any line after the list.
+            if l.is_empty() || cols >= base {
+                // A closer is indented less than four columns past the
+                // container; deeper, the line is code.
+                let closing = l.bytes().take_while(|b| *b == ch).count();
+                if closing >= run && closing == l.len() && cols - base < 4 {
+                    self.fence = None;
+                }
+                self.blank_before = false;
+                return Line::Fence;
+            }
+            self.fence = None;
+        }
+        let Some(first) = body.bytes().next().filter(|b| !b.is_ascii_whitespace()) else {
+            if !body.trim().is_empty() {
+                // Whitespace that is not a space or a tab, then text.
+                self.blank_before = false;
+                self.in_para = true;
+                return Line::Text;
+            }
+            self.blank_before = true;
+            self.in_para = false;
+            return Line::Blank;
+        };
+        // A line left of an item's text continues that item only as a
+        // lazy line of its paragraph.
+        if self.blank_before || !self.in_para {
+            self.items.retain(|c| *c <= cols);
+        }
+        self.blank_before = false;
+        let base = self
+            .items
+            .iter()
+            .rev()
+            .find(|c| **c <= cols)
+            .copied()
+            .unwrap_or(0);
+        let rel = cols - base;
+        if rel >= 4 {
+            let code = !self.in_para;
+            return if code { Line::Code } else { Line::Text };
+        }
+        // The first byte settles a line of plain text at once.
+        if !matches!(
+            first,
+            b'`' | b'~' | b'-' | b'*' | b'+' | b'_' | b'#' | b'=' | b'0'..=b'9'
+        ) {
+            self.in_para = true;
+            return Line::Text;
+        }
+        if let Some((ch, run)) = fence_open(body) {
+            self.items.retain(|c| *c <= cols);
+            self.fence = Some((ch, run, base));
+            self.in_para = false;
+            return Line::Fence;
+        }
+        if !thematic_break(body) {
+            if let Some((width, text)) = item_marker(body) {
+                // A marker alone opens an item after a blank line or a
+                // block; after a paragraph's line it is that paragraph's
+                // text or its underline.
+                if text || !self.in_para {
+                    self.items.retain(|c| *c <= cols);
+                    self.items.push(cols + width);
+                    self.in_para = text;
+                    return Line::Text;
+                }
+            }
+        }
+        if starts_block(rel, body, false) {
+            self.items.retain(|c| *c <= cols);
+            self.in_para = false;
+        } else {
+            self.in_para = true;
+        }
+        Line::Text
+    }
+}
+
+/// What the lines of `source` before `until`, a line's start, leave
+/// open. A pass over the lines, each read by its first bytes.
+fn above(source: &str, until: usize) -> Blocks {
+    let mut blocks = Blocks::default();
+    for line in source[..until].split_inclusive('\n') {
+        blocks.read(line);
+    }
+    blocks
+}
+
+/// A line's indent in columns, a tab reaching the next multiple of
+/// four, and in bytes.
+fn indent_span(line: &str) -> (usize, usize) {
+    let mut cols = 0;
+    for (bytes, b) in line.bytes().enumerate() {
+        match b {
+            b' ' => cols += 1,
+            b'\t' => cols = (cols / 4 + 1) * 4,
+            _ => return (cols, bytes),
+        }
+    }
+    (cols, line.len())
+}
+
+/// The fence a line opens, past its indent: three or more backticks or
+/// tildes, and no backtick after a run of backticks.
+fn fence_open(body: &str) -> Option<(u8, usize)> {
+    let ch = *body.as_bytes().first()?;
+    if ch != b'`' && ch != b'~' {
+        return None;
+    }
+    let run = body.bytes().take_while(|b| *b == ch).count();
+    (run >= 3 && !(ch == b'`' && body[run..].contains('`'))).then_some((ch, run))
+}
+
+/// Whether a line, past its indent, is a thematic break: three or more
+/// `-`, `*` or `_`, with nothing but blanks among them.
+fn thematic_break(body: &str) -> bool {
+    let l = body.trim_end();
+    let Some(first) = l.bytes().next().filter(|b| matches!(b, b'-' | b'*' | b'_')) else {
+        return false;
+    };
+    let mut count = 0;
+    for b in l.bytes() {
+        if b == first {
+            count += 1;
+        } else if b != b' ' && b != b'\t' {
+            return false;
+        }
+    }
+    count >= 3
+}
+
+/// The list marker a line opens with, past its indent: the columns from
+/// the marker to the item's text, and whether text follows. A bullet, or
+/// a number of up to nine digits with `.` or `)`.
+fn item_marker(body: &str) -> Option<(usize, bool)> {
+    let b = body.as_bytes();
+    let digits = b.iter().take_while(|c| c.is_ascii_digit()).count();
+    let marker = if digits == 0 {
+        matches!(b.first(), Some(b'-' | b'*' | b'+')).then_some(1)?
+    } else if digits <= 9 && matches!(b.get(digits), Some(b'.' | b')')) {
+        digits + 1
+    } else {
+        return None;
+    };
+    let rest = &body[marker..];
+    if rest.trim().is_empty() {
+        return Some((marker + 1, false));
+    }
+    if !rest.starts_with([' ', '\t']) {
+        return None;
+    }
+    let spaces = rest.bytes().take_while(|c| *c == b' ').count();
+    let pad = if (1..=4).contains(&spaces) { spaces } else { 1 };
+    Some((marker + pad, true))
+}
+
+/// The stretches of a text the parser reads as one paragraph, each
+/// with the line breaks it holds, and whether the stretch is code: a
+/// fenced block with its fence lines, whole, or the lines of an
+/// indented code block. A paragraph runs between blank lines, and is
+/// cut before a line that opens a block of its own, which the parser
+/// lets interrupt a paragraph (`starts_block`), so that a `$` above
+/// such a line pairs with none below it. A quote's own lines, each with
+/// its marker, stay one paragraph. `blocks` is what the lines above the
+/// text leave open.
+fn paragraphs(text: &str, mut blocks: Blocks) -> Vec<(std::ops::Range<usize>, bool)> {
     let mut out = Vec::new();
-    let mut start = None;
+    let mut start: Option<(usize, bool)> = None;
     let mut at = 0;
+    // What the paragraph began as: a block quote's, which its unquoted
+    // lines continue lazily until one opens a block; an item of a list,
+    // where the next item with any number begins a block; indented
+    // code, which ends at the first line that is not; a fenced block.
+    let (mut in_quote, mut in_list, mut in_code, mut in_fence) = (false, false, false, false);
     for line in text.split_inclusive('\n') {
-        match (line.trim().is_empty(), start) {
-            (true, Some(s)) => {
-                out.push(s..at);
+        let kind = blocks.read(line);
+        if kind == Line::Fence {
+            if !in_fence {
+                if let Some((s, code)) = start.take() {
+                    out.push((s..at, code));
+                }
+                start = Some((at, true));
+                in_fence = true;
+            }
+            at += line.len();
+            continue;
+        }
+        if in_fence {
+            if let Some((s, code)) = start.take() {
+                out.push((s..at, code));
+            }
+            in_fence = false;
+        }
+        let code = kind == Line::Code;
+        // The columns, not the bytes: a tab before a fence is four
+        // columns, and the line continues the paragraph.
+        let (cols, indent) = indent_span(line);
+        let body = &line[indent..];
+        let blank = is_blank(body);
+        let quoted = body.starts_with('>');
+        if let Some((s, was_code)) = start {
+            let lazy = in_quote && !quoted;
+            if blank
+                || starts_block(cols, body, lazy)
+                || (quoted && !in_quote)
+                || (lazy && (is_item(line) || marker_alone(body)))
+                || (in_list && is_item(line))
+                || code != in_code
+            {
+                out.push((s..at, was_code));
                 start = None;
             }
-            (false, None) => start = Some(at),
-            _ => {}
+        }
+        if !blank && start.is_none() {
+            start = Some((at, code));
+            in_quote = quoted;
+            in_list = is_item(line);
+            in_code = code;
         }
         at += line.len();
     }
-    if let Some(s) = start {
-        out.push(s..text.len());
+    if let Some((s, code)) = start {
+        out.push((s..text.len(), code));
     }
     out
+}
+
+/// The length of a line's indent, its leading spaces and tabs.
+fn indent_of(line: &str) -> usize {
+    line.bytes()
+        .position(|b| b != b' ' && b != b'\t')
+        .unwrap_or(line.len())
+}
+
+/// Whether a line holds nothing but whitespace. The first byte past the
+/// indent settles a line of text at once, which is what a press on a
+/// long paragraph reads two hundred thousand times.
+fn is_blank(line: &str) -> bool {
+    match line.as_bytes().get(indent_of(line)) {
+        None => true,
+        Some(b) if b.is_ascii_graphic() => false,
+        Some(_) => line.trim().is_empty(),
+    }
+}
+
+/// Whether a line is a list item with text: a bullet, or a number of
+/// up to nine digits with `.` or `)`, then whitespace and text, indented
+/// three spaces at most.
+fn is_item(line: &str) -> bool {
+    let indent = line.len() - line.trim_start_matches(' ').len();
+    let l = &line[indent..];
+    let digits = l.len() - l.trim_start_matches(|c: char| c.is_ascii_digit()).len();
+    let marker = if digits == 0 {
+        usize::from(l.starts_with(['-', '*', '+']))
+    } else if (1..=9).contains(&digits) && l[digits..].starts_with(['.', ')']) {
+        digits + 1
+    } else {
+        0
+    };
+    indent <= 3
+        && marker > 0
+        && l[marker..].starts_with([' ', '\t'])
+        && !l[marker..].trim().is_empty()
+}
+
+/// Whether a line is a list marker and nothing else: a bullet, or a
+/// number with `.` or `)`. After a block quote's line, the parser ends
+/// the quote at such a line and opens an empty item; after a plain
+/// paragraph's line it reads the marker as the paragraph's text.
+fn marker_alone(body: &str) -> bool {
+    let l = body.trim_end();
+    let digits = l.len() - l.trim_start_matches(|c: char| c.is_ascii_digit()).len();
+    matches!(l, "*" | "+" | "-")
+        || ((1..=9).contains(&digits) && l.len() == digits + 1 && l.ends_with(['.', ')']))
+}
+
+/// Whether a line opens a block that interrupts a paragraph, or
+/// underlines one into a heading, as the parser reads it: a heading, a
+/// fence, a thematic break, a setext underline of `=` or `-`, or a
+/// list item with text (a bullet, or `1.` and `1)`), indented three
+/// spaces at most. `body` is the line past its indent of `indent`
+/// columns. An unquoted line of a block quote's paragraph (`lazy`) that
+/// is `=` or two `-` is the quote's own text, not an underline, as the
+/// parser reads it; the quote itself is read by `paragraphs`. The
+/// first byte settles most lines at once: a press on two hundred
+/// thousand rows reads each line once.
+fn starts_block(indent: usize, body: &str, lazy: bool) -> bool {
+    let Some(first) = body.bytes().next() else {
+        return false;
+    };
+    if indent > 3
+        || !matches!(
+            first,
+            b'#' | b'`' | b'~' | b'*' | b'-' | b'_' | b'+' | b'1' | b'='
+        )
+    {
+        return false;
+    }
+    let l = body.trim_end();
+    let item_after =
+        |marker: usize| l[marker..].starts_with([' ', '\t']) && !l[marker..].trim().is_empty();
+    match first {
+        b'#' => {
+            let signs = l.len() - l.trim_start_matches('#').len();
+            signs <= 6 && (l.len() == signs || l[signs..].starts_with([' ', '\t']))
+        }
+        b'`' => l.starts_with("```"),
+        b'~' => l.starts_with("~~~"),
+        b'=' => !lazy && l.bytes().all(|b| b == b'='),
+        b'1' => (l.starts_with("1.") || l.starts_with("1)")) && item_after(2),
+        b'+' => item_after(1),
+        _ => {
+            // `*`, `-` or `_`: a thematic break of three or more, a
+            // setext underline of `-`, or a bullet with text.
+            let (mut count, mut same) = (0, true);
+            for b in l.bytes() {
+                if b == first {
+                    count += 1;
+                } else if b != b' ' && b != b'\t' {
+                    same = false;
+                    break;
+                }
+            }
+            (same && (count >= 3 || (first == b'-' && !lazy))) || (first != b'_' && item_after(1))
+        }
+    }
 }
 
 /// The stretch from the start of the paragraph that holds a range's
@@ -1472,7 +1818,7 @@ fn paragraphs_around(source: &str, range: &std::ops::Range<usize>) -> std::ops::
     while start > 0 {
         let line_end = start - 1;
         let line_start = source[..line_end].rfind('\n').map_or(0, |i| i + 1);
-        if source[line_start..line_end].trim().is_empty() {
+        if is_blank(&source[line_start..line_end]) {
             break;
         }
         start = line_start;
@@ -1482,7 +1828,7 @@ fn paragraphs_around(source: &str, range: &std::ops::Range<usize>) -> std::ops::
         .map_or(source.len(), |i| range.end + i + 1);
     while end < source.len() {
         let line_end = source[end..].find('\n').map_or(source.len(), |i| end + i);
-        if source[end..line_end].trim().is_empty() {
+        if is_blank(&source[end..line_end]) {
             break;
         }
         end = (line_end + 1).min(source.len());
@@ -1490,40 +1836,50 @@ fn paragraphs_around(source: &str, range: &std::ops::Range<usize>) -> std::ops::
     start..end
 }
 
-/// The ranges of a markdown text that keep their letters under the case
-/// key: inline code with its backticks, the address of a link with its
-/// parentheses, an autolink or an HTML tag with its angle brackets, the
-/// address of a reference definition, and a formula with its dollar
-/// signs. Inline code closes with a run of backticks of the same length
-/// in the same paragraph, as the markdown rules say, so a lone backtick
-/// is text, and an escaped backtick outside code is text too. An
-/// address runs to the parenthesis that balances its own, on its line;
-/// an autolink holds no whitespace; a tag opens with a letter or a
-/// slash and runs to the `>` on its line, its attributes inside. A
-/// formula is what the markdown parser reads as one: `$` not followed
-/// by whitespace to the next `$`, which must not follow whitespace or
-/// precede a digit (a price), or `$$` to the next `$$`, on the
-/// paragraph; an escaped dollar sign is text, and so is a `$` whose
-/// closer is missing, the search going on from the `$` that could not
-/// close, which may open. A press costs about the text's length: a
-/// length of backtick run found unclosed, or a kind of dollar sign
-/// with none left on the paragraph, is not searched again in its
-/// paragraph, each `$` is visited once, the next `>` is searched once
-/// per region, and an autolink candidate is refused on its first
-/// whitespace.
-fn kept_pieces(text: &str) -> Vec<std::ops::Range<usize>> {
+/// The ranges of `text` the case key keeps as they are: the pieces the
+/// page shows as something other than its text. A fenced code block and
+/// an indented one are kept whole (`paragraphs`); `blocks` is what the
+/// lines above the text leave open (`above`). Inline code runs to a closing run of as many
+/// backticks on its paragraph; a link's address is what the parser
+/// reads after a `](` whose `]` closes a `[` (`address_end`); a
+/// reference definition's address; an autolink holds no whitespace; a
+/// tag is what CommonMark reads as one (`html_tag_len`). A formula is
+/// what the page shows as one: the parser's pairing (`formula_end`),
+/// then the page's currency rule, by which a paired formula whose
+/// closer precedes a digit is text. An escaped dollar sign is text. A
+/// press costs about the text's length: a length of backtick run found
+/// unclosed is not searched again in its paragraph, the `$` signs of a
+/// paragraph are read once into a table each opener finds its closer in
+/// (`Dollars`), the next `>` of an autolink candidate is searched once
+/// per region, a tag candidate is refused at its first byte off the
+/// grammar, and what a tag seeks on its line is sought once (`TagScan`).
+fn kept_pieces(text: &str, blocks: Blocks) -> Vec<std::ops::Range<usize>> {
     let mut kept = Vec::new();
-    for para in paragraphs(text) {
+    let mut tags = TagScan::default();
+    for (para, code) in paragraphs(text, blocks) {
+        if code {
+            kept.push(para);
+            continue;
+        }
+        // The `$` signs of the paragraph, read once from its first
+        // opener.
+        let mut dollars: Option<Dollars> = None;
         let mut unclosed: Vec<usize> = Vec::new();
-        let mut dollar_unclosed = [false, false];
+        // The `$` signs before this offset were examined by a scan and
+        // cannot open: stepped over.
+        let mut skip_dollars_until = para.start;
         // The next `>` from a position, remembered until the scan passes
         // it: None once no `>` stands before the paragraph's end.
         let mut next_gt: Option<Option<usize>> = None;
+        // The `[` open before the position: a `](` whose `]` closes
+        // none is text, not a link's address.
+        let mut brackets = 0usize;
         let mut line_start = true;
         let mut i = para.start;
         while i < para.end {
             let rest = &text[i..para.end];
-            if line_start {
+            // A definition opens with `[` after three spaces at most.
+            if line_start && matches!(rest.as_bytes()[0], b' ' | b'[') {
                 if let Some(address) = definition_address(rest) {
                     kept.push(i + address.start..i + address.end);
                     i += address.end;
@@ -1561,38 +1917,83 @@ fn kept_pieces(text: &str) -> Vec<std::ops::Range<usize>> {
                     }
                 }
             } else if c == '$' {
+                if i < skip_dollars_until {
+                    i += 1;
+                    continue;
+                }
                 let display = rest.starts_with("$$");
                 let signs = if display { 2 } else { 1 };
-                let opens = rest[signs..]
-                    .chars()
-                    .next()
-                    .is_some_and(|next| !next.is_ascii_whitespace());
-                if !opens || dollar_unclosed[usize::from(display)] {
-                    i += signs;
-                } else {
-                    match formula_end(&rest[signs..], display) {
-                        Formula::Closed(len) => {
-                            kept.push(i..i + signs + len);
-                            i += signs + len;
+                // A `$` opens when no whitespace follows it; a `$$`
+                // always, its first sign being followed by the second.
+                let opens = display
+                    || rest[1..]
+                        .chars()
+                        .next()
+                        .is_some_and(|next| !next.is_ascii_whitespace());
+                if !opens {
+                    i += 1;
+                    continue;
+                }
+                let found = dollars
+                    .get_or_insert_with(|| Dollars::read(rest, i))
+                    .end(i, display)
+                    .unwrap_or_else(|| formula_end(&rest[signs..], display));
+                match found {
+                    Formula::Closed(len) => {
+                        let end = i + signs + len;
+                        // The page's currency rule: a formula whose
+                        // closer precedes a digit is the text typed.
+                        if !text.as_bytes().get(end).is_some_and(u8::is_ascii_digit) {
+                            kept.push(i..end);
                         }
-                        // The scan goes on from the `$` that could not
-                        // close: it may open a formula of its own.
-                        Formula::Opener(at) => i += signs + at,
-                        Formula::None => {
-                            dollar_unclosed[usize::from(display)] = true;
-                            i += signs;
-                        }
+                        i = end;
+                    }
+                    // A `$$` found to be text leaves its second sign to
+                    // open an inline formula of its own, as the parser
+                    // tries it next; a `$` found to be text is stepped
+                    // over with every `$` before the one that can open.
+                    Formula::Text { .. } if display => i += 1,
+                    Formula::Text { resume } => {
+                        skip_dollars_until = resume.map_or(para.end, |at| i + 1 + at);
+                        i += 1;
                     }
                 }
+            } else if c == '[' {
+                brackets += 1;
+                i += 1;
             } else if let Some(after) = rest.strip_prefix("](") {
-                match address_end(after) {
+                match address_end(after).filter(|_| brackets > 0) {
                     Some(len) => {
                         kept.push(i..i + 2 + len);
                         i += 2 + len;
+                        brackets -= 1;
                     }
-                    None => i += 2,
+                    // No link: the `]` still closes its `[`, as the
+                    // parser drops the bracket it could not pair.
+                    None => {
+                        brackets = brackets.saturating_sub(1);
+                        i += 1;
+                    }
                 }
+            } else if c == ']' {
+                brackets = brackets.saturating_sub(1);
+                i += 1;
             } else if c == '<' {
+                // A `<` before whitespace, or last in its paragraph,
+                // opens neither a tag nor an autolink: `a < b`.
+                if !rest
+                    .as_bytes()
+                    .get(1)
+                    .is_some_and(|b| !b.is_ascii_whitespace())
+                {
+                    i += 1;
+                    continue;
+                }
+                if let Some(len) = html_tag_len(text, i, para.end, &mut tags) {
+                    kept.push(i..i + len);
+                    i += len;
+                    continue;
+                }
                 let gt = match next_gt {
                     Some(Some(at)) if at > i => Some(at),
                     Some(None) => None,
@@ -1602,8 +2003,10 @@ fn kept_pieces(text: &str) -> Vec<std::ops::Range<usize>> {
                         found
                     }
                 };
-                let inner = gt.map(|at| &text[i + 1..at]);
-                match inner.filter(|inner| autolink_inner(inner) || tag_inner(inner)) {
+                match gt
+                    .map(|at| &text[i + 1..at])
+                    .filter(|inner| autolink_inner(inner))
+                {
                     Some(inner) => {
                         let len = 1 + inner.len() + 1;
                         kept.push(i..i + len);
@@ -1612,7 +2015,14 @@ fn kept_pieces(text: &str) -> Vec<std::ops::Range<usize>> {
                     None => i += 1,
                 }
             } else {
-                i += c.len_utf8();
+                // Plain text, stepped over to the next byte the scan
+                // reads. Each is ASCII, so the step ends on a character
+                // boundary, and `c` is none of them, so it advances.
+                let plain = &text.as_bytes()[i..para.end];
+                i += plain
+                    .iter()
+                    .position(|b| matches!(b, b'\n' | b'\\' | b'`' | b'$' | b'[' | b']' | b'<'))
+                    .unwrap_or(plain.len());
             }
         }
     }
@@ -1620,61 +2030,220 @@ fn kept_pieces(text: &str) -> Vec<std::ops::Range<usize>> {
 }
 
 /// How the text after an opening `$` or `$$` reads.
+#[derive(Debug, PartialEq, Eq)]
 enum Formula {
     /// A formula: the length from after the opener to the end of its
     /// closer.
     Closed(usize),
-    /// The opener is text, and the `$` at this offset could not close
-    /// it but may open a formula of its own: the scan goes on from it.
-    Opener(usize),
-    /// The opener is text, and no `$` of its kind is left on the
-    /// paragraph.
-    None,
+    /// The opener is text. `resume` is the offset of the first later `$`
+    /// that can open a formula of its own, where the scan goes on; None
+    /// when no later `$` of the paragraph can open.
+    Text { resume: Option<usize> },
 }
 
 /// Where the formula opened by a `$` or a `$$` ends, as the markdown
 /// parser reads it (pulldown-cmark 0.13.4, `src/firstpass.rs` and
-/// `src/parse.rs`): for an inline formula, a `$` closes when it does
-/// not follow whitespace and no digit follows it, which the page reads
-/// as a price; a `$` that cannot close ends the search from this
-/// opener, which is then text, and may open a formula of its own; a
-/// `$` that can neither close nor open is text and the search goes on
-/// past it. For a display formula, the next `$$` closes, a lone `$`
-/// inside being text. None when no `$` of the kind is left on the
-/// paragraph.
+/// `src/parse.rs`, its spec tests 10 and 21): braces are counted from
+/// the opener, and only a `$` at the opener's level can pair with it.
+/// An inline formula closes at the first such `$` whose previous
+/// character is not whitespace; one that cannot close makes the opener
+/// text, since a formula cannot hold a `$`. A display formula closes at
+/// the first `$$` at its level, and a lone `$` there makes the opener
+/// text. A `}` below the opener's level makes it text too. A `$` at
+/// the start of a line, past the quote markers, has no character
+/// before it and cannot close. Once the opener is text, the first `$`
+/// after it that can open, at any level, an inner one included, is
+/// where the scan resumes.
 fn formula_end(after: &str, display: bool) -> Formula {
+    let mut depth = 0i32;
+    let mut text = false;
+    let mut first_open: Option<usize> = None;
     let mut previous: Option<char> = None;
+    // A line's quote markers and the blanks among them are not its
+    // text: a `$` right after them has no character before it.
+    let mut in_prefix = false;
     let mut chars = after.char_indices();
     while let Some((i, c)) = chars.next() {
+        if in_prefix && matches!(c, '>' | ' ' | '\t') {
+            previous = None;
+            continue;
+        }
+        in_prefix = false;
         match c {
+            '\n' => {
+                previous = None;
+                in_prefix = true;
+                continue;
+            }
             '\\' => {
                 previous = chars.next().map(|(_, escaped)| escaped);
                 continue;
             }
-            '$' if display => {
-                if after[i + 1..].starts_with('$') {
-                    return Formula::Closed(i + 2);
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth < 0 {
+                    text = true;
                 }
             }
             '$' => {
-                let closes = previous.is_some_and(|p| !p.is_ascii_whitespace());
-                let price = after.as_bytes().get(i + 1).is_some_and(u8::is_ascii_digit);
-                if closes && !price {
-                    return Formula::Closed(i + 1);
+                let next = after[i + 1..].chars().next();
+                if !text && depth == 0 {
+                    if display {
+                        if next == Some('$') {
+                            return Formula::Closed(i + 2);
+                        }
+                    } else if previous.is_some_and(|p| !p.is_ascii_whitespace()) {
+                        return Formula::Closed(i + 1);
+                    }
+                    text = true;
                 }
-                let opens = after[i + 1..]
-                    .chars()
-                    .next()
-                    .is_some_and(|next| !next.is_ascii_whitespace());
-                if opens {
-                    return Formula::Opener(i);
+                if first_open.is_none() && next.is_some_and(|n| !n.is_ascii_whitespace()) {
+                    first_open = Some(i);
                 }
             }
             _ => {}
         }
+        if text && first_open.is_some() {
+            return Formula::Text { resume: first_open };
+        }
         previous = Some(c);
     }
-    Formula::None
+    Formula::Text { resume: first_open }
+}
+
+/// The `$` signs of a paragraph from its first opener on, read once
+/// with the rules of `formula_end`, so that each opener finds its
+/// answer without a scan of its own: a paragraph of many openers that
+/// cannot close costs its length, not its square.
+struct Dollars {
+    /// The offset of each sign in the text.
+    pos: Vec<usize>,
+    /// The brace level at each sign, counted from the first opener.
+    depth: Vec<i32>,
+    /// The character before each sign, None after an escape's
+    /// backslash pair, a line break or a line's quote markers.
+    prev: Vec<Option<char>>,
+    next: Vec<Option<char>>,
+    /// The offset of the first `}` after each sign that closes a brace
+    /// opened before it, `usize::MAX` when none does.
+    drop: Vec<usize>,
+    /// The index of the next sign at the same level, `usize::MAX` when
+    /// there is none.
+    same: Vec<usize>,
+    /// The index of the first sign at or after each that can open a
+    /// formula, `usize::MAX` when there is none.
+    open: Vec<usize>,
+}
+
+impl Dollars {
+    /// Reads `text`, which starts at an opener standing at `base`.
+    fn read(text: &str, base: usize) -> Dollars {
+        let mut d = Dollars {
+            pos: Vec::new(),
+            depth: Vec::new(),
+            prev: Vec::new(),
+            next: Vec::new(),
+            drop: Vec::new(),
+            same: Vec::new(),
+            open: Vec::new(),
+        };
+        let mut depth = 0i32;
+        let mut previous: Option<char> = None;
+        let mut in_prefix = false;
+        // The signs no `}` has gone below yet, their levels growing.
+        let mut pending: Vec<usize> = Vec::new();
+        let mut chars = text.char_indices();
+        while let Some((i, c)) = chars.next() {
+            if in_prefix && matches!(c, '>' | ' ' | '\t') {
+                previous = None;
+                continue;
+            }
+            in_prefix = false;
+            match c {
+                '\n' => {
+                    previous = None;
+                    in_prefix = true;
+                    continue;
+                }
+                '\\' => {
+                    previous = chars.next().map(|(_, escaped)| escaped);
+                    continue;
+                }
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    while let Some(&k) = pending.last() {
+                        if d.depth[k] <= depth {
+                            break;
+                        }
+                        d.drop[k] = base + i;
+                        pending.pop();
+                    }
+                }
+                '$' => {
+                    pending.push(d.pos.len());
+                    d.pos.push(base + i);
+                    d.depth.push(depth);
+                    d.prev.push(previous);
+                    d.next.push(text[i + 1..].chars().next());
+                    d.drop.push(usize::MAX);
+                }
+                _ => {}
+            }
+            previous = Some(c);
+        }
+        let n = d.pos.len();
+        d.same = vec![usize::MAX; n];
+        d.open = vec![usize::MAX; n];
+        let mut at_level: std::collections::HashMap<i32, usize> = std::collections::HashMap::new();
+        let mut opener = usize::MAX;
+        for k in (0..n).rev() {
+            if let Some(next) = at_level.insert(d.depth[k], k) {
+                d.same[k] = next;
+            }
+            if d.next[k].is_some_and(|c| !c.is_ascii_whitespace()) {
+                opener = k;
+            }
+            d.open[k] = opener;
+        }
+        d
+    }
+
+    /// What `formula_end` answers for the opener at `at`. None when the
+    /// table does not hold that sign, and the caller scans.
+    fn end(&self, at: usize, display: bool) -> Option<Formula> {
+        let k = self.pos.binary_search(&at).ok()?;
+        let signs = if display { 2 } else { 1 };
+        let last = k + signs - 1;
+        if self.pos.get(last) != Some(&(at + signs - 1)) {
+            return None;
+        }
+        let after = at + signs;
+        let resume = self
+            .open
+            .get(last + 1)
+            .copied()
+            .filter(|o| *o != usize::MAX)
+            .map(|o| self.pos[o] - after);
+        // The first sign at the opener's level decides, unless a `}`
+        // went below that level before it.
+        let j = self.same[last];
+        if j != usize::MAX && self.pos[j] < self.drop[last] {
+            let end = if display {
+                (self.next[j] == Some('$')).then_some(self.pos[j] + 2)
+            } else {
+                // Right after the opener nothing stands before the sign.
+                let prev = self.prev[j].filter(|_| self.pos[j] > after);
+                prev.is_some_and(|p| !p.is_ascii_whitespace())
+                    .then_some(self.pos[j] + 1)
+            };
+            if let Some(end) = end {
+                return Some(Formula::Closed(end - after));
+            }
+        }
+        Some(Formula::Text { resume })
+    }
 }
 
 /// The offset in `after` of a run of exactly `ticks` backticks, the
@@ -1693,28 +2262,68 @@ fn closing_ticks(after: &str, ticks: usize) -> Option<usize> {
 }
 
 /// The length of a link's address from after its `](` to its closing
-/// parenthesis, the parentheses inside it balanced, on its line. None
-/// when the line ends first.
+/// parenthesis, as the parser reads it: a destination between angle
+/// brackets, or one without whitespace and with its parentheses
+/// balanced; then an optional title in quotes or parentheses after
+/// whitespace; then the closing parenthesis. Whitespace, with one line
+/// break at most, may stand before and after the destination. None
+/// when the shape is not a link's, which the page then shows as text.
 fn address_end(after: &str) -> Option<usize> {
-    let mut depth = 1;
-    let mut chars = after.char_indices();
-    while let Some((i, c)) = chars.next() {
-        match c {
-            '\n' => return None,
-            '\\' => {
-                chars.next();
+    let b = after.as_bytes();
+    let space = |at: &mut usize| {
+        let mut breaks = 0;
+        while let Some(&c) = b.get(*at) {
+            match c {
+                b' ' | b'\t' => {}
+                b'\n' if breaks == 0 => breaks += 1,
+                _ => break,
             }
-            '(' => depth += 1,
-            ')' => {
-                depth -= 1;
-                if depth == 0 {
-                    return Some(i + 1);
-                }
+            *at += 1;
+        }
+    };
+    let mut at = 0;
+    space(&mut at);
+    if b.get(at) == Some(&b'<') {
+        let close = after[at + 1..].find(['>', '<', '\n'])?;
+        if b[at + 1 + close] != b'>' {
+            return None;
+        }
+        at += close + 2;
+    } else {
+        let mut depth = 0u32;
+        while let Some(&c) = b.get(at) {
+            match c {
+                b'\\' => at += 1,
+                b'(' => depth += 1,
+                b')' if depth == 0 => break,
+                b')' => depth -= 1,
+                b' ' | b'\t' | b'\n' => break,
+                c if c < 0x20 => return None,
+                _ => {}
             }
-            _ => {}
+            at += 1;
+        }
+        if depth != 0 {
+            return None;
         }
     }
-    None
+    let dest_end = at;
+    space(&mut at);
+    let close = match b.get(at) {
+        Some(b'"') if at > dest_end => Some('"'),
+        Some(b'\'') if at > dest_end => Some('\''),
+        Some(b'(') if at > dest_end => Some(')'),
+        _ => None,
+    };
+    if let Some(close) = close {
+        let end = after[at + 1..].find([close, '\n'])?;
+        if after.as_bytes()[at + 1 + end] != close as u8 {
+            return None;
+        }
+        at += end + 2;
+        space(&mut at);
+    }
+    (b.get(at) == Some(&b')')).then_some(at + 1)
 }
 
 /// Whether the text between a `<` and the next `>` is an autolink: an
@@ -1742,12 +2351,160 @@ fn autolink_inner(inner: &str) -> bool {
     scheme || inner.contains('@')
 }
 
-/// Whether the text between a `<` and the next `>` is an HTML tag: a
-/// name of letters after the `<`, or after a slash for a closing tag,
-/// then its attributes, on one line and holding no `<`.
-fn tag_inner(inner: &str) -> bool {
-    let name = inner.strip_prefix('/').unwrap_or(inner);
-    name.starts_with(|c: char| c.is_ascii_alphabetic()) && !inner.contains(['<', '\n'])
+/// What a tag candidate seeks on its line, kept between candidates so
+/// that a line is searched once for each: the line's end, and for each
+/// closer (`-->`, `?>`, `]]>`, `>`, the two quotes) where the last
+/// search began and what it found. A long line of many candidates then
+/// costs its length, not its square.
+#[derive(Default)]
+struct TagScan {
+    /// The line the last candidate stood on: where it was read from,
+    /// and its end.
+    line: (usize, usize),
+    seeks: [Seek; 6],
+}
+
+#[derive(Default, Clone, Copy)]
+struct Seek {
+    from: usize,
+    hit: Option<usize>,
+    line_end: usize,
+}
+
+impl TagScan {
+    /// The end of the line that holds `at`, before `limit`.
+    fn line_end(&mut self, text: &str, at: usize, limit: usize) -> usize {
+        let (seen, end) = self.line;
+        if end > 0 && seen <= at && at <= end && end <= limit {
+            return end;
+        }
+        let end = text[at..limit].find('\n').map_or(limit, |k| at + k);
+        self.line = (at, end);
+        end
+    }
+
+    /// The first `needle` at or after `from` on its line.
+    fn find(
+        &mut self,
+        text: &str,
+        slot: usize,
+        needle: &str,
+        from: usize,
+        limit: usize,
+    ) -> Option<usize> {
+        let line_end = self.line_end(text, from.min(limit), limit);
+        if from >= line_end {
+            return None;
+        }
+        let seek = self.seeks[slot];
+        if seek.line_end == line_end && seek.from <= from {
+            match seek.hit {
+                None => return None,
+                Some(hit) if hit >= from => return Some(hit),
+                Some(_) => {}
+            }
+        }
+        let hit = text[from..line_end].find(needle).map(|k| from + k);
+        self.seeks[slot] = Seek {
+            from,
+            hit,
+            line_end,
+        };
+        hit
+    }
+}
+
+/// The length of the raw HTML that CommonMark reads at `at` in `text`,
+/// where a `<` stands, on its line and before `limit`: an open tag (a
+/// name of a letter then letters, digits and hyphens; attributes, each
+/// after whitespace, a name of a letter, `_` or `:` then letters,
+/// digits, `_`, `.`, `:` and `-`, with an optional `=` and a value, bare
+/// or quoted; optional whitespace and `/`; then `>`), a closing tag, a
+/// comment, a processing instruction, a declaration or a CDATA section.
+/// None for anything else between angle brackets, which the page shows
+/// as text. The scan stops at the first byte off the grammar, so a
+/// `<` that starts no tag costs a byte or two, and a closer is sought
+/// through `tags`.
+fn html_tag_len(text: &str, at: usize, limit: usize, tags: &mut TagScan) -> Option<usize> {
+    let b = text.as_bytes();
+    // A byte of the candidate's line.
+    let byte = |k: usize| b[..limit].get(k).copied().filter(|c| *c != b'\n');
+    if !byte(at + 1).is_some_and(|c| c.is_ascii_alphabetic() || matches!(c, b'/' | b'!' | b'?')) {
+        return None;
+    }
+    let rest = &text[at..limit];
+    for (slot, open, close) in [(0, "<!--", "-->"), (1, "<?", "?>"), (2, "<![CDATA[", "]]>")] {
+        if rest.starts_with(open) {
+            if let Some(hit) = tags.find(text, slot, close, at + open.len(), limit) {
+                return Some(hit + close.len() - at);
+            }
+        }
+    }
+    if rest.starts_with("<!") {
+        if !byte(at + 2).is_some_and(|c| c.is_ascii_alphabetic()) {
+            return None;
+        }
+        return tags.find(text, 3, ">", at, limit).map(|hit| hit + 1 - at);
+    }
+    let space = |k: usize| byte(k).is_some_and(|c| c == b' ' || c == b'\t');
+    let closing = rest.starts_with("</");
+    let mut k = at + if closing { 2 } else { 1 };
+    if !byte(k).is_some_and(|c| c.is_ascii_alphabetic()) {
+        return None;
+    }
+    k += 1;
+    while byte(k).is_some_and(|c| c.is_ascii_alphanumeric() || c == b'-') {
+        k += 1;
+    }
+    if closing {
+        while space(k) {
+            k += 1;
+        }
+        return (byte(k) == Some(b'>')).then_some(k + 1 - at);
+    }
+    loop {
+        let before_space = k;
+        while space(k) {
+            k += 1;
+        }
+        match byte(k) {
+            Some(b'>') => return Some(k + 1 - at),
+            Some(b'/') => return (byte(k + 1) == Some(b'>')).then_some(k + 2 - at),
+            Some(c) if k > before_space && (c.is_ascii_alphabetic() || c == b'_' || c == b':') => {
+                k += 1;
+                while byte(k).is_some_and(|c| c.is_ascii_alphanumeric() || b"_.:-".contains(&c)) {
+                    k += 1;
+                }
+                let mut probe = k;
+                while space(probe) {
+                    probe += 1;
+                }
+                if byte(probe) != Some(b'=') {
+                    continue;
+                }
+                probe += 1;
+                while space(probe) {
+                    probe += 1;
+                }
+                let bare = |c: u8| !b" \t\"'=<>`".contains(&c);
+                match byte(probe) {
+                    Some(q) if q == b'"' || q == b'\'' => {
+                        let (slot, quote) = if q == b'"' { (4, "\"") } else { (5, "'") };
+                        let close = tags.find(text, slot, quote, probe + 1, limit)?;
+                        k = close + 1;
+                    }
+                    Some(c) if bare(c) => {
+                        while byte(probe).is_some_and(bare) {
+                            probe += 1;
+                        }
+                        k = probe;
+                    }
+                    _ => return None,
+                }
+            }
+            _ => return None,
+        }
+    }
 }
 
 /// The address of a reference definition at the start of a line,
@@ -1813,7 +2570,10 @@ fn in_case(pieces: &[(&str, bool)], form: CaseForm) -> String {
     for (piece, kept) in pieces {
         if *kept {
             out.push_str(piece);
-            word_start = piece.starts_with('<') && piece.ends_with('>');
+            // A tag is not on the page, and a kept block ends with its
+            // line: the text after either starts a word.
+            word_start = (piece.starts_with('<') && piece.ends_with('>'))
+                || piece.ends_with(char::is_whitespace);
             continue;
         }
         match form {
@@ -1896,7 +2656,7 @@ pub fn case_edit(
     let range = selection.or_else(|| word_at(source, caret))?;
     let kept = if markdown {
         let around = paragraphs_around(source, &range);
-        kept_pieces(&source[around.clone()])
+        kept_pieces(&source[around.clone()], above(source, around.start))
             .into_iter()
             .map(|k| around.start + k.start..around.start + k.end)
             .collect()
@@ -3348,9 +4108,219 @@ mod tests {
         assert_eq!(case_of("see $x and $y$ now"), "See $X And $y$ Now");
         assert_eq!(
             case_of("one $x then $ and y$ end"),
-            "One $x then $ and y$ End"
+            "One $X Then $ And Y$ End",
+            "a $ that cannot close makes the opener text, as the parser reads it"
         );
         assert_eq!(case_of("none $x and $y and z"), "None $X And $Y And Z");
+    }
+
+    /// The hunt's claim 8: a display formula in its usual form, on its
+    /// own lines, opens with a line break after its signs, as the
+    /// parser reads it, and with a space after them too. A lone `$`
+    /// inside makes the opener text (the parser's spec test 10).
+    #[test]
+    fn a_display_formula_opens_with_whitespace_after_its_signs() {
+        assert_eq!(case_of("see $$\nE=mc^2\n$$ now"), "See $$\nE=mc^2\n$$ Now");
+        assert_eq!(case_of("see $$ x $$ now"), "See $$ x $$ Now");
+        assert_eq!(case_of("a $$ b $ c $$ d"), "A $$ B $ C $$ D");
+    }
+
+    /// The hunt's claim 9: an opener that is text hides nothing up to
+    /// the next `$`: a code span, an address or a tag between two
+    /// prices is kept, and the dollar signs between, each unable to
+    /// open, are stepped over.
+    #[test]
+    fn the_text_between_two_prices_is_visited() {
+        assert_eq!(
+            case_of("costs $5 or `foo bar` or $6 ok"),
+            "Costs $5 Or `foo bar` Or $6 Ok"
+        );
+        assert_eq!(
+            case_of("pay $5 at [the shop](http://shop.example) or $6"),
+            "Pay $5 At [The Shop](http://shop.example) Or $6"
+        );
+        assert_eq!(
+            case_of("pay $5 <b>now</b> or $6"),
+            "Pay $5 <b>Now</b> Or $6"
+        );
+    }
+
+    /// The inline rules are the parser's (pulldown-cmark 0.13.4, its
+    /// spec tests 10 and 21): a `$` at the opener's brace level that
+    /// cannot close makes the opener text, so what the page shows as
+    /// text changes; braces hold an inner `$`; a `}` below the opener's
+    /// level ends it; a formula the parser pairs whose closer precedes
+    /// a digit is the page's currency text, the scan going on after its
+    /// closer.
+    #[test]
+    fn the_inline_rules_follow_the_parser() {
+        assert_eq!(case_of("$x $ x$"), "$X $ X$", "the parser's spec test 10");
+        assert_eq!(
+            case_of("see $\\text{Hello $x$ there!}$ now"),
+            "See $\\text{Hello $x$ there!}$ Now",
+            "the parser's spec test 21"
+        );
+        assert_eq!(
+            case_of("see $$\n\\text{Hello $x^2$}\n$$ now"),
+            "See $$\n\\text{Hello $x^2$}\n$$ Now"
+        );
+        assert_eq!(
+            case_of("$a } b$ c"),
+            "$A } B$ C",
+            "a brace below the opener's level"
+        );
+        assert_eq!(
+            case_of("from $5-$10 to x$ here"),
+            "From $5-$10 To X$ Here",
+            "the currency text, then a $ that cannot open"
+        );
+        assert_eq!(
+            case_of("a $x {$y$} z$ b"),
+            "A $x {$y$} z$ B",
+            "braces inside a formula"
+        );
+        assert_eq!(
+            case_of("a $x {$y$} z b"),
+            "A $X {$y$} Z B",
+            "the inner pair stands when the outer does not close"
+        );
+    }
+
+    /// A tag is what CommonMark reads as one: a name, attributes, a
+    /// closing tag, a comment. Text between angle brackets that is none
+    /// of these is text on the page, and its words change.
+    #[test]
+    fn text_between_angle_brackets_is_kept_only_as_a_tag() {
+        assert_eq!(
+            case_of("say <hello, world!> now"),
+            "Say <Hello, World!> Now"
+        );
+        assert_eq!(case_of("say <hello> now"), "Say <hello> Now");
+        assert_eq!(
+            case_of("a <span class=\"x\" data-k=v> b"),
+            "A <span class=\"x\" data-k=v> B"
+        );
+        assert_eq!(case_of("a <br/> b"), "A <br/> B");
+        assert_eq!(case_of("a </div > b"), "A </div > B");
+        assert_eq!(case_of("a <!-- a note --> b"), "A <!-- a note --> B");
+        assert_eq!(case_of("a <3 b"), "A <3 B");
+        assert_eq!(
+            case_of("a <x y=\"z w> b"),
+            "A <X Y=\"z W> B",
+            "an unterminated value is no tag"
+        );
+    }
+
+    /// The key cuts its paragraphs where the parser cuts its blocks: a
+    /// line that starts a block quote, a heading, a list item, a fence
+    /// or a thematic break ends the paragraph before it, so a `$` above
+    /// such a line pairs with none below it. A quote's own lines stay
+    /// one paragraph.
+    #[test]
+    fn a_paragraph_ends_where_a_block_begins() {
+        assert_eq!(case_of("$0\n>a$<"), "$0\n>A$<");
+        assert_eq!(case_of("x $a\n- b$ c"), "X $A\n- B$ C");
+        assert_eq!(case_of("x $a\n# b$ c"), "X $A\n# B$ C");
+        assert_eq!(case_of("x $a\n---\nb$ c"), "X $A\n---\nB$ C");
+        assert_eq!(
+            case_of("> $a\n> b$ c"),
+            "> $a\n> b$ C",
+            "a quote's lines are one paragraph"
+        );
+        assert_eq!(
+            case_of("- $a\n  b$ c"),
+            "- $a\n  b$ C",
+            "an item's indented continuation"
+        );
+    }
+
+    /// A link's address is the parser's: after a `](` whose `]` closes
+    /// a `[`, a destination without whitespace or between angle
+    /// brackets, an optional title; anything else is text and changes.
+    #[test]
+    fn a_link_address_has_the_parser_s_shape() {
+        assert_eq!(case_of("a](b c)"), "A](b C)", "no bracket before it");
+        assert_eq!(case_of("[]](a)"), "[]](A)", "the bracket closed before it");
+        assert_eq!(case_of("[[a]](b)"), "[[A]](b)", "nested brackets");
+        assert_eq!(
+            case_of("[a](b c)"),
+            "[A](b C)",
+            "a space in the destination"
+        );
+        assert_eq!(
+            case_of("[a](b\n) c"),
+            "[A](b\n) C",
+            "a line break before the parenthesis"
+        );
+        assert_eq!(
+            case_of("[a](\n b) c"),
+            "[A](\n b) C",
+            "whitespace before the destination"
+        );
+        assert_eq!(case_of("[a]() b"), "[A]() B", "an empty destination");
+        assert_eq!(
+            case_of("-[](](a b)"),
+            "-[](](A B)",
+            "a ]( that is no link closes its bracket"
+        );
+        assert_eq!(case_of("[a](b \"t x\")"), "[A](b \"t x\")", "a title");
+        assert_eq!(
+            case_of("[a](<b c>)"),
+            "[A](<b c>)",
+            "a destination in brackets"
+        );
+        assert_eq!(case_of("![alt](p.png)"), "![Alt](p.png)");
+    }
+
+    /// The key cuts its paragraphs where the parser cuts its blocks,
+    /// once more: a list's next item, whatever its number, begins a
+    /// block, a numbered line after a paragraph's line does not (it is
+    /// read as the paragraph's), and an indented code block is kept
+    /// whole.
+    #[test]
+    fn a_list_s_next_item_and_an_indented_block_are_read_as_the_page_reads_them() {
+        assert_eq!(case_of("1. $a\n2. b$ c"), "1. $A\n2. B$ C");
+        assert_eq!(case_of("x $a\n2. b$ c"), "X $a\n2. b$ C", "a lazy line");
+        assert_eq!(
+            case_of("x\n\n    code here\n\ntext"),
+            "X\n\n    code here\n\nText"
+        );
+        assert_eq!(
+            case_of("    code\ntext"),
+            "    code\nText",
+            "the block ends before the line"
+        );
+        assert_eq!(
+            case_of("x $a\n*\nb$ c"),
+            "X $a\n*\nb$ C",
+            "a bare marker after a paragraph's line is its text"
+        );
+        assert_eq!(
+            case_of("> $a\n*\nb$ c"),
+            "> $A\n*\nB$ C",
+            "after a quote's line it ends the quote"
+        );
+        assert_eq!(
+            case_of(">$a\n>$[ b"),
+            ">$A\n>$[ B",
+            "a $ past the quote marker has nothing before it"
+        );
+        assert_eq!(
+            case_of("> $a\n=\nb$ c"),
+            "> $a\n=\nb$ C",
+            "a line of = after a quote's line is the quote's text"
+        );
+        assert_eq!(case_of("> $a\n--\nb$ c"), "> $a\n--\nb$ C");
+        assert_eq!(
+            case_of("> $a\n2. b$ c"),
+            "> $A\n2. B$ C",
+            "any numbered item ends the quote"
+        );
+        assert_eq!(
+            case_of("> x\n$a\n> b$ c"),
+            "> X\n$a\n> b$ C",
+            "a quoted line after a lazy one is the same paragraph"
+        );
     }
 
     /// A press on a table of two hundred thousand rows holding a `<`
@@ -3485,9 +4455,74 @@ mod tests {
         );
         assert_eq!(
             case_of("fn Main() {}\n```\nSome `x` Text"),
-            "fn main() {}\n```\nsome `x` text",
-            "a fence with no closer in the paragraph is no code, the span after it is"
+            "fn main() {}\n```\nSome `x` Text",
+            "a fence with no closer is code to the end, as the page shows it"
         );
+    }
+
+    #[test]
+    fn a_fence_line_indented_four_columns_does_not_close_its_block() {
+        assert_eq!(
+            case_of("```\n    ```\nlet Code = 1;\n```\n\nafter The Text"),
+            "```\n    ```\nlet Code = 1;\n```\n\nafter the text",
+            "the indented fence line is code"
+        );
+        assert_eq!(
+            case_of("```\n\t```\nlet Code = 1;\n```\n\nafter The Text"),
+            "```\n\t```\nlet Code = 1;\n```\n\nafter the text",
+            "a tab is four columns"
+        );
+        assert_eq!(
+            case_of("```\nlet A = 1;\n   ```\n\nafter The Text"),
+            "```\nlet A = 1;\n   ```\n\nafter the text",
+            "three columns still close"
+        );
+        assert_eq!(
+            case_of("- an Item\n  ```\n  One\n      ```\n  Two\n  ```\n  more Text"),
+            "- an item\n  ```\n  One\n      ```\n  Two\n  ```\n  more text",
+            "the four columns are counted from the item's text"
+        );
+        let md = "```\n    ```\n```\n\nText\n\n```\nlet Code = 1;\n```\n";
+        let at = md.find("Code").unwrap() + 1;
+        assert!(
+            case_edit(md, None, at, true).is_none(),
+            "the word under the caret is code"
+        );
+    }
+
+    #[test]
+    fn a_tab_before_a_fence_line_continues_the_paragraph() {
+        assert_eq!(
+            case_of("a Word\n    ```\n    Four Spaces In\n\t```"),
+            "a word\n    ```\n    Four Spaces In\n\t```",
+            "the two runs of backticks are one code span, as on the page"
+        );
+    }
+
+    #[test]
+    fn a_fence_left_open_in_a_list_item_ends_with_the_item() {
+        assert_eq!(
+            case_of("- a Step One:\n  ```\n  make Install\n\nafter The List"),
+            "- a step one:\n  ```\n  make Install\n\nafter the list"
+        );
+        assert_eq!(
+            case_of("- an Item\n  ```\n  One\n\n  Two\n  ```\n\nafter The End"),
+            "- an item\n  ```\n  One\n\n  Two\n  ```\n\nafter the end",
+            "a blank line stays in the item's fence"
+        );
+        assert_eq!(
+            case_of("- an Item\n  ```\n  Code\n```\nMore Code\n```\nafter The End"),
+            "- an item\n  ```\n  Code\n```\nMore Code\n```\nafter the end",
+            "a fence line at the margin ends the item and opens a block"
+        );
+        assert_eq!(
+            case_of("- an Item\n  - a Nested\n    ```\n    Code\n  back In The Item"),
+            "- an item\n  - a nested\n    ```\n    Code\n  back in the item",
+            "the nested item's fence ends where the nested item does"
+        );
+        let md = "- Step one:\n  ```\n  make\n\nAfter The List\n";
+        let at = md.find("After").unwrap() + 1;
+        assert!(case_edit(md, None, at, true).is_some());
     }
 
     #[test]
@@ -3521,5 +4556,113 @@ mod tests {
         let took = start.elapsed();
         println!("the case key on 960 KB of unclosed links: {took:?}");
         assert!(took < std::time::Duration::from_secs(2), "{took:?}");
+    }
+
+    #[test]
+    fn the_code_of_a_fenced_block_is_kept() {
+        assert_eq!(
+            case_of("Intro text\n\n```\nlet X = 1;\n```\n"),
+            "intro text\n\n```\nlet X = 1;\n```\n"
+        );
+        assert_eq!(
+            case_of("Intro text\n~~~rust\nlet X = 1;\n\nlet Y = 2;\n~~~\nAfter It\n"),
+            "intro text\n~~~rust\nlet X = 1;\n\nlet Y = 2;\n~~~\nafter it\n"
+        );
+    }
+
+    #[test]
+    fn an_indented_paragraph_of_a_list_item_is_text() {
+        assert_eq!(
+            case_of("1. First item\n\n    Second paragraph\n"),
+            "1. first item\n\n    second paragraph\n"
+        );
+        assert_eq!(
+            case_of("- Item\n\n    - Nested item\n"),
+            "- item\n\n    - nested item\n"
+        );
+        assert_eq!(
+            case_of("Plain text\n\n    Indented Code\n"),
+            "plain text\n\n    Indented Code\n",
+            "after a paragraph, four spaces are code"
+        );
+    }
+
+    #[test]
+    fn the_case_key_on_many_dollars_with_open_braces_costs_its_length() {
+        let s = "${a ".repeat(50_000);
+        let start = std::time::Instant::now();
+        let _ = case_edit(&s, Some(0..s.len()), s.len(), true);
+        let took = start.elapsed();
+        println!("the case key on 50,000 dollars with an open brace: {took:?}");
+        assert!(took < std::time::Duration::from_secs(1), "{took:?}");
+    }
+
+    #[test]
+    fn the_case_key_on_a_long_line_of_tags_costs_its_length() {
+        let s = "<b>x</b> ".repeat(50_000);
+        let start = std::time::Instant::now();
+        let _ = case_edit(&s, Some(0..s.len()), s.len(), true);
+        let took = start.elapsed();
+        println!("the case key on one line of 100,000 tags: {took:?}");
+        assert!(took < std::time::Duration::from_secs(1), "{took:?}");
+    }
+
+    #[test]
+    fn the_word_under_the_caret_reads_the_lines_above_it() {
+        // Inside a fence, after a blank line of the code: not the key's.
+        let fenced = "Intro\n\n```\nlet a = 1;\n\nlet Word = 2;\n```\n";
+        let at = fenced.find("Word").unwrap() + 1;
+        assert!(case_edit(fenced, None, at, true).is_none());
+        // A list item's second paragraph: text.
+        let item = "- First\n\n    SEcond paragraph\n";
+        let at = item.find("SEcond").unwrap() + 1;
+        let edit = case_edit(item, None, at, true).expect("a change");
+        assert_eq!(edit.text, "second");
+        // Four columns past the item's text: code inside the item.
+        let code = "- First\n\n      Code Here\n";
+        let at = code.find("Code").unwrap() + 1;
+        assert!(case_edit(code, None, at, true).is_none());
+        // After the fence closes, text again.
+        let after = "```\nCode\n```\nAFter\n";
+        let at = after.find("AFter").unwrap() + 1;
+        assert_eq!(
+            case_edit(after, None, at, true).expect("a change").text,
+            "after"
+        );
+    }
+
+    #[test]
+    fn the_table_of_dollars_answers_as_the_scan() {
+        let alphabet = ['$', '$', '{', '}', '\\', ' ', '\n', '>', 'a', '1', '$'];
+        let mut seed = 0x2545_f491_4f6c_dd1du64;
+        let mut next = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        let mut compared = 0;
+        for _ in 0..20_000 {
+            let len = 1 + (next() % 24) as usize;
+            let s: String = (0..len)
+                .map(|_| alphabet[(next() % alphabet.len() as u64) as usize])
+                .collect();
+            let Some(first) = s.find('$') else { continue };
+            let table = Dollars::read(&s[first..], first);
+            for &at in &table.pos {
+                let display = s[at..].starts_with("$$");
+                let signs = if display { 2 } else { 1 };
+                let Some(found) = table.end(at, display) else {
+                    continue;
+                };
+                assert_eq!(
+                    found,
+                    formula_end(&s[at + signs..], display),
+                    "{s:?} at {at}"
+                );
+                compared += 1;
+            }
+        }
+        assert!(compared > 20_000, "{compared}");
     }
 }

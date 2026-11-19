@@ -18,6 +18,9 @@ pub enum Action {
     RenamedTheme { from: String, to: String },
     /// Open the theme editor on a file.
     EditTheme(PathBuf),
+    /// A line for the notice bar: a theme that could not be saved, with
+    /// the reason. The overlay stays open.
+    Notice(String),
     /// Restyle with an in-memory theme, without persisting anything.
     PreviewTheme(Box<Theme>),
     /// Persist the export settings, then export with them.
@@ -233,7 +236,9 @@ pub const SCRIM: Rgba = Rgba {
 
 pub trait Overlay {
     /// Paints the overlay; geometry may be cached for hit testing.
-    fn draw(&mut self, painter: &mut Painter, theme: &Theme);
+    /// `caret_lit` is the blink's lit half while a text field of the
+    /// overlay has the keys: the field paints its caret only then.
+    fn draw(&mut self, painter: &mut Painter, theme: &Theme, caret_lit: bool);
     fn key(&mut self, key: &Key, ctrl: bool, shift: bool) -> OverlayResult;
     /// Left click at window coordinates.
     fn click(&mut self, x: f32, y: f32) -> OverlayResult;
@@ -260,6 +265,11 @@ pub trait Overlay {
     fn refine_at(&self) -> Option<std::time::Instant> {
         None
     }
+    /// Whether one of the overlay's text fields is open and has the
+    /// keys, so the app runs the blink for its caret.
+    fn field_has_keys(&self) -> bool {
+        false
+    }
 }
 
 #[cfg(test)]
@@ -272,7 +282,7 @@ mod tests {
         /// placeless path, the way the panels do.
         struct Panels(i32);
         impl Overlay for Panels {
-            fn draw(&mut self, _painter: &mut Painter, _theme: &Theme) {}
+            fn draw(&mut self, _painter: &mut Painter, _theme: &Theme, _caret_lit: bool) {}
             fn key(&mut self, _key: &Key, _ctrl: bool, _shift: bool) -> OverlayResult {
                 OverlayResult::Open
             }

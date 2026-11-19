@@ -383,6 +383,7 @@ pub fn draw_field_row(
         fw - 6.0,
         placeholder,
         owns_keys,
+        /* caret_lit */ true,
         previous_start,
     );
     match state.view {

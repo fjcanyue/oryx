@@ -10,6 +10,11 @@ check:
 	cargo build --workspace
 	cargo test --workspace
 
+# The fuzzers, ignored under check, in the debug profile where the
+# assertions fire; PROPTEST_CASES=5000 for a deep run.
+fuzz:
+	cargo test --workspace fuzz_ -- --ignored
+
 audit:
 	@command -v cargo-audit >/dev/null || { echo "cargo-audit is not installed: cargo install cargo-audit"; exit 1; }
 	cargo audit
@@ -21,6 +26,7 @@ release: audit
 	@command -v nfpm >/dev/null || { echo "nfpm is not installed: it builds the .deb and the .rpm"; exit 1; }
 	@command -v appimagetool >/dev/null || { echo "appimagetool is not installed: see the Tools section of internal/releasing.md"; exit 1; }
 	@command -v patchelf >/dev/null || { echo "patchelf is not installed: it gives the AppImage's binary the path of its bundled libraries"; exit 1; }
+	@command -v zsyncmake >/dev/null || { echo "zsync is not installed: zsyncmake writes the update file of the AppImage"; exit 1; }
 	sh packaging/build-linux.sh
 	cargo build --release --target x86_64-pc-windows-gnu
 	rm -rf release
@@ -58,10 +64,10 @@ bump:
 
 install:
 	cargo build --release
-	mkdir -p ~/.local/bin ~/.local/share/oryx
+	mkdir -p ~/.local/bin ~/.local/share/oryx/themes
 	install -m 755 target/release/oryx ~/.local/bin/oryx
-	rm -rf ~/.local/share/oryx/themes ~/.local/share/oryx/examples
-	cp -r themes ~/.local/share/oryx/themes
+	cp themes/*.toml ~/.local/share/oryx/themes/
+	rm -rf ~/.local/share/oryx/examples
 	cp -r examples ~/.local/share/oryx/examples
 	~/.local/bin/oryx --register
 

@@ -411,7 +411,7 @@ pub fn paginate(doc: &Document, layout: &LayoutDoc, geometry: &PageGeometry) -> 
             runs: cursor..end,
             images: carried
                 .iter()
-                .map(|index| scaled(&layout.images[*index], content))
+                .map(|index| scaled(doc, layout, &layout.images[*index], content))
                 .collect(),
             rects: Vec::new(),
             math: layout.math_glyphs[math_cursor..math_end].to_vec(),
@@ -598,9 +598,15 @@ impl Paginator {
             return None;
         }
         // An item taller than the whole content box is placed anyway.
-        if j == i {
+        // The forced break was read over an empty page, where its "none"
+        // is `i`: it follows the item, or the page would close empty and
+        // the pass would never leave it.
+        let forced = if j == i {
             j = i + 1;
-        }
+            forced.max(j)
+        } else {
+            forced
+        };
         if forced < j {
             // A chapter seam is always an acceptable break; the taste
             // rules never move it, but the page still waits until its
@@ -631,7 +637,7 @@ impl Paginator {
         let images: Vec<ImagePlace> = self.items[i..j]
             .iter()
             .flat_map(|item| item.images.iter())
-            .map(|index| scaled(&layout.images[*index], content))
+            .map(|index| scaled(doc, layout, &layout.images[*index], content))
             .collect();
         for item in &self.items[i..j] {
             for &image in &item.images {
@@ -797,13 +803,23 @@ impl Paginator {
 }
 
 /// An image taller than a whole page cannot be moved anywhere useful, so
-/// it is scaled to the content box and keeps its aspect.
-fn scaled(image: &ImagePlace, content: f32) -> ImagePlace {
+/// it is scaled to the content box and keeps its aspect. The width it
+/// loses goes where its block's alignment puts the room: half on each
+/// side of a centered image, all at the left of one placed right, so
+/// the image stays where the page shows it.
+fn scaled(doc: &Document, layout: &LayoutDoc, image: &ImagePlace, content: f32) -> ImagePlace {
     let mut placed = image.clone();
     if placed.height > content {
         let scale = content / placed.height;
+        let lost = placed.width * (1.0 - scale);
         placed.width *= scale;
         placed.height *= scale;
+        let factor = layout
+            .block_at(image.y + image.height / 2.0)
+            .and_then(|block| doc.blocks.get(block))
+            .and_then(|block| block.align_factor())
+            .unwrap_or(0.0);
+        placed.x += factor * lost;
     }
     placed
 }

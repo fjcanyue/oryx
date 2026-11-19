@@ -46,6 +46,8 @@ chmod +x Oryx-*-x86_64.AppImage
 ./Oryx-*-x86_64.AppImage
 ```
 
+You can update it in place with AppImageUpdate, AppImageLauncher or Gear Lever.
+
 ### Tarball
 
 `oryx-<version>-linux-x86_64.tar.gz` installs Oryx in your home folder, without root:
@@ -56,7 +58,7 @@ cd oryx
 ./install.sh
 ```
 
-It puts the binary in `~/.local/bin` and the themes and examples in `~/.local/share/oryx`, and registers the file types. `./install.sh --uninstall` removes it.
+It puts the binary in `~/.local/bin` and the themes and examples in `~/.local/share/oryx`, and registers the file types. `./install.sh --uninstall` removes it. Your own themes stay in `~/.local/share/oryx/themes`.
 
 If you later switch from the tarball or from `make install` to a package, run `./install.sh --uninstall` first (in the repository, the script is `packaging/install.sh`). Otherwise the copy in your home folder comes first on the `PATH` and in the launcher, and you keep running the old one.
 
@@ -66,7 +68,7 @@ The Linux packages, the AppImage and the tarball need glibc 2.35 and OpenSSL 3. 
 
 Oryx uses OpenSSL to download remote images, such as the badges at the top of a README. On a system without OpenSSL 3, Oryx does not start.
 
-On X11, Oryx also needs the keyboard library `libxkbcommon-x11`. The deb and the rpm install it, and the AppImage carries its own copy. With the tarball, install the package yourself: `libxkbcommon-x11-0` on Debian and Ubuntu, `libxkbcommon-x11` on Fedora and Arch. Without it, Oryx says so and does not start.
+On X11, Oryx also needs the keyboard library `libxkbcommon-x11`. The deb and the rpm install it, and the AppImage includes it. With the tarball, install the package yourself: `libxkbcommon-x11-0` on Debian and Ubuntu, `libxkbcommon-x11` on Fedora and Arch. Without it, Oryx says so and does not start.
 
 ## Building from source
 

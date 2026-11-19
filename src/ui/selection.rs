@@ -10,6 +10,7 @@ use std::cmp::Ordering;
 use cosmic_text::{Attrs, Buffer, Family, LayoutGlyph, Metrics, Shaping, Style, Weight};
 
 use crate::doc::model::{BlockKind, Document, Span};
+use crate::edit::caret;
 use crate::layout::{metrics, LayoutDoc, TextRef, TextRun};
 use crate::style::fonts::FontStore;
 
@@ -323,9 +324,27 @@ fn source_edge(doc: &Document, pos: &ModelPos, edge: Edge) -> usize {
     let Some(spans) = kind_spans(&block.kind) else {
         return whole(edge);
     };
-    let Some(span) = spans.get(pos.span).filter(|s| !s.range.is_empty()) else {
+    let Some(span) = spans.get(pos.span) else {
         return whole(edge);
     };
+    // A span the reader made, with no source of its own (the comma
+    // between two footnote references, the glyphs of a `<q>`): the edge
+    // is the nearest source beside it, after it for a start and before
+    // it for an end.
+    if span.range.is_empty() {
+        let beside = match edge {
+            Edge::Start => spans[pos.span..]
+                .iter()
+                .find(|s| !s.range.is_empty())
+                .map(|s| s.range.start as usize),
+            Edge::End => spans[..pos.span]
+                .iter()
+                .rev()
+                .find(|s| !s.range.is_empty())
+                .map(|s| s.range.end as usize),
+        };
+        return beside.unwrap_or_else(|| whole(edge));
+    }
     let text_len = span.text(&doc.source).len();
     let at_block_edge = match edge {
         Edge::Start => pos.span == 0 && pos.byte == 0,
@@ -497,36 +516,27 @@ pub fn word_at(doc: &Document, pos: ModelPos) -> Option<Selection> {
         flat.push_str(text);
     }
     let at = at?;
-    let next_c = flat[at..].chars().next();
-    let prev_c = flat[..at].chars().next_back();
-    let anchor = match (next_c, prev_c) {
-        (Some(n), Some(p)) if word_class(n) != 0 && word_class(p) == 0 => p,
-        (Some(n), _) => n,
-        (None, Some(p)) => p,
+    // The anchor's class: the character after the click, or the one
+    // before it when the one after starts no word and the one before is
+    // in one; an attaching character answers its owner's class.
+    let next = caret::class_at(&flat, at, word_class);
+    let prev = caret::class_before(&flat, at, word_class);
+    let (class, forward) = match (next, prev) {
+        (Some(n), Some(p)) if n != 0 && p == 0 => (p, false),
+        (Some(n), _) => (n, true),
+        (None, Some(p)) => (p, false),
         (None, None) => return None,
     };
-    let class = word_class(anchor);
-    let (mut start, mut end) = (at, at);
-    if class == 2 {
-        if next_c == Some(anchor) {
-            end += anchor.len_utf8();
-        } else {
-            start -= anchor.len_utf8();
-        }
+    let (start, end) = if class == 2 {
+        // A symbol stands alone, with the characters attached to it.
+        let cluster = caret::cluster(&flat, at, forward);
+        (cluster.start, cluster.end)
     } else {
-        while let Some(c) = flat[..start].chars().next_back() {
-            if word_class(c) != class {
-                break;
-            }
-            start -= c.len_utf8();
-        }
-        while let Some(c) = flat[end..].chars().next() {
-            if word_class(c) != class {
-                break;
-            }
-            end += c.len_utf8();
-        }
-    }
+        (
+            caret::class_run_start(&flat, at, &class, word_class),
+            caret::class_run_end(&flat, at, &class, word_class),
+        )
+    };
     let locate = |flat_pos: usize| {
         let mut idx = 0;
         for (i, base) in bases.iter().enumerate() {
@@ -724,13 +734,84 @@ pub fn rects_window(
     rects_for(sel, lay, doc, fonts, cache, head.chain(tail))
 }
 
-/// The y position and size of the first placed run overlapping each
-/// match: one walk over the runs with a binary search into the sorted
-/// matches. A match with no placed run answers with its recorded block
-/// top from the layout's table, so a windowed layout still positions
-/// every match; `f32::MAX` only where nothing was ever placed.
+/// The rectangles of the matches that reach between `lo` and `hi`, each
+/// with its match's index, what the search and the lit occurrences
+/// paint. A match taller than the band, the whole of a source view, is
+/// kept by any of its lines, wherever its top stands. Bounding the geometry to a window around the view
+/// keeps thousands of matches cheap, and one shaped buffer per run
+/// serves every match the run holds.
+pub fn window_rects(
+    lay: &LayoutDoc,
+    doc: &Document,
+    fonts: &mut FontStore,
+    matches: &[Selection],
+    lo: f32,
+    hi: f32,
+) -> Vec<(usize, (f32, f32, f32, f32))> {
+    let held = held_matches(lay, doc, matches);
+    let near = &matches[held.clone()];
+    let mut rects = Vec::new();
+    let mut shaped = ShapeCache::default();
+    let spans = match_spans(lay, doc, near);
+    for (offset, m) in near.iter().enumerate() {
+        let (top, bottom) = spans[offset];
+        if bottom < lo || top > hi {
+            continue;
+        }
+        for rect in rects_window(m, lay, doc, fonts, &mut shaped, lo, hi) {
+            rects.push((held.start + offset, rect));
+        }
+    }
+    rects
+}
+
+/// The matches the layout's placed runs can give a rectangle: those
+/// overlapping the model positions the runs cover, both ends included,
+/// so a match of line breaks beside a run's end is in. The others have
+/// no run to be drawn on, and a rebuild skips them before it looks up
+/// their tops. `matches` is in document order and its matches do not
+/// overlap, so their ends are in order too.
+pub fn held_matches(
+    lay: &LayoutDoc,
+    doc: &Document,
+    matches: &[Selection],
+) -> std::ops::Range<usize> {
+    let mut held: Option<(ModelPos, ModelPos)> = None;
+    for (index, run) in lay.runs.iter().enumerate() {
+        let Some((start, mut end)) = run_interval(run) else {
+            continue;
+        };
+        end.byte = end
+            .byte
+            .saturating_add(run_tail(lay, doc, index, run).len());
+        held = Some(match held {
+            None => (start, end),
+            Some((first, last)) => (first.min(start), last.max(end)),
+        });
+    }
+    let Some((first, last)) = held else {
+        return 0..0;
+    };
+    let from = matches.partition_point(|m| m.ordered().1 < first);
+    let to = matches.partition_point(|m| m.ordered().0 <= last).max(from);
+    from..to
+}
+
+/// The top of each match, the first value of `match_spans`.
 pub fn match_tops(lay: &LayoutDoc, doc: &Document, matches: &[Selection]) -> Vec<f32> {
-    let mut tops = vec![f32::MAX; matches.len()];
+    match_spans(lay, doc, matches)
+        .into_iter()
+        .map(|(top, _)| top)
+        .collect()
+}
+
+/// The height each match covers: the y of the first and of the last
+/// placed run it overlaps, in one walk over the runs with a binary
+/// search into the sorted matches. A match with no placed run answers
+/// with its recorded block top for both, so a windowed layout still
+/// positions every match; `f32::MAX` only where nothing was ever placed.
+pub fn match_spans(lay: &LayoutDoc, doc: &Document, matches: &[Selection]) -> Vec<(f32, f32)> {
+    let mut spans = vec![(f32::MAX, f32::MIN); matches.len()];
     for (index, run) in lay.runs.iter().enumerate() {
         let Some((iv_start, mut iv_end)) = run_interval(run) else {
             continue;
@@ -745,19 +826,18 @@ pub fn match_tops(lay: &LayoutDoc, doc: &Document, matches: &[Selection]) -> Vec
                 break;
             }
             if b > iv_start {
-                tops[i] = tops[i].min(run.y);
+                spans[i] = (spans[i].0.min(run.y), spans[i].1.max(run.y));
             }
         }
     }
-    for (top, m) in tops.iter_mut().zip(matches) {
-        if *top == f32::MAX {
+    for (span, m) in spans.iter_mut().zip(matches) {
+        if span.0 == f32::MAX {
             let pos = m.ordered().0;
-            if let Some(y) = lay.approx_top(pos.block, pos.span) {
-                *top = y;
-            }
+            let y = lay.approx_top(pos.block, pos.span).unwrap_or(f32::MAX);
+            *span = (y, y);
         }
     }
-    tops
+    spans
 }
 
 /// Where the current match sits: the topmost overlapping run's y and
@@ -1525,6 +1605,25 @@ mod tests {
     }
 
     #[test]
+    fn a_double_click_takes_a_joined_emoji_whole() {
+        let doc = markdown::parse("see \u{1f469}\u{200d}\u{1f4bb} now");
+        let pos = ModelPos {
+            block: 0,
+            span: 0,
+            byte: 4,
+        };
+        let sel = word_at(&doc, pos).expect("the emoji under the cursor");
+        assert_eq!(plain_text(&sel, &doc), "\u{1f469}\u{200d}\u{1f4bb}");
+        let inside = ModelPos {
+            block: 0,
+            span: 0,
+            byte: 11,
+        };
+        let sel = word_at(&doc, inside).expect("from inside the sequence");
+        assert_eq!(plain_text(&sel, &doc), "\u{1f469}\u{200d}\u{1f4bb}");
+    }
+
+    #[test]
     fn double_click_on_space_punctuation_and_word_ends() {
         let doc = markdown::parse("one   two , three");
         let sel = word_at(
@@ -2099,6 +2198,94 @@ mod tests {
         );
     }
 
+    /// On a page the layout holds one screen of, a rebuild of the boxes
+    /// looks at the matches of the held paragraphs alone, a few of the
+    /// page's, and finds the boxes it finds from every match.
+    #[test]
+    fn the_boxes_come_from_the_held_matches_alone() {
+        let page: String = (0..400)
+            .map(|n| format!("Paragraph {n} with lorem and more lorem.\n\n"))
+            .collect();
+        let doc = markdown::parse(page.as_str());
+        let theme = Theme::default_dark();
+        let cfg = ViewConfig::default();
+        let mut fonts = FontStore::new();
+        let mut media = MediaCache::offline(PathBuf::from("."));
+        let (mut l, mut pass) = crate::layout::layout_begin(&doc, &cfg, 1000.0);
+        pass.retain_around(0.0, 600.0);
+        crate::layout::layout_more(
+            &doc, &theme, &mut fonts, &mut media, &cfg, &mut l, &mut pass, None,
+        );
+        let scroll = l.height / 2.0;
+        crate::layout::window_to(
+            &doc, &theme, &mut fonts, &mut media, &cfg, &mut l, None, scroll, 600.0, false,
+        );
+        l.index_more();
+        let matches = crate::ui::search::matches(&doc, "lorem");
+        let held = held_matches(&l, &doc, &matches);
+        assert!(
+            !held.is_empty() && held.len() * 10 < matches.len(),
+            "{held:?} of {} matches",
+            matches.len()
+        );
+        // The referee: every match's span looked up, then the same filter.
+        let (lo, hi) = (scroll - 1200.0, scroll + 1800.0);
+        let spans = match_spans(&l, &doc, &matches);
+        let mut shaped = ShapeCache::default();
+        let mut all = Vec::new();
+        for (index, m) in matches.iter().enumerate() {
+            let (top, bottom) = spans[index];
+            if bottom < lo || top > hi {
+                continue;
+            }
+            for rect in rects_window(m, &l, &doc, &mut fonts, &mut shaped, lo, hi) {
+                all.push((index, rect));
+            }
+        }
+        assert!(!all.is_empty(), "the screen held has boxes");
+        assert_eq!(window_rects(&l, &doc, &mut fonts, &matches, lo, hi), all);
+    }
+
+    /// A match taller than the band around the view, the whole of a
+    /// code file here, keeps its boxes on the screen wherever its top
+    /// stands: scrolled down step by step, the layout still holds lines
+    /// far above the view, where the match begins.
+    #[test]
+    fn a_match_taller_than_the_band_keeps_its_boxes_on_screen() {
+        let text: String = (0..600)
+            .map(|n| format!("line {n} of the file\n"))
+            .collect();
+        let doc = crate::doc::load::code_document(None, &text);
+        let theme = Theme::default_dark();
+        let cfg = ViewConfig::default();
+        let mut fonts = FontStore::new();
+        let mut media = MediaCache::offline(PathBuf::from("."));
+        let (mut l, mut pass) = crate::layout::layout_begin(&doc, &cfg, 1000.0);
+        pass.retain_around(0.0, 600.0);
+        crate::layout::layout_more(
+            &doc, &theme, &mut fonts, &mut media, &cfg, &mut l, &mut pass, None,
+        );
+        let mut scroll = 0.0;
+        while scroll < l.height / 2.0 {
+            scroll += 300.0;
+            crate::layout::window_to(
+                &doc, &theme, &mut fonts, &mut media, &cfg, &mut l, None, scroll, 600.0, false,
+            );
+            l.index_more();
+        }
+        let matches = crate::ui::search::regex_matches(&doc, r"[\s\S]+").expect("valid");
+        assert_eq!(matches.len(), 1, "the whole file is one match");
+        let (lo, hi) = (scroll - 1200.0, scroll + 1800.0);
+        let rects = window_rects(&l, &doc, &mut fonts, &matches, lo, hi);
+        assert!(
+            rects
+                .iter()
+                .any(|(_, (_, y, _, h))| *y < scroll + 600.0 && *y + *h > scroll),
+            "a box on the screen at {scroll}: {} boxes",
+            rects.len()
+        );
+    }
+
     #[test]
     fn the_current_match_anchors_on_a_trailing_space() {
         let (doc, l, _fonts) = lay_doc("```\nalpha beta   \ngamma\n```\n");
@@ -2257,6 +2444,58 @@ mod tests {
             y0 + h0
         );
         assert!((w1 - w0).abs() < 0.6);
+    }
+
+    /// The read of 10/11/2026: the raised comma between two footnote
+    /// references has no source of its own, and a selection that starts
+    /// or ends on it takes the reference beside it, not the paragraph.
+    #[test]
+    fn a_markdown_copy_from_the_footnote_comma_takes_the_reference_beside_it() {
+        let doc = crate::doc::markdown::parse(
+            "first line words here\nsecond line w[^a][^b] tail words\nthird line end\n\n[^a]: one\n\n[^b]: two\n",
+        );
+        let BlockKind::Paragraph { spans } = &doc.blocks[0].kind else {
+            panic!("{:?}", doc.blocks[0].kind)
+        };
+        let comma = spans
+            .iter()
+            .position(|s| s.text(&doc.source) == ",")
+            .expect("the comma");
+        let tail = comma + 2;
+        let from_comma = Selection {
+            start: ModelPos {
+                block: 0,
+                span: comma,
+                byte: 0,
+            },
+            end: ModelPos {
+                block: 0,
+                span: tail,
+                byte: 3,
+            },
+        };
+        // The text after the reference holds a line break, so its end
+        // rounds out to the span, as for any such span.
+        assert_eq!(
+            markdown(&from_comma, &doc),
+            "[^b] tail words\nthird line end"
+        );
+        let to_comma = Selection {
+            start: ModelPos {
+                block: 0,
+                span: 0,
+                byte: 22,
+            },
+            end: ModelPos {
+                block: 0,
+                span: comma,
+                byte: 1,
+            },
+        };
+        assert_eq!(
+            markdown(&to_comma, &doc),
+            "first line words here\nsecond line w[^a]"
+        );
     }
 
     #[test]

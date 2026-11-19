@@ -101,10 +101,11 @@ pub fn rendered_document(kind: FileKind, text: &str) -> Document {
 /// their old colors as far as they still cover the row, and the rest of
 /// the row reads plain until the worker corrects it: the engine draws
 /// only spanned bytes, so carried spans must tile a row to its end or
-/// its tail would vanish. A plain file keeps its fresh parse's
-/// full-line spans, since no worker follows to correct a carried one.
-/// `old_touched` and `new_touched` are the edit's line ranges before
-/// and after.
+/// its tail would vanish. Rows past the colored prefix stay absent, as
+/// `splice_document` leaves them, the touched rows among them. A block
+/// with no grammar, a plain file among them, carries no colors and
+/// comes back fresh. `old_touched` and `new_touched` are the edit's line
+/// ranges before and after.
 pub fn reparse(
     kind: FileKind,
     current: &str,
@@ -130,7 +131,14 @@ pub fn reparse(
         }
         _ => load::text_document(current),
     };
-    if new.plain_file {
+    let grammar = matches!(
+        new.blocks.first().map(|b| &b.kind),
+        Some(BlockKind::CodeBlock {
+            language: Some(_),
+            ..
+        })
+    );
+    if new.plain_file || !grammar {
         return new;
     }
     let empty = Vec::new();
@@ -147,24 +155,29 @@ pub fn reparse(
         ..
     }) = new.blocks.first_mut().map(|b| &mut b.kind)
     {
-        let mut carried = old_high[..old_touched.start.min(old_high.len())].to_vec();
-        for i in 0..new_touched.len() {
-            let mut spans = old_high
-                .get(old_touched.start + i)
-                .filter(|_| old_touched.start + i < old_touched.end)
-                .cloned()
-                .unwrap_or_default();
-            let line_index = new_touched.start + i;
-            if line_index < lines.len() {
-                cover_row(&mut spans, lines.line(current, line_index));
-            } else {
-                spans.clear();
+        let mut carried = if old_touched.start >= old_high.len() {
+            old_high.to_vec()
+        } else {
+            let mut carried = old_high[..old_touched.start].to_vec();
+            for i in 0..new_touched.len() {
+                let mut spans = old_high
+                    .get(old_touched.start + i)
+                    .filter(|_| old_touched.start + i < old_touched.end)
+                    .cloned()
+                    .unwrap_or_default();
+                let line_index = new_touched.start + i;
+                if line_index < lines.len() {
+                    cover_row(&mut spans, lines.line(current, line_index));
+                } else {
+                    spans.clear();
+                }
+                carried.push(spans);
             }
-            carried.push(spans);
-        }
-        if old_touched.end < old_high.len() {
-            carried.extend_from_slice(&old_high[old_touched.end..]);
-        }
+            if old_touched.end < old_high.len() {
+                carried.extend_from_slice(&old_high[old_touched.end..]);
+            }
+            carried
+        };
         carried.truncate(lines.len());
         *highlights = carried;
         // The carried prefix before the edit stays verified; the rest
@@ -238,6 +251,32 @@ fn cover_row(spans: &mut Vec<(std::ops::Range<usize>, SyntaxRole)>, text: &str) 
     }
 }
 
+/// The line ranges an edit touched, as the line tables count them: the
+/// ledger's ranges count the row after a final line break, which the
+/// tables do not have, so an edit that reaches the end of the old lines
+/// touches the new lines to their end, and the lines deleted to the end
+/// of the text leave an empty new range. Both arms of a key shift the
+/// seam table by these ranges.
+pub fn effective_lines(
+    old_len: usize,
+    new_len: usize,
+    old_touched: &std::ops::Range<usize>,
+    new_touched: &std::ops::Range<usize>,
+) -> (std::ops::Range<usize>, std::ops::Range<usize>) {
+    let reaches_end = old_touched.end >= old_len;
+    let old_eff = old_touched.start.min(old_len)..if reaches_end {
+        old_len
+    } else {
+        old_touched.end
+    };
+    let new_eff = if reaches_end {
+        old_eff.start..new_len
+    } else {
+        new_touched.clone()
+    };
+    (old_eff, new_eff)
+}
+
 /// Applies one edit to a code or text document in place, the keystroke
 /// fast path: the source swaps to `current`, the touched line entries
 /// rebuild through `CodeBody::splice`, the touched highlight rows
@@ -269,21 +308,16 @@ pub fn splice_document(
         return None;
     };
     let BlockKind::CodeBlock {
+        language,
         lines,
         highlights,
         exact,
-        ..
     } = &mut block.kind
     else {
         return None;
     };
     let old_len = lines.len();
-    let old_eff_end = if old_touched.end >= old_len {
-        old_len
-    } else {
-        old_touched.end
-    };
-    let old_eff = old_touched.start.min(old_len)..old_eff_end;
+    let (old_eff, _) = effective_lines(old_len, old_len, &old_touched, &new_touched);
     // The touched rows' spans lifted into region coordinates before the
     // line vector splices the old geometry away. The region starts at
     // the first touched line, whose start the edit cannot move.
@@ -324,11 +358,7 @@ pub fn splice_document(
         return None;
     }
     let new_len = lines.len();
-    let new_eff = if old_touched.end >= old_len {
-        old_eff.start..new_len
-    } else {
-        new_touched
-    };
+    let (_, new_eff) = effective_lines(old_len, new_len, &old_touched, &new_touched);
     // Rows splice only as far as the computed prefix reaches; rows the
     // worker never colored stay absent and draw whole.
     if highlights.len() > old_eff.start {
@@ -355,10 +385,15 @@ pub fn splice_document(
         highlights.splice(old_eff.start..upto, rows);
     }
     // Lines before the edit stay verified; the touched rows and the
-    // carried tail wait for the resumed sweep. Within a typing burst
-    // this clamp makes the frontier the burst's first touched line,
-    // shifts included, which is where the rest timer resumes from.
-    *exact = (*exact).min(new_eff.start);
+    // carried tail wait for the key's walk and the resumed sweep, so the
+    // frontier is clamped to the first touched line. A block with no
+    // grammar has no colors to verify: its frontier stays at its line
+    // count.
+    *exact = if language.is_some() {
+        (*exact).min(new_eff.start)
+    } else {
+        new_len
+    };
     block.range = 0..current.len();
     doc.source = std::sync::Arc::from(current);
     Some((old_eff, new_eff))
@@ -601,11 +636,11 @@ mod tests {
     }
 
     /// The app's sweep in miniature: chunked highlighting folded into
-    /// the document, every seam upserted into the table, the way
-    /// `fold_highlights` maintains it.
+    /// the document and the table, the way `fold_highlights` maintains
+    /// them.
     fn sweep(
         doc: &mut Document,
-        table: &mut Vec<(usize, highlight::Seam)>,
+        table: &mut crate::style::seams::Table,
         chunk: usize,
         resume: Option<highlight::Resume>,
     ) -> usize {
@@ -623,7 +658,9 @@ mod tests {
             &lines,
             language.as_deref(),
             chunk,
+            std::time::Duration::MAX,
             resume.as_ref(),
+            || true,
             |c| {
                 arrivals.push(Arrival {
                     block: 0,
@@ -633,35 +670,16 @@ mod tests {
                     converged: c.converged,
                     reach: c.reach,
                     speculative: false,
+                    slow: c.slow,
                 });
                 true
             },
         );
         let delivered = arrivals.len();
         for arrival in &arrivals {
-            load::fold(doc, arrival);
-            if let Some(seam) = &arrival.seam {
-                highlight::record_seam(table, arrival.start_line + arrival.spans.len(), seam);
-            }
+            table.fold(doc, arrival);
         }
         delivered
-    }
-
-    /// The app's resume construction: the nearest stored seam at or
-    /// before the touched line, the strictly later entries as the
-    /// convergence targets; no seam resumes fresh from line 0 with the
-    /// whole table as targets.
-    fn resume_from(table: &[(usize, highlight::Seam)], touched: usize) -> highlight::Resume {
-        let at = table.partition_point(|(line, _)| *line <= touched);
-        let (start_line, seam) = match at.checked_sub(1).and_then(|i| table.get(i)) {
-            Some((line, seam)) => (*line, Some(seam.clone())),
-            None => (0, None),
-        };
-        highlight::Resume {
-            start_line,
-            seam,
-            expected: table[at..].to_vec(),
-        }
     }
 
     #[test]
@@ -691,7 +709,7 @@ mod tests {
         let chunk = 64;
         for (pos, del, insert) in cases {
             let mut doc = load::code_document(Some("rust"), &text);
-            let mut table = Vec::new();
+            let mut table = crate::style::seams::Table::default();
             let full = sweep(&mut doc, &mut table, chunk, None);
             let mut ledger = Ledger::new(std::sync::Arc::clone(&doc.source), Vec::new());
             let range = *pos..*pos + *del;
@@ -699,8 +717,8 @@ mod tests {
             let current = ledger.current();
             let spliced = splice_document(&mut doc, &current, range.clone(), touched.clone());
             let (old_eff, new_eff) = spliced.expect("the splice fixture stays on the fast path");
-            highlight::shift_seams(&mut table, old_eff, new_eff.clone());
-            let resume = resume_from(&table, new_eff.start);
+            table.shift(&old_eff, &new_eff);
+            let resume = table.resume(new_eff.start, &[]);
             let delivered = sweep(&mut doc, &mut table, chunk, Some(resume));
             let BlockKind::CodeBlock {
                 language,
@@ -880,6 +898,118 @@ mod tests {
         assert_eq!(&*new.source, "hello world\n");
     }
 
+    /// The fallback arm of a key on a line past the colored rows, as a
+    /// key during the measuring pass of a big file: the touched rows
+    /// land at their own lines, and the rows the worker never colored
+    /// stay absent, as `splice_document` leaves them. Before, the touched
+    /// rows landed right after the colored prefix, and the layout sliced
+    /// a shorter line with their spans (claim 7 of the hunt of Task 328).
+    #[test]
+    fn the_fallback_lands_the_touched_rows_at_their_lines() {
+        use crate::edit::splice::Ledger;
+        let text: String = (0..400).map(|i| format!("let v{i} = {i};\n")).collect();
+        let mut doc = load::code_document(Some("rust"), &text);
+        let full = match &doc.blocks[0].kind {
+            BlockKind::CodeBlock {
+                lines, language, ..
+            } => highlight::spans(&doc.source, lines, language.as_deref()),
+            _ => unreachable!(),
+        };
+        if let BlockKind::CodeBlock {
+            highlights, exact, ..
+        } = &mut doc.blocks[0].kind
+        {
+            *highlights = full[..100].to_vec();
+            *exact = 100;
+        }
+        let pos = text
+            .match_indices('\n')
+            .nth(299)
+            .map(|(i, _)| i + 1)
+            .expect("line 300");
+        let mut ledger = Ledger::new(std::sync::Arc::clone(&doc.source), Vec::new());
+        let touched = ledger.edit(pos..pos, "x");
+        let current = ledger.current();
+        let new = reparse(FileKind::Code("rust"), &current, &doc, 300..301, touched);
+        let BlockKind::CodeBlock {
+            highlights,
+            lines,
+            exact,
+            ..
+        } = &new.blocks[0].kind
+        else {
+            panic!("a code file stays one code block");
+        };
+        assert_eq!(*exact, 100, "the colored prefix stays verified");
+        assert_eq!(&highlights[..100], &full[..100], "the prefix is carried");
+        assert_eq!(
+            highlights.len(),
+            100,
+            "the rows past the prefix stay absent"
+        );
+        for (i, row) in highlights.iter().enumerate() {
+            let len = lines.line(&new.source, i).len();
+            assert!(
+                row.iter().all(|(r, _)| r.end <= len),
+                "row {i} fits its line: {row:?} on {len} bytes"
+            );
+        }
+    }
+
+    /// Finding 2 of the read of `0174a42`: the fallback arm shifted the
+    /// seam table by the ledger's ranges, which count the row after a
+    /// final line break; the seam at the end then stood one line past
+    /// the file. Both arms take the ranges the line tables count.
+    #[test]
+    fn the_touched_lines_are_clamped_to_the_line_tables() {
+        assert_eq!(
+            effective_lines(3, 2, &(2..3), &(2..3)),
+            (2..3, 2..2),
+            "the last line's text deleted, the file ending with a line break: nothing of it left"
+        );
+        assert_eq!(
+            effective_lines(10, 10, &(4..5), &(4..5)),
+            (4..5, 4..5),
+            "a key inside the lines"
+        );
+        assert_eq!(
+            effective_lines(5, 7, &(4..5), &(4..7)),
+            (4..5, 4..7),
+            "lines added at the end"
+        );
+        assert_eq!(
+            effective_lines(5, 5, &(5..6), &(5..6)),
+            (5..5, 5..5),
+            "a key on the row after the final line break, before it opens a line"
+        );
+    }
+
+    /// A block with no grammar carries no colors and its frontier is its
+    /// line count, through the splice as through the fallback: nothing
+    /// walks it and nothing resumes it (claim 23 of the hunt of Task
+    /// 328, a plain file walked on every key).
+    #[test]
+    fn a_block_without_a_grammar_keeps_its_frontier_at_its_line_count() {
+        let exact_of = |doc: &Document| match &doc.blocks[0].kind {
+            BlockKind::CodeBlock {
+                exact,
+                lines,
+                highlights,
+                ..
+            } => (*exact, lines.len(), highlights.len()),
+            _ => unreachable!(),
+        };
+        let mut plain = load::text_document("a\nb\nc\n");
+        assert_eq!(exact_of(&plain), (3, 3, 0), "a plain file at its open");
+        let spliced = splice_document(&mut plain, "a\nbb\nc\n", 2..3, 1..2);
+        assert!(spliced.is_some(), "a plain file takes the splice");
+        assert_eq!(exact_of(&plain), (3, 3, 0), "a plain file after a key");
+        let unknown = load::code_document(None, "a\nb\nc\n");
+        assert_eq!(exact_of(&unknown), (3, 3, 0), "a file with no grammar");
+        let new = reparse(FileKind::Unknown, "a\nb\nc\nd\n", &unknown, 2..3, 2..4);
+        assert_eq!(exact_of(&new), (4, 4, 0), "after the fallback arm");
+    }
+
     #[test]
     fn reparse_keeps_the_language_a_file_without_an_extension_opened_with() {
         // The path alone says unknown; the open read the shebang and
@@ -904,6 +1034,18 @@ mod tests {
             new.blocks[0].kind,
             BlockKind::CodeBlock { language: None, .. }
         ));
+    }
+
+    /// A return before a line break, which an edit can make out of a
+    /// lone return, stays in its line for the loader as for the splice,
+    /// so an edit on the next line splices the rows the reparse builds.
+    #[test]
+    fn a_return_before_a_line_break_keeps_the_splice_in_step() {
+        let kind = FileKind::Code("rust");
+        let mut fast = load::code_document(Some("rust"), "ab\r\nef\ngh\n");
+        let mut slow = load::code_document(Some("rust"), "ab\r\nef\ngh\n");
+        edit_both(&mut fast, &mut slow, kind, 4..4, "X");
+        assert_docs_match(&fast, &slow);
     }
 
     /// Drives one edit through both pipes: the in-place splice on `fast`

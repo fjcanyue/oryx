@@ -4,7 +4,6 @@
 //! here knows about layout or paint.
 
 use std::collections::HashMap;
-use std::io::Read;
 use std::sync::Arc;
 
 use base64::Engine;
@@ -239,24 +238,33 @@ fn unwrap_zip(bytes: Vec<u8>) -> anyhow::Result<Vec<u8>> {
         return Ok(bytes);
     }
     let mut zip = zip::ZipArchive::new(std::io::Cursor::new(bytes)).map_err(|_| Refusal::NotFb2)?;
-    let mut name = None;
+    let mut found = None;
     for index in 0..zip.len() {
         let Ok(entry) = zip.by_index_raw(index) else {
             continue;
         };
-        if entry.name().to_ascii_lowercase().ends_with(".fb2") {
+        // A name that is neither UTF-8 nor CP437 cannot name the book.
+        let Ok(entry_name) = entry.name() else {
+            continue;
+        };
+        if entry_name.to_ascii_lowercase().ends_with(".fb2") {
             if entry.size() > CEILING {
                 return Err(Refusal::TooLarge.into());
             }
-            name = Some(entry.name().to_string());
+            found = Some(index);
             break;
         }
     }
-    let name = name.ok_or(Refusal::NotFb2)?;
-    let mut file = zip.by_name(&name).map_err(|_| Refusal::NotFb2)?;
-    let mut inner = Vec::with_capacity(file.size() as usize);
-    file.read_to_end(&mut inner).map_err(|_| Refusal::NotFb2)?;
-    Ok(inner)
+    // The entry is read by its index: zip keys its names by their raw
+    // bytes, and a name in a legacy encoding (Cyrillic in CP866, from a
+    // Russian Windows) comes back decoded as CP437, which finds nothing.
+    // The buffer grows with the read; the header's size is not trusted.
+    let index = found.ok_or(Refusal::NotFb2)?;
+    let file = zip.by_index(index).map_err(|_| Refusal::NotFb2)?;
+    match super::read_capped(file, CEILING).map_err(|_| Refusal::NotFb2)? {
+        Some(inner) => Ok(inner),
+        None => Err(Refusal::TooLarge.into()),
+    }
 }
 
 /// Bytes to text: UTF-16 by BOM, then the declared encoding when it is

@@ -180,6 +180,21 @@ struct Builder {
     html_gap: bool,
     /// One entry per open `<p>`/`<div>`, true when it centers its content.
     html_divs: Vec<HtmlDiv>,
+    /// The `align` of the last `<img>` tag among the pending spans, for
+    /// a picture alone in its paragraph, whose word it becomes. It leaves
+    /// with the spans: `take_spans` is the one place that takes them.
+    image_align: Option<HtmlAlign>,
+    /// A word for the next block alone, ahead of the open divisions'.
+    block_align: Option<HtmlAlign>,
+    /// The next block is a picture alone in its paragraph: centered when
+    /// neither its tag nor a division around it names a side.
+    lone_image: bool,
+    /// The `<dd>` elements open: a picture in a definition stays with it.
+    html_dd: u32,
+    /// For each open `<dl>`, the count of `<dd>` open when it began: a
+    /// `<dd>` past that count is the list's own, which HTML closes at
+    /// the next `<dd>`, at a `<dt>` and at the list's end.
+    html_dl: Vec<u32>,
     html_code: u32,
     html_sub: u32,
     html_sup: u32,
@@ -589,6 +604,11 @@ impl Builder {
             html_tail: String::new(),
             html_gap: false,
             html_divs: Vec::new(),
+            image_align: None,
+            block_align: None,
+            lone_image: false,
+            html_dd: 0,
+            html_dl: Vec::new(),
             html_code: 0,
             html_sub: 0,
             html_sup: 0,
@@ -632,10 +652,20 @@ impl Builder {
             }
             Event::DisplayMath(tex) => {
                 if dollar_math_allowed(&self.source, &range) {
-                    self.flush_spans();
-                    self.emit(BlockKind::MathBlock {
-                        tex: tex.into_string(),
-                    });
+                    if self.table.is_some() {
+                        // A cell holds no block: the formula is the cell's,
+                        // set in display style as `$$` asks.
+                        let mut span = self.style();
+                        span.set_text(tex.trim().to_string());
+                        span.math = true;
+                        span.display = true;
+                        self.push(span);
+                    } else {
+                        self.flush_spans();
+                        self.emit(BlockKind::MathBlock {
+                            tex: tex.into_string(),
+                        });
+                    }
                 } else {
                     let mut span = self.style();
                     span.set_text(self.source[range].to_string());
@@ -644,6 +674,21 @@ impl Builder {
             }
             Event::FootnoteReference(label) => {
                 let number = self.footnote_number(&label);
+                // Two references that touch would read as one number: a
+                // raised comma parts them, as in print. It is no link.
+                let touches = self.spans.last().is_some_and(|last| {
+                    last.link
+                        .as_deref()
+                        .is_some_and(|l| l.starts_with("footnote:"))
+                });
+                if touches {
+                    let mut comma = self.style();
+                    comma.set_text(",");
+                    comma.range = 0..0;
+                    comma.link = None;
+                    comma.script = SpanScript::Sup;
+                    self.push(comma);
+                }
                 let mut span = self.style();
                 span.set_text(number.to_string());
                 span.link = Some(format!("footnote:{label}"));
@@ -659,7 +704,10 @@ impl Builder {
             }
             Event::SoftBreak => self.text(" "),
             Event::HardBreak => self.push(Span::plain("\n")),
-            Event::Rule => self.emit(BlockKind::Rule),
+            Event::Rule => {
+                self.flush_item_text();
+                self.emit(BlockKind::Rule)
+            }
             Event::Html(html) | Event::InlineHtml(html) => self.html(&html),
         }
     }
@@ -668,6 +716,7 @@ impl Builder {
         match tag {
             Tag::Paragraph => {}
             Tag::Heading { level, id, .. } => {
+                self.flush_item_text();
                 self.heading = Some(heading_level(level));
                 self.heading_id = id.map(|id| id.into_string());
             }
@@ -692,10 +741,12 @@ impl Builder {
                 }
             }
             Tag::BlockQuote(kind) => {
+                self.flush_item_text();
                 self.quote_depth = self.quote_depth.saturating_add(1);
                 self.alerts.push(kind.map(alert_kind));
             }
             Tag::CodeBlock(kind) => {
+                self.flush_item_text();
                 let language = match kind {
                     CodeBlockKind::Fenced(lang) if !lang.is_empty() => Some(
                         lang.split_whitespace()
@@ -724,6 +775,7 @@ impl Builder {
                 self.item_markers.push(Some(marker));
             }
             Tag::Table(aligns) => {
+                self.flush_item_text();
                 self.table = Some(TableAcc {
                     aligns: aligns.iter().map(column_align).collect(),
                     ..TableAcc::default()
@@ -746,7 +798,10 @@ impl Builder {
                 });
             }
             Tag::MetadataBlock(_) => self.in_metadata = true,
-            Tag::HtmlBlock => self.html_block = true,
+            Tag::HtmlBlock => {
+                self.flush_item_text();
+                self.html_block = true
+            }
             _ => {}
         }
     }
@@ -756,7 +811,7 @@ impl Builder {
             TagEnd::Paragraph => self.flush_spans(),
             TagEnd::Heading(_) => {
                 let level = self.heading.take().unwrap_or(1);
-                let spans = std::mem::take(&mut self.spans);
+                let spans = self.take_spans();
                 let anchor = match self.heading_id.take() {
                     Some(id) => self.explicit_anchor(id),
                     None => self.unique_anchor(&spans),
@@ -796,11 +851,14 @@ impl Builder {
                         self.emit(BlockKind::Mermaid { body });
                     } else {
                         let lines = self.code_body(&text);
+                        // A block with no grammar carries no colors: its
+                        // frontier is its line count from the start.
+                        let exact = if language.is_none() { lines.len() } else { 0 };
                         self.emit(BlockKind::CodeBlock {
                             language,
                             lines,
                             highlights: Vec::new(),
-                            exact: 0,
+                            exact,
                         });
                     }
                 }
@@ -824,7 +882,7 @@ impl Builder {
                 }
             }
             TagEnd::TableCell => {
-                let cell = std::mem::take(&mut self.spans);
+                let cell = self.take_spans();
                 if let Some(t) = self.table.as_mut() {
                     t.row.push(cell);
                 }
@@ -1285,7 +1343,7 @@ impl Builder {
             ("tr", false) => {
                 if self.html_table.as_ref().is_some_and(|t| t.nested == 0) {
                     self.html_row_close();
-                    self.spans.clear();
+                    self.clear_spans();
                     let t = self.html_table.as_mut().expect("table is open");
                     t.row_open = true;
                     t.row_all_th = true;
@@ -1299,7 +1357,7 @@ impl Builder {
             ("th" | "td", false) => {
                 if self.html_table.as_ref().is_some_and(|t| t.nested == 0) {
                     self.html_cell_close();
-                    self.spans.clear();
+                    self.clear_spans();
                     let t = self.html_table.as_mut().expect("table is open");
                     if !t.row_open {
                         t.row_open = true;
@@ -1318,12 +1376,12 @@ impl Builder {
             }
             ("caption", false) => {
                 if self.html_table.as_ref().is_some_and(|t| t.nested == 0) {
-                    self.spans.clear();
+                    self.clear_spans();
                 }
             }
             ("caption", true) => {
                 if self.html_table.as_ref().is_some_and(|t| t.nested == 0) {
-                    let mut caption = std::mem::take(&mut self.spans);
+                    let mut caption = self.take_spans();
                     trim_cell(&mut caption);
                     if !caption.is_empty() {
                         let t = self.html_table.as_mut().expect("table is open");
@@ -1366,7 +1424,7 @@ impl Builder {
                     return;
                 }
                 self.in_summary = false;
-                let mut spans = std::mem::take(&mut self.spans);
+                let mut spans = self.take_spans();
                 trim_cell(&mut spans);
                 if let Some(&id) = self.details_stack.last() {
                     self.emit(BlockKind::Summary { spans, group: id });
@@ -1386,6 +1444,7 @@ impl Builder {
                     width: html_attr(attrs, "width").and_then(|v| v.parse().ok()),
                     height: html_attr(attrs, "height").and_then(|v| v.parse().ok()),
                 }));
+                self.image_align = html_attr(attrs, "align").and_then(|a| HtmlAlign::parse(&a));
                 self.spans.push(span);
             }
             ("b" | "strong", false) => self.bold += 1,
@@ -1499,7 +1558,7 @@ impl Builder {
                     return;
                 }
                 self.html_li_close();
-                self.spans.clear();
+                self.clear_spans();
                 let top = self.html_lists.last_mut().expect("a list is open");
                 top.item_open = true;
             }
@@ -1509,18 +1568,30 @@ impl Builder {
                 }
                 self.html_li_close();
             }
-            ("dl", _) => {
+            ("dl", false) => {
                 if self.html_table.is_some() {
                     return;
                 }
+                self.flush_spans();
+                self.html_dl.push(self.html_dd);
+            }
+            ("dl", true) => {
+                if self.html_table.is_some() {
+                    return;
+                }
+                self.html_dt_close();
+                self.html_dd_end();
+                self.html_dl.pop();
                 self.flush_spans();
             }
             ("dt", false) => {
                 if self.html_table.is_some() {
                     return;
                 }
+                self.html_dt_close();
+                self.html_dd_end();
                 self.flush_spans();
-                self.spans.clear();
+                self.clear_spans();
                 self.html_dt = true;
             }
             ("dt", true) => {
@@ -1533,22 +1604,17 @@ impl Builder {
                 if self.html_table.is_some() {
                     return;
                 }
+                self.html_dt_close();
+                self.html_dd_end();
                 self.flush_spans();
-                self.spans.clear();
+                self.clear_spans();
+                self.html_dd += 1;
             }
             ("dd", true) => {
                 if self.html_table.is_some() {
                     return;
                 }
-                let mut spans = std::mem::take(&mut self.spans);
-                trim_cell(&mut spans);
-                if !spans.is_empty() {
-                    self.emit(BlockKind::ListItem {
-                        marker: Marker::None,
-                        depth: 0,
-                        spans,
-                    });
-                }
+                self.html_dd_close();
             }
             _ => {}
         }
@@ -1598,7 +1664,7 @@ impl Builder {
         let Some(level) = self.html_heading.take() else {
             return;
         };
-        let mut spans = std::mem::take(&mut self.spans);
+        let mut spans = self.take_spans();
         trim_cell(&mut spans);
         let anchor = self.unique_anchor(&spans);
         self.emit(BlockKind::Heading {
@@ -1618,11 +1684,17 @@ impl Builder {
         if body.trim().is_empty() {
             return;
         }
+        let lines = CodeBody::from_text(body);
+        let exact = if pre.language.is_none() {
+            lines.len()
+        } else {
+            0
+        };
         self.emit(BlockKind::CodeBlock {
             language: pre.language,
-            lines: CodeBody::from_text(body),
+            lines,
             highlights: Vec::new(),
-            exact: 0,
+            exact,
         });
     }
 
@@ -1637,7 +1709,7 @@ impl Builder {
             return;
         }
         top.item_open = false;
-        let mut spans = std::mem::take(&mut self.spans);
+        let mut spans = self.take_spans();
         trim_cell(&mut spans);
         if spans.is_empty() {
             return;
@@ -1658,12 +1730,35 @@ impl Builder {
     }
 
     /// Emits the accumulated `<dt>` term as a bold paragraph.
+    /// Closes the `<dd>` the open `<dl>` holds, if any: the end tag is
+    /// optional in HTML.
+    fn html_dd_end(&mut self) {
+        let base = self.html_dl.last().copied().unwrap_or(0);
+        if !self.html_dl.is_empty() && self.html_dd > base {
+            self.html_dd_close();
+        }
+    }
+
+    /// Closes a `<dd>` into an indented item.
+    fn html_dd_close(&mut self) {
+        self.html_dd = self.html_dd.saturating_sub(1);
+        let mut spans = self.take_spans();
+        trim_cell(&mut spans);
+        if !spans.is_empty() {
+            self.emit(BlockKind::ListItem {
+                marker: Marker::None,
+                depth: 0,
+                spans,
+            });
+        }
+    }
+
     fn html_dt_close(&mut self) {
         if !self.html_dt {
             return;
         }
         self.html_dt = false;
-        let mut spans = std::mem::take(&mut self.spans);
+        let mut spans = self.take_spans();
         trim_cell(&mut spans);
         for span in &mut spans {
             span.bold = true;
@@ -1676,7 +1771,7 @@ impl Builder {
     /// Closes an open HTML table cell into its row. Text outside any
     /// cell is discarded, the browser hoisting rule reduced to a drop.
     fn html_cell_close(&mut self) {
-        let spans = std::mem::take(&mut self.spans);
+        let spans = self.take_spans();
         let Some(t) = self.html_table.as_mut() else {
             return;
         };
@@ -1715,7 +1810,7 @@ impl Builder {
     /// paragraph. An empty accumulator emits nothing.
     fn html_table_close(&mut self) {
         self.html_row_close();
-        self.spans.clear();
+        self.clear_spans();
         let Some(t) = self.html_table.take() else {
             return;
         };
@@ -1839,6 +1934,7 @@ impl Builder {
                 && last.mark == span.mark
                 && last.code == span.code
                 && last.math == span.math
+                && last.display == span.display
                 && last.script == span.script
                 && last.link == span.link
                 && last.abbr == span.abbr
@@ -1859,12 +1955,36 @@ impl Builder {
         self.spans.push(span);
     }
 
+    /// The pending spans, and with them the word of an `<img>` tag among
+    /// them: a word left behind would place a later picture.
+    fn take_spans(&mut self) -> Vec<Span> {
+        self.image_align = None;
+        std::mem::take(&mut self.spans)
+    }
+
+    /// The pending spans dropped, and their tag's word with them.
+    fn clear_spans(&mut self) {
+        self.image_align = None;
+        self.spans.clear();
+    }
+
+    /// Writes out the text of the open list item before a block that
+    /// opens right under it. In a list with no blank lines the parser
+    /// gives an item's text with no paragraph around it, so nothing else
+    /// ends it before the block.
+    fn flush_item_text(&mut self) {
+        if !self.item_markers.is_empty() {
+            self.flush_spans();
+        }
+    }
+
     fn flush_spans(&mut self) {
         self.flush_text();
         if self.spans.is_empty() {
             return;
         }
-        let spans = std::mem::take(&mut self.spans);
+        let image_word = self.image_align;
+        let spans = self.take_spans();
         if let Some(open) = self.footnote.as_mut() {
             let continued = std::mem::replace(&mut open.emitted, true);
             let (label, number) = (open.label.clone(), open.number);
@@ -1884,25 +2004,34 @@ impl Builder {
                 return;
             }
         }
-        // A paragraph that is one plain image and whitespace stays a block
-        // image; links, size attributes, or centering keep it inline.
-        if self.lists.is_empty() && self.html_divs.is_empty() {
-            let solo = spans
-                .iter()
-                .filter(|s| s.image.is_none())
-                .all(|s| s.raw_text().trim().is_empty());
-            let images: Vec<&Span> = spans.iter().filter(|s| s.image.is_some()).collect();
-            if solo && images.len() == 1 {
-                let span = images[0];
-                let image = span.image.as_ref().expect("image span");
-                if span.link.is_none() && image.width.is_none() && image.height.is_none() {
-                    let kind = BlockKind::Image {
-                        path: image.src.clone(),
-                        alt: span.raw_text().to_string(),
-                    };
-                    self.emit(kind);
-                    return;
-                }
+        // A picture alone in its paragraph takes its tag's `align` as the
+        // block's word, and the middle when no word is said. In a list
+        // item, a definition or a table cell, markdown's or HTML's, it
+        // takes no middle and stays with the marker, the term or the
+        // cell. A plain one, with no link and no size, is a block image.
+        let solo = spans
+            .iter()
+            .filter(|s| s.image.is_none())
+            .all(|s| s.raw_text().trim().is_empty());
+        let images: Vec<&Span> = spans.iter().filter(|s| s.image.is_some()).collect();
+        let lone = solo && images.len() == 1;
+        if lone && self.lists.is_empty() {
+            self.block_align = image_word;
+            self.lone_image = !self.definition
+                && self.html_dd == 0
+                && self.html_lists.is_empty()
+                && self.html_table.is_none();
+        }
+        if lone && self.lists.is_empty() && self.html_divs.is_empty() {
+            let span = images[0];
+            let image = span.image.as_ref().expect("image span");
+            if span.link.is_none() && image.width.is_none() && image.height.is_none() {
+                let kind = BlockKind::Image {
+                    path: image.src.clone(),
+                    alt: span.raw_text().to_string(),
+                };
+                self.emit(kind);
+                return;
             }
         }
         if !self.lists.is_empty() {
@@ -1966,8 +2095,14 @@ impl Builder {
             BlockKind::Summary { group, .. } => self.details[*group as usize].parent,
             _ => self.details_stack.last().copied(),
         };
-        // The innermost open block that names a side decides.
-        let align = self.html_divs.iter().rev().find_map(|d| d.align);
+        // The block's own word first, then the innermost open block
+        // that names a side, then the middle for a lone picture.
+        let lone = std::mem::take(&mut self.lone_image);
+        let align = self
+            .block_align
+            .take()
+            .or_else(|| self.html_divs.iter().rev().find_map(|d| d.align))
+            .or(lone.then_some(HtmlAlign::Center));
         self.blocks.push(Block {
             quote_depth: self.quote_depth,
             alert: self.alerts.iter().rev().find_map(|a| *a),
@@ -2619,6 +2754,53 @@ mod tests {
         assert!(d.flip_task(0).is_none(), "a heading refuses");
     }
 
+    /// The kinds of a page's blocks, in order, a quoted block with `>`.
+    fn kinds(source: &str) -> Vec<String> {
+        parse(source)
+            .blocks
+            .iter()
+            .map(|b| {
+                let kind = match &b.kind {
+                    BlockKind::ListItem { .. } => "item",
+                    BlockKind::CodeBlock { .. } => "code",
+                    BlockKind::Paragraph { .. } => "text",
+                    BlockKind::Heading { .. } => "heading",
+                    BlockKind::Rule => "rule",
+                    BlockKind::Table { .. } => "table",
+                    _ => "other",
+                };
+                format!("{}{kind}", ">".repeat(b.quote_depth as usize))
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_block_right_under_a_list_items_text_comes_after_it() {
+        assert_eq!(kinds("- one:\n  ```\n  code\n  ```\n"), ["item", "code"]);
+        assert_eq!(
+            kinds("1. one:\n   ```\n   code\n   ```\n"),
+            ["item", "code"]
+        );
+        assert_eq!(
+            kinds("- one:\n  ```\n  a\n  ```\n- two:\n  ```\n  b\n  ```\n"),
+            ["item", "code", "item", "code"]
+        );
+        assert_eq!(kinds("- one:\n\n      code\n"), ["item", "code"]);
+        // A quote's paragraph inside an item is an item in the model, as
+        // it is after a blank line.
+        assert_eq!(kinds("- one:\n  > quoted\n"), ["item", ">item"]);
+        assert_eq!(kinds("- one:\n\n  > quoted\n"), ["item", ">item"]);
+        assert_eq!(kinds("- one:\n  # Title\n"), ["item", "heading"]);
+        assert_eq!(kinds("- one:\n  ***\n"), ["item", "rule"]);
+        assert_eq!(
+            kinds("- one:\n  | a | b |\n  |---|---|\n  | c | d |\n"),
+            ["item", "table"]
+        );
+        // A nested list and a block after a blank line, as before.
+        assert_eq!(kinds("- one:\n  - two\n"), ["item", "item"]);
+        assert_eq!(kinds("- one:\n\n  ```\n  code\n  ```\n"), ["item", "code"]);
+    }
+
     #[test]
     fn nested_and_ordered_lists() {
         let d = parse("- a\n  - b\n\n1. one\n2. two");
@@ -2733,6 +2915,93 @@ mod tests {
     /// `align="right"` on a p or div puts its blocks against the right
     /// edge, as GitHub does; center keeps working, and a plain block
     /// carries neither.
+    #[test]
+    fn an_image_tag_s_align_is_the_word_of_its_lone_paragraph() {
+        let d = parse("<img src=\"a.png\" align=\"right\">\n\nplain\n");
+        let image = &d.blocks[0];
+        assert!(
+            matches!(image.kind, BlockKind::Image { .. }),
+            "a word on the tag leaves the block image"
+        );
+        assert!(image.right && !image.centered && !image.left);
+        assert!(!d.blocks[1].right, "the word is the one paragraph's");
+        let d = parse("<img src=\"a.png\" align=\"left\"> and words\n");
+        assert!(!d.blocks[0].left, "an image among text keeps no word");
+        let d = parse("<img src=\"a.png\">\n");
+        assert!(
+            matches!(d.blocks[0].kind, BlockKind::Image { .. }),
+            "no word, the block image"
+        );
+    }
+
+    /// HTML closes a definition at the next `<dd>`, at a `<dt>` and at
+    /// the list's end: a picture alone in its paragraph after such a list
+    /// is centered, and the definition is the indented item a closed one
+    /// is.
+    #[test]
+    fn an_unclosed_definition_ends_with_its_list() {
+        for md in [
+            "<dl>\n<dt>T</dt>\n<dd>Meaning\n</dl>\n\n![a](a.png)\n",
+            "<dl><dt>T<dd>one<dd>two</dl>\n\n![a](a.png)\n",
+            "<dl><dt>T<dd>one<dt>U<dd>two</dl>\n\n![a](a.png)\n",
+        ] {
+            let d = parse(md);
+            let image = d
+                .blocks
+                .iter()
+                .find(|b| matches!(b.kind, BlockKind::Image { .. }))
+                .unwrap_or_else(|| panic!("no picture in {md}: {:?}", d.blocks));
+            assert!(image.centered, "{md}");
+            let definitions = d
+                .blocks
+                .iter()
+                .filter(|b| matches!(b.kind, BlockKind::ListItem { .. }))
+                .count();
+            let expected = md.matches("<dd>").count();
+            assert_eq!(definitions, expected, "{md}: {:?}", d.blocks);
+        }
+    }
+
+    /// The read of 10/11/2026: a picture in a list item, a table cell
+    /// or a definition is not centered, in the HTML forms too, and the
+    /// word of a lone tag in a definition is still the block's.
+    #[test]
+    fn a_picture_in_an_html_item_cell_or_definition_is_not_centered() {
+        let image = |md: &str| -> (bool, bool, bool) {
+            let d = parse(md);
+            let block = d
+                .blocks
+                .iter()
+                .find(|b| match &b.kind {
+                    BlockKind::Image { .. } => true,
+                    BlockKind::Paragraph { spans } | BlockKind::ListItem { spans, .. } => {
+                        spans.iter().any(|s| s.image.is_some())
+                    }
+                    _ => false,
+                })
+                .unwrap_or_else(|| panic!("no picture in {md}: {:?}", d.blocks));
+            (block.left, block.centered, block.right)
+        };
+        for md in [
+            "<ul>\n<li>\n\n![a](a.png)\n\n</li>\n</ul>\n",
+            "<table>\n<tr>\n<td>\n\n![a](a.png)\n\n</td>\n</tr>\n</table>\n",
+            "<dl><dt>T</dt><dd>\n\n![a](a.png)\n\n</dd></dl>\n",
+            "Term\n: ![a](a.png)\n",
+        ] {
+            assert_eq!(image(md), (false, false, false), "{md}");
+        }
+        assert_eq!(
+            image("Term\n: <img src=\"a.png\" align=\"right\">\n"),
+            (false, false, true),
+            "the tag's word in a definition"
+        );
+        assert_eq!(
+            image("<div>\n\n![a](a.png)\n\n</div>\n"),
+            (false, true, false),
+            "a division with no word leaves the middle"
+        );
+    }
+
     #[test]
     fn html_align_right_marks_the_blocks_inside() {
         let d = parse("<p align=\"right\">\n\n[More tips...](tip:next)\n\n</p>\n\nplain\n");
@@ -3766,6 +4035,87 @@ mod tests {
         };
         assert_eq!(label, "1");
         assert_eq!(spans[0].text(&d.source), "the note");
+    }
+
+    /// The user's ask of 10/11/2026: two footnote references that touch
+    /// read as one number, so a raised comma parts them, as in print.
+    #[test]
+    fn footnote_references_that_touch_are_parted_by_a_comma() {
+        let texts = |md: &str| -> Vec<(String, bool, SpanScript)> {
+            let d = parse(md);
+            let spans = match &d.blocks[0].kind {
+                BlockKind::Paragraph { spans } => spans.clone(),
+                BlockKind::Heading { spans, .. } => spans.clone(),
+                BlockKind::Table { rows, .. } => rows[0][0].clone(),
+                other => panic!("{other:?}"),
+            };
+            spans
+                .iter()
+                .map(|s| (s.text(&d.source).to_string(), s.link.is_some(), s.script))
+                .collect()
+        };
+        let notes = "\n\n[^a]: one\n\n[^b]: two\n\n[^c]: three";
+        let plain = |text: &str| (text.to_string(), false, SpanScript::None);
+        let reference = |text: &str| (text.to_string(), true, SpanScript::None);
+        let comma = (",".to_string(), false, SpanScript::Sup);
+        assert_eq!(
+            texts(&format!("w[^a][^b]{notes}")),
+            [plain("w"), reference("1"), comma.clone(), reference("2")]
+        );
+        assert_eq!(
+            texts(&format!("w[^a][^b][^c]{notes}")),
+            [
+                plain("w"),
+                reference("1"),
+                comma.clone(),
+                reference("2"),
+                comma.clone(),
+                reference("3")
+            ]
+        );
+        assert_eq!(
+            texts(&format!("w[^a][^a]{notes}")),
+            [plain("w"), reference("1"), comma.clone(), reference("1")]
+        );
+        assert_eq!(
+            texts(&format!("w[^a] [^b]{notes}")),
+            [plain("w"), reference("1"), plain(" "), reference("2")]
+        );
+        assert_eq!(
+            texts(&format!("w[^a]x[^b]{notes}")),
+            [plain("w"), reference("1"), plain("x"), reference("2")]
+        );
+        assert_eq!(
+            texts(&format!("# w[^a][^b]{notes}"))[1..],
+            [reference("1"), comma.clone(), reference("2")]
+        );
+        assert_eq!(
+            texts(&format!("| h |\n|---|\n| w[^a][^b] |{notes}"))[1..],
+            [reference("1"), comma, reference("2")]
+        );
+    }
+
+    /// `$$` inside a table cell is the cell's own formula, in display
+    /// style. Before, the builder emitted a display block from inside the
+    /// table, before it, and the cell lost its formula.
+    #[test]
+    fn display_math_inside_a_cell_is_the_cell_s_formula() {
+        let d = parse("| a |\n|---|\n| $$x^2$$ and $y$ |\n");
+        assert_eq!(d.blocks.len(), 1, "{:?}", d.blocks);
+        let BlockKind::Table { rows, .. } = &d.blocks[0].kind else {
+            panic!("{:?}", d.blocks[0].kind)
+        };
+        let cell = &rows[0][0];
+        assert!(cell[0].math && cell[0].display, "{cell:?}");
+        assert_eq!(cell[0].text(&d.source), "x^2");
+        assert!(cell[2].math && !cell[2].display);
+        assert_eq!(cell[2].text(&d.source), "y");
+        // Two formulas side by side stay two spans when their styles differ.
+        let d = parse("| a |\n|---|\n| $$\\alpha$$$b$ |\n");
+        let BlockKind::Table { rows, .. } = &d.blocks[0].kind else {
+            panic!()
+        };
+        assert_eq!(rows[0][0].len(), 2, "{:?}", rows[0][0]);
     }
 
     #[test]

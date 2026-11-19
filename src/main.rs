@@ -62,7 +62,8 @@ fn missing_keyboard_library() -> Option<String> {
 
 /// What the positional argument asks for: a folder opens the sidebar
 /// there over the welcome page; anything else, existing or not, goes
-/// to the loader as a file, whose error names a missing one.
+/// to the loader as a file, which opens a missing one as a new file
+/// and refuses what cannot be one.
 fn launch(path: Option<PathBuf>) -> app::Launch {
     match path {
         None => app::Launch::Empty,
@@ -93,8 +94,10 @@ fn usage() -> String {
         "oryx {}\n\n{USAGE_LINE}\n\n\
          Opens a markdown, code or text file, or a book (EPUB, FB2, MOBI,\n\
          AZW3, CBZ, CBR). A folder opens the sidebar on it. Without an\n\
-         argument the window explains how to open a file. FILE:412 opens\n\
-         the file at line 412, and FILE:412:10 at column 10 of that line.\n\
+         argument the window explains how to open a file. A file that does\n\
+         not exist yet opens empty in the editor, and the first save\n\
+         creates it. FILE:412 opens the file at line 412, and FILE:412:10\n\
+         at column 10 of that line.\n\
          Text piped in is shown too, as in `git diff | oryx`; a lone - asks\n\
          for standard input outright. Save it under a name to keep it.\n\n\
          Options:\n\
@@ -110,7 +113,7 @@ fn usage() -> String {
 
 /// The `--version` line: the crate version, then the short commit the
 /// build script read from git. A build from a source archive (the AUR
-/// source package, a Flathub build) has no checkout and prints the
+/// source package, a distribution's build) has no checkout and prints the
 /// version alone.
 fn version_line(commit: Option<&str>) -> String {
     match commit {
@@ -241,6 +244,8 @@ fn parse_args(args: impl Iterator<Item = OsString>) -> Cli {
             Some(flag) if flag.starts_with("--") => {
                 return Cli::Refused(format!("unknown option {flag}"));
             }
+            // An empty argument names no file: the welcome page.
+            _ if arg.is_empty() => {}
             _ => path = Some(PathBuf::from(&arg)),
         }
     }
@@ -322,6 +327,9 @@ fn main() -> ExitCode {
                 eprintln!("oryx: {message}");
                 return ExitCode::FAILURE;
             }
+            // The file dialogs' failures are read from here on, so a
+            // dialog that cannot appear gets the path field instead.
+            oryx::platform::dialog::install();
             use std::io::IsTerminal;
             let second_window = second || recover.is_some();
             let terminal = std::io::stdin().is_terminal();
@@ -391,7 +399,7 @@ mod tests {
         assert_eq!(
             launch(Some(missing.clone())),
             app::Launch::File(missing),
-            "a missing path goes to the loader, whose error names it"
+            "a missing path goes to the loader, which opens it as the empty file it will be"
         );
         let with = |tail: &str| {
             let mut name = file.clone().into_os_string();

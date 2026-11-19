@@ -3,7 +3,7 @@ members = ["noad", "palmbook", "rarball"]
 
 [package]
 name = "oryx"
-version = "1.2.2"
+version = "1.3.0"
 description = "Fast editor for markdown and code, reader for ebooks and comics"
 edition = "2021"
 license = "GPL-3.0-only"
@@ -39,6 +39,9 @@ image = { version = "0.25", default-features = false, features = ["png", "jpeg",
 # The X11 keyboard libraries, loaded before winit does, for a plain line
 # when one is missing.
 libloading = "0.8"
+# The records of the file dialog library, read to tell a dialog that could
+# not appear from a cancel; already in the tree through rfd.
+log = "0.4"
 miniz_oxide = "0.8"
 noad = { path = "noad" }
 nucleo-matcher = "0.3.1"
@@ -64,11 +67,12 @@ unicode-properties = { version = "0.1.4", default-features = false, features = [
 unicode-linebreak = "0.1"
 ureq = { version = "3.2.1", default-features = false, features = ["native-tls", "gzip"] }
 winit = "0.30"
-zip = { version = "4.2", default-features = false, features = ["deflate"] }
+zip = { version = "9", default-features = false, features = ["deflate"] }
 
 [dev-dependencies]
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "rayon"] }
 lopdf = "0.44"
+proptest = { version = "1.12", default-features = false, features = ["std"] }
 
 [build-dependencies]
 ico = "0.5.0"

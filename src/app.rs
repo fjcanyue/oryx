@@ -14,13 +14,13 @@ use oryx::edit::{
     self,
     autosave::{self, Verdict},
     caret::{self, Caret, CaretBox, Motion},
-    splice::{self, Ledger},
+    splice::{self, Ledger, Placed, Replay},
     undo::{Kind, Undo},
 };
 use oryx::export::{self, ExportPass, ExportSettings};
 use oryx::input::{
     self,
-    keymap::{self, Command},
+    keymap::{self, Command, KeyOwner},
     touch,
 };
 use oryx::layout::{
@@ -31,12 +31,14 @@ use oryx::paint;
 use oryx::paint::painter::Painter;
 use oryx::paint::scroll::{self, BandCache};
 use oryx::platform::config::{self, Config, WindowState};
+use oryx::platform::dialog::{self, Answer};
 use oryx::platform::notes;
 use oryx::platform::save;
 #[cfg(target_os = "linux")]
 use oryx::platform::wayland_drop;
 use oryx::style::fonts::FontStore;
 use oryx::style::highlight::{self, Highlighter, PendingBlock};
+use oryx::style::seams::Table;
 use oryx::style::theme::{self, Rgba, Theme};
 use oryx::ui::confirm;
 use oryx::ui::export::{ExportDialog, ExportProgress};
@@ -45,11 +47,12 @@ use oryx::ui::help;
 use oryx::ui::history::{self, History};
 use oryx::ui::notice::{self, Notice};
 use oryx::ui::occurrences::{self, Occurrences};
-use oryx::ui::outline::{entry_offset, OutlineTree};
+use oryx::ui::outline::{entry_offset, heading_anchor, heading_by_anchor, OutlineTree};
 use oryx::ui::overlay::{Action, Overlay, OverlayResult};
+use oryx::ui::pathfield::{self, Ask, PathState};
 use oryx::ui::scrollbar;
 use oryx::ui::search::{self, BarHit, ReplaceRow, SearchState};
-use oryx::ui::selection::{self, ModelPos, Selection};
+use oryx::ui::selection::{self, window_rects, ModelPos, Selection};
 use oryx::ui::settings::{self, Settings};
 use oryx::ui::sidebar::{self, Sidebar};
 use oryx::ui::sidebar_search::{self, FilesView, SearchStatus};
@@ -80,10 +83,18 @@ const FLING_TICK: Duration = Duration::from_millis(16);
 /// visible half.
 const CARET_BLINK: Duration = Duration::from_millis(530);
 
-/// Typing rest before the highlight worker re-runs the edited block;
-/// each keystroke kills in-flight work through the generation, so the
-/// whole-block pass runs once per pause, never per key.
-const REHIGHLIGHT_REST: Duration = Duration::from_millis(400);
+/// The rest before the worker re-colors the lines below a key that
+/// changed the state after its lines, or whose walk fell short. Zero
+/// since Task 327: the typed line is colored on the key by the walk, and
+/// the editors read in that task start the rest at once. A named figure,
+/// raised if the field shows instability.
+const REHIGHLIGHT_REST: Duration = Duration::from_millis(0);
+
+/// How far above the caret's line a trusted seam may be before the
+/// worker is asked for one at the caret's line, so that the first key
+/// there is colored in its frame: the lines a walk of the budget covers
+/// on the slowest grammar measured.
+const CARET_SEAM_REACH: usize = 8;
 
 /// How long after a touch pan the emulated mouse stays ignored, long
 /// enough to cover the click Windows synthesizes behind a lifted finger.
@@ -168,13 +179,22 @@ pub fn run(
     // it, the edit marks, the resume note, the disk identity, has to
     // match what `open_file` stores for every later file, and that is
     // the canonical form; a path as typed on the command line would
-    // key the first file differently from the same file reopened.
-    let path = path.map(|p| p.canonicalize().unwrap_or(p));
+    // key the first file differently from the same file reopened. A
+    // file that does not exist yet takes the form it will have.
+    let path = path.map(|p| load::canonical(&p));
     let mut config = config::load();
+    let mut refused_at_start = false;
     let (document, pending, streamed, book, book_toc, lossy, opened_crlf, opened_cr, opened_bom) =
         match &path {
             Some(p) => {
-                let opened = load::open(p, Some(Instant::now() + load::OPEN_BUDGET))?;
+                // A refused file is a page that says why, so that a
+                // double click on it opens a window, as a later file
+                // refused does (`open_file`).
+                let opened = load::open(p, Some(Instant::now() + load::OPEN_BUDGET))
+                    .unwrap_or_else(|err| {
+                        refused_at_start = true;
+                        load::refused(&err)
+                    });
                 (
                     opened.document,
                     opened.pending,
@@ -202,9 +222,11 @@ pub fn run(
                 false,
             ),
         };
-    // Absolute from here on: a bare relative name like `README.md` has the
-    // empty string as parent, which breaks the sidebar root and the dialog.
-    let path = path.map(|p| p.canonicalize().unwrap_or(p));
+    // Absolute from here on, for a file that does not exist yet in a
+    // folder that does: a bare relative name like `README.md` has the
+    // empty string as parent, which breaks the sidebar root and the
+    // dialog. A path the loader will refuse stays as given.
+    let path = path.map(|p| load::canonical(&p));
     let doc_dir = path
         .as_ref()
         .and_then(|p| p.parent().map(|d| d.to_path_buf()))
@@ -267,8 +289,7 @@ pub fn run(
     let theme_choice = theme_name.as_deref().unwrap_or(&config.theme);
     // At least one theme file always exists: an emptied collection is
     // reseeded from the compiled palette before resolution runs.
-    if let Some(base) = directories::BaseDirs::new() {
-        let target = base.data_dir().join("oryx/themes");
+    if let Some(target) = theme::user_dir() {
         if let Err(err) = theme::seed(&theme_dirs(), &target) {
             eprintln!("oryx: cannot seed themes: {err}");
         }
@@ -322,6 +343,7 @@ pub fn run(
         touch: touch::Tracker::new(1.0),
         pan_target: PanTarget::Document,
         fling: None,
+        edge_scroll: scroll::EdgeScroll::default(),
         wheel_zoom: 0.0,
         #[cfg(target_os = "linux")]
         drops: None,
@@ -360,6 +382,8 @@ pub fn run(
         occurrences: None,
         occurrences_at: None,
         goto: None,
+        path_ask: None,
+        pending_export: None,
         pending_goto: launch_target,
         search_canvas: None,
         last_query: String::new(),
@@ -377,8 +401,9 @@ pub fn run(
         ledger: None,
         undo: None,
         rehighlight_at: None,
-        burst_end: 0,
-        resumed: false,
+        key_lines: 0..0,
+        flush_first: false,
+        caret_seam_for: None,
         seams: HashMap::new(),
         spec_band: None,
         guessed: HashMap::new(),
@@ -392,6 +417,7 @@ pub fn run(
         pending_row: None,
         pending_search_jump: None,
         disk_seen: None,
+        new_file: false,
         disk_conflict: false,
         disk_check_at: Instant::now(),
         disk_misses: 0,
@@ -406,6 +432,7 @@ pub fn run(
         blink_visible: true,
         ime_on: false,
         blink_flip: Instant::now(),
+        caret_was: None,
         drawn_once: false,
         focused: true,
         pause_save: autosave::Pause::default(),
@@ -421,7 +448,7 @@ pub fn run(
         count_at: None,
         count_inbox: std::sync::mpsc::channel(),
         count_asked: 0,
-        open_failed: false,
+        open_failed: refused_at_start,
         gutter_measured: None,
         notice: None,
         notice_canvas: None,
@@ -663,32 +690,6 @@ fn draw_strip(
         let src = row * strip.width as usize;
         frame[dst..dst + shown].copy_from_slice(&strip.pixels[src..src + shown]);
     }
-}
-
-/// The rectangles of the matches whose top lies between `lo` and `hi`,
-/// each with its match's index. Bounding the geometry to a window around
-/// the view keeps thousands of matches cheap, and one shaped buffer per
-/// run serves every match the run holds.
-fn window_rects(
-    lay: &LayoutDoc,
-    doc: &Document,
-    fonts: &mut FontStore,
-    matches: &[Selection],
-    lo: f32,
-    hi: f32,
-) -> Vec<(usize, (f32, f32, f32, f32))> {
-    let mut rects = Vec::new();
-    let mut shaped = selection::ShapeCache::default();
-    let tops = selection::match_tops(lay, doc, matches);
-    for (index, m) in matches.iter().enumerate() {
-        if tops[index] < lo || tops[index] > hi {
-            continue;
-        }
-        for rect in selection::rects_window(m, lay, doc, fonts, &mut shaped, lo, hi) {
-            rects.push((index, rect));
-        }
-    }
-    rects
 }
 
 /// A place in the source the view shows once the layout reaches it.
@@ -1034,20 +1035,23 @@ fn kept_layout(
 /// guesses colored) asks for nothing either, or two cold blocks near
 /// the view alternate without end (issue #9). A band covered in part is
 /// asked whole, as after a jump to the end and a scroll back up.
-/// Nothing while a re-coloring is owed or a resumed sweep runs
-/// (`resting`): the lines below a keystroke keep the colors they had,
-/// shifted by the edit, until the sweep corrects them. A cold guess
-/// there would flash its colors below the caret for a frame or two,
-/// and one landing past the seam the sweep converges on would stand in
-/// place of the exact colors.
+/// Nothing while a re-coloring is owed (`owed`): the lines below a
+/// keystroke keep the colors they had, shifted by the edit, until the
+/// sweep corrects them, and a cold guess there would flash its colors
+/// below the caret for a frame or two. Nothing over a block with a seam
+/// past its frontier: a sweep resumed against the table could converge
+/// there and vouch for the guess's lines in place of the exact colors.
+/// A first coloring leaves no seam past the frontier, so its band is
+/// guessed, after F1 and back as at an open.
 fn speculation_target(
     doc: &Document,
     visible: &[(usize, std::ops::Range<usize>)],
     in_flight: bool,
     guessed: &HashMap<usize, Vec<std::ops::Range<usize>>>,
-    resting: bool,
+    owed: bool,
+    seams: &HashMap<usize, Table>,
 ) -> Option<(usize, std::ops::Range<usize>)> {
-    if in_flight || resting {
+    if in_flight || owed {
         return None;
     }
     for (block, lines) in visible {
@@ -1058,6 +1062,12 @@ fn speculation_target(
             continue;
         };
         if language.is_none() || *exact >= lines.end {
+            continue;
+        }
+        if seams
+            .get(block)
+            .is_some_and(|table| table.past_frontier(*exact))
+        {
             continue;
         }
         let band = (*exact).max(lines.start)..lines.end;
@@ -1088,6 +1098,25 @@ fn note_guess(ranges: &mut Vec<std::ops::Range<usize>>, landed: std::ops::Range<
     ranges.push(merged);
 }
 
+/// The line count of a document's first block, zero without a code
+/// block.
+fn line_count(doc: &Document) -> usize {
+    match doc.blocks.first().map(|b| &b.kind) {
+        Some(BlockKind::CodeBlock { lines, .. }) => lines.len(),
+        _ => 0,
+    }
+}
+
+/// Whether the first chunk of a resumed sweep has landed: an exact
+/// chunk whose rows reach the end of the key's lines. The chunks above
+/// it, from a walk that fell short, and a caret seam landing first do
+/// not count, so the immediate flush waits for the key's lines.
+fn first_flush_due(arrivals: &[highlight::Arrival], key_lines: &std::ops::Range<usize>) -> bool {
+    arrivals.iter().any(|a| {
+        !a.speculative && !a.spans.is_empty() && a.start_line + a.spans.len() >= key_lines.end
+    })
+}
+
 /// The rendered page set aside while its source is edited. A return
 /// that changed no byte puts it back whole, so looking at the source
 /// and coming out costs nothing at any file size.
@@ -1097,9 +1126,11 @@ struct Parked {
     pass: Option<LayoutPass>,
     scroll_y: f32,
     layout_width: f32,
-    /// The undo head at the crossing; an equal head on the way out
-    /// means equal bytes, so the parked page is still the truth.
-    head: usize,
+    /// The edits since the page was rendered, over the page's own
+    /// text: the outline's offsets are the page's, and this ledger
+    /// places them in the current text. Whether the page is still the
+    /// buffer's render is read from the bytes themselves.
+    edits: Ledger,
     /// The look the parked layout was built under: a change of font,
     /// of size, of zoom or of direction while editing drops the layout
     /// and keeps the model, a theme change refills its colors
@@ -1128,6 +1159,7 @@ struct Stash {
     media: MediaCache,
     book_toc: Vec<epub::TocEntry>,
     disk_seen: Option<(std::time::SystemTime, u64)>,
+    new_file: bool,
     /// The selection anchors on the model, which returns untouched, so
     /// it survives the trip whole.
     selection: Option<Selection>,
@@ -1139,15 +1171,18 @@ struct Stash {
     /// A parse was still streaming at the swap, so the model is
     /// partial; the return reopens from disk instead of restoring it.
     reopen: bool,
-    /// The document's seam table and the burst's end, for the return to
-    /// resume from.
-    seams: HashMap<usize, Vec<(usize, highlight::Seam)>>,
-    burst_end: usize,
+    /// The document's seam tables, for the return to resume from.
+    seams: HashMap<usize, Table>,
 }
 
 /// The help document, parsed from the generated page.
 fn markdown_help() -> Document {
     oryx::doc::markdown::parse(help::page())
+}
+
+/// The math page of the help, `MATH.md` with its way back.
+fn markdown_math() -> Document {
+    oryx::doc::markdown::parse(help::math_page())
 }
 
 /// The viewer's justification for a document: the book preference on a
@@ -1244,11 +1279,30 @@ fn disk_state(path: &Path) -> std::io::Result<Option<DiskState>> {
     }
 }
 
-/// Whether the editor's caret is painted: in the editor, on the lit
-/// half of its blink, and only while the window has the focus, the way
-/// a native text box behaves.
-fn caret_shown(editing: bool, blink_lit: bool, focused: bool) -> bool {
-    editing && blink_lit && focused
+/// Where the live caret stands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CaretAt {
+    Text,
+    Field,
+}
+
+/// Where the caret is live: in the text field that has the keys, or in
+/// the editor's text, the way a native text box behaves. No caret is
+/// live while the window is in the background, in reading mode, or
+/// while the keys go to a list or a question. Only the live caret is
+/// painted and blinks, so a caret on screen shows where the next key
+/// lands.
+fn live_caret(owner: KeyOwner, editing: bool, focused: bool) -> Option<CaretAt> {
+    if !focused {
+        return None;
+    }
+    match owner {
+        KeyOwner::Question | KeyOwner::Dialog { field: false } => None,
+        KeyOwner::Dialog { field: true } | KeyOwner::Path | KeyOwner::GoTo | KeyOwner::Search => {
+            Some(CaretAt::Field)
+        }
+        KeyOwner::Text | KeyOwner::Code => editing.then_some(CaretAt::Text),
+    }
 }
 
 /// The loop's next wake, rebuilt at every pass: each timer still
@@ -1406,10 +1460,11 @@ const DEFAULT_DATA_DIRS: &str = "/usr/local/share:/usr/share";
 const DEFAULT_DATA_DIRS: &str = "";
 
 /// Theme directories in lookup order: next to the binary, the user's
-/// data directory (a per-user install and the theme editor write there),
-/// each system data directory of `XDG_DATA_DIRS` (a package's
-/// `/usr/share`, a Flatpak's `/app/share`, an AppImage's bundled share
-/// through its AppRun), then the working directory.
+/// themes folder (`theme::user_dir`: a per-user install, the browser
+/// and the editor write there), each system data directory of
+/// `XDG_DATA_DIRS` (a package's `/usr/share`, a Flatpak's `/app/share`,
+/// an AppImage's bundled share through its AppRun), then the working
+/// directory.
 fn theme_dirs() -> Vec<PathBuf> {
     theme_dirs_from(std::env::var_os("XDG_DATA_DIRS").as_deref())
 }
@@ -1424,9 +1479,7 @@ fn theme_dirs_from(xdg_data_dirs: Option<&std::ffi::OsStr>) -> Vec<PathBuf> {
             }
         }
     }
-    if let Some(base) = directories::BaseDirs::new() {
-        dirs.push(base.data_dir().join("oryx/themes"));
-    }
+    dirs.extend(theme::user_dir());
     let system = match xdg_data_dirs {
         Some(value) if !value.is_empty() => value.to_os_string(),
         _ => std::ffi::OsString::from(DEFAULT_DATA_DIRS),
@@ -1551,6 +1604,9 @@ struct App {
     pan_target: PanTarget,
     /// A running fling: its velocity and when it last stepped.
     fling: Option<(f32, Instant)>,
+    /// The edge scroll of a selection drag held at or past the view's
+    /// top or bottom edge.
+    edge_scroll: scroll::EdgeScroll,
     /// The wheel's fraction of a zoom notch not yet spent, while the
     /// chord key is held.
     wheel_zoom: f32,
@@ -1643,6 +1699,12 @@ struct App {
     /// The go to line field while it is open; never beside the search
     /// bar, since both stand in the same corner and take the keys.
     goto: Option<GotoState>,
+    /// The path field while it is open: a file dialog that could not
+    /// appear asks for the path in the window instead. Never beside the
+    /// search bar or the go to line field, which take the same corner.
+    path_ask: Option<PathState>,
+    /// The export whose target the path field asks for, until it answers.
+    pending_export: Option<ExportSettings>,
     /// A line asked for while the file's text was still arriving, from
     /// the command line or the field: the jump waits for the whole
     /// source, since a line is counted from the top of it.
@@ -1689,20 +1751,23 @@ struct App {
     /// The undo stack, living and dying with the ledger; the save point
     /// inside it drives the title asterisk.
     undo: Option<Undo>,
-    /// When the edited block re-highlights, set by each keystroke and
-    /// fired once typing rests.
+    /// When the worker re-colors the lines below a key: set by a key
+    /// that changed the state after its lines, or whose walk fell
+    /// short, and fired after the rest.
     rehighlight_at: Option<Instant>,
-    /// The highest line an edit touched that no exact sweep has reached
-    /// since, shifted by each edit as a seam is; zero for none. The
-    /// resumed sweep converges only at a seam at or past it.
-    burst_end: usize,
-    /// A sweep resumed by the rest timer is running: no guess until it
-    /// is done, or a converged stop would vouch for the guess's lines.
-    resumed: bool,
+    /// The lines of the last key, where the worker's resumed sweep cuts
+    /// a chunk so that seams are filed there for the next key.
+    key_lines: std::ops::Range<usize>,
+    /// The first chunk of a resumed sweep lands at once, ahead of the
+    /// wave: the lines below the key wait one chunk, not 400 ms.
+    flush_first: bool,
+    /// The caret's line a seam was asked for, so that one ask is in
+    /// flight; cleared when it lands and at every kill.
+    caret_seam_for: Option<usize>,
     /// The live generation's seam table per block, from the exact
-    /// sweep's arrivals: the (line, state) pairs a later sweep can
-    /// resume from and converge against.
-    seams: HashMap<usize, Vec<(usize, highlight::Seam)>>,
+    /// sweep's arrivals and the keys' walks: what a later sweep resumes
+    /// from and converges against (`seams::Table`).
+    seams: HashMap<usize, Table>,
     /// The guess in flight, cleared when its arrival lands; nothing
     /// else is asked meanwhile, or the new guess would drop it.
     spec_band: Option<(usize, std::ops::Range<usize>)>,
@@ -1741,6 +1806,11 @@ struct App {
     /// The open file's on-disk identity at last read or write, for the
     /// external-change check.
     disk_seen: Option<(std::time::SystemTime, u64)>,
+    /// The open file was not on disk at its open and is not saved yet:
+    /// `oryx notes.md` on a name that did not exist. Its first save
+    /// creates it, and the disk check watches its path for a file that
+    /// someone else puts there first.
+    new_file: bool,
     /// The file changed on disk under unsaved edits and the reader was
     /// told. Autosave holds while this stands; a write or a read of our
     /// own clears it.
@@ -1787,6 +1857,10 @@ struct App {
     /// only on the change.
     ime_on: bool,
     blink_flip: Instant,
+    /// Where the caret was live at the previous frame. The blink stands
+    /// still while no caret is live, so a caret that comes back, or that
+    /// moves between the text and a field, restarts on the visible half.
+    caret_was: Option<CaretAt>,
     /// False until the first frame is drawn.
     drawn_once: bool,
     /// Whether the window has the keyboard focus. In the background the
@@ -2252,14 +2326,13 @@ impl App {
         self.refresh_title();
         let text = Arc::clone(&self.document.source);
         if let Some(source) = edit::source_document(kind, &text) {
-            let head = self.undo.as_ref().map_or(0, Undo::head);
             let parked = Parked {
                 document: std::mem::replace(&mut self.document, source),
                 layout: self.layout.take(),
                 pass: self.pass.take(),
                 scroll_y: self.scroll_y,
                 layout_width: self.layout_width,
-                head,
+                edits: Ledger::new(Arc::clone(&text), Vec::new()),
                 cfg: self.cfg.clone(),
                 theme: self.theme.clone(),
             };
@@ -2361,9 +2434,9 @@ impl App {
     }
 
     /// Rebuilds the page held behind the editor from the buffer, which
-    /// a save makes the file. The outline refreshes with it, and the
-    /// next return costs no parse, since the parked page is the
-    /// buffer's own render again.
+    /// a save makes the file, when its bytes moved. The outline
+    /// refreshes with it, and the next return costs no parse, since the
+    /// parked page is the buffer's own render again.
     fn refresh_parked_page(&mut self) {
         let Some(kind) = self
             .path
@@ -2372,19 +2445,21 @@ impl App {
         else {
             return;
         };
-        let head = self.undo.as_ref().map_or(0, Undo::head);
-        if self.edit_park.as_ref().is_none_or(|p| p.head == head) {
+        let Some(parked) = self.edit_park.as_mut() else {
+            return;
+        };
+        // A clean ledger of the edits since the park means the page's
+        // own bytes; a dirty one may still, after edits that cancelled,
+        // and the bytes then say.
+        if !parked.edits.is_dirty() || parked.document.source == self.document.source {
             return;
         }
         let page = edit::rendered_document(kind, &self.document.source);
-        let outline = OutlineTree::build(&page);
-        if let Some(parked) = self.edit_park.as_mut() {
-            parked.document = page;
-            parked.head = head;
-            parked.layout = None;
-            parked.pass = None;
-        }
-        self.outline = outline;
+        self.outline = OutlineTree::build(&page);
+        parked.edits = Ledger::new(Arc::clone(&page.source), Vec::new());
+        parked.document = page;
+        parked.layout = None;
+        parked.pass = None;
     }
 
     /// Back to reading; the caret offset is remembered for this file so
@@ -2434,8 +2509,16 @@ impl App {
             self.resume_edit.remove(path);
         }
         if let Some(parked) = self.edit_park.take() {
-            let head = self.undo.as_ref().map_or(0, Undo::head);
-            if head == parked.head {
+            // Every edit of the editor goes through the park's ledger: a
+            // clean one means the bytes are the page's, and the bytes are
+            // compared only behind a dirty one.
+            debug_assert!(
+                parked.edits.is_dirty() || parked.document.source == self.document.source,
+                "an edit reached the buffer past the park's ledger"
+            );
+            let unchanged =
+                !parked.edits.is_dirty() || parked.document.source == self.document.source;
+            if unchanged {
                 // The held outline describes this very page; rebuilding
                 // it here would cost a parse of the whole page for nothing.
                 self.document = parked.document;
@@ -2496,6 +2579,58 @@ impl App {
     fn wake_caret(&mut self) {
         self.blink_visible = true;
         self.blink_flip = Instant::now() + CARET_BLINK;
+    }
+
+    /// What has the keys: the four that take them before the editor in
+    /// the routing of `window_event`, in its order, then the text.
+    fn key_owner(&self) -> KeyOwner {
+        if self.confirm.is_some() {
+            KeyOwner::Question
+        } else if let Some(overlay) = self.overlay.as_ref() {
+            KeyOwner::Dialog {
+                field: overlay.field_has_keys(),
+            }
+        } else if self.path_ask.is_some() {
+            KeyOwner::Path
+        } else if self.goto.is_some() {
+            KeyOwner::GoTo
+        } else if self.search.is_some() {
+            KeyOwner::Search
+        } else if self.mode == edit::Mode::Edit && !self.markdown_source() {
+            KeyOwner::Code
+        } else {
+            KeyOwner::Text
+        }
+    }
+
+    fn caret_now(&self) -> Option<CaretAt> {
+        live_caret(
+            self.key_owner(),
+            self.mode == edit::Mode::Edit,
+            self.focused,
+        )
+    }
+
+    /// Where the caret is live for this frame. A caret that comes back
+    /// (a dialog closed, the window focused again, the editor opened) or
+    /// moves between the text and a field starts on the visible half,
+    /// since the blink stood still or belonged to the other caret.
+    fn follow_caret(&mut self, owner: KeyOwner) -> Option<CaretAt> {
+        let live = live_caret(owner, self.mode == edit::Mode::Edit, self.focused);
+        let was = std::mem::replace(&mut self.caret_was, live);
+        if live.is_some() && live != was {
+            self.wake_caret();
+        }
+        live
+    }
+
+    /// A key or a press while a field has the keys shows its caret at
+    /// once, the way a caret action in the text does.
+    fn wake_field_caret(&mut self) {
+        if self.caret_now() == Some(CaretAt::Field) {
+            self.wake_caret();
+            self.request_redraw();
+        }
     }
 
     fn show_notice(&mut self, text: &str) {
@@ -2774,7 +2909,7 @@ impl App {
             .unwrap_or_default()
             .to_string();
         let caret_before = self.caret.map_or(range.start, |c| c.offset);
-        if !self.apply_edit(range.clone(), text) {
+        if !self.apply_edit(&Replay::single(range.clone(), text)) {
             return;
         }
         if let Some(hist) = self.undo.as_mut() {
@@ -2803,6 +2938,59 @@ impl App {
             );
             self.undo = Some(Undo::new());
         }
+    }
+
+    /// The unsaved edits of `ledger` dropped, the document still on
+    /// screen: the text goes back to the ledger's base, the file as
+    /// last read or written, when a byte differs. The line ending
+    /// record is the base's in every case, since the record of the
+    /// open does not follow the saves, and the next ledger is built
+    /// from it. The editor gets that ledger at once, so that it types.
+    fn discard_edits(&mut self, ledger: Ledger) {
+        let dirty = ledger.is_dirty();
+        let (base, crlf) = ledger.into_base();
+        self.crlf = crlf;
+        if dirty {
+            self.restore_text(&base);
+        }
+        if self.mode == edit::Mode::Edit {
+            self.ensure_ledger();
+        }
+        self.refresh_title();
+    }
+
+    /// The document built again from `text`, in whatever the reader is
+    /// looking at: the page, or the source view with its parked page
+    /// and the outline behind it, or a code file's own lines. The caret
+    /// stays where it was, held inside the text; the layout and the
+    /// colors start afresh.
+    fn restore_text(&mut self, text: &str) {
+        let Some(kind) = self
+            .path
+            .as_deref()
+            .map(|path| load::detect_with_text(path, text))
+        else {
+            return;
+        };
+        let page = edit::rendered_document(kind, text);
+        self.outline = OutlineTree::build(&page);
+        match (self.edit_park.as_mut(), edit::source_document(kind, text)) {
+            (Some(parked), Some(source)) => {
+                parked.edits = Ledger::new(Arc::clone(&page.source), Vec::new());
+                parked.document = page;
+                parked.layout = None;
+                parked.pass = None;
+                self.document = source;
+            }
+            _ => self.document = page,
+        }
+        if let Some(caret) = self.caret {
+            self.caret = Some(Caret::at(caret::clamp(&self.document, caret.offset)));
+        }
+        self.rehighlight_at = None;
+        self.drop_waiting_landings();
+        self.swapped_document(None, None);
+        self.request_redraw();
     }
 
     /// A click on a rendered task checkbox, the one edit reading
@@ -2858,31 +3046,31 @@ impl App {
     /// editor; deeper text units are legal too and pay the rendered
     /// rebuild.
     fn undo_edit(&mut self) {
-        let Some((splice, caret)) = self.undo.as_mut().and_then(Undo::undo) else {
+        let Some((step, caret)) = self.undo.as_mut().and_then(Undo::undo) else {
             return;
         };
         match self.mode {
             edit::Mode::Edit => {
-                if self.apply_edit(splice.range, &splice.text) {
+                if self.apply_edit(&step) {
                     self.seat_caret_after_edit(caret);
                 }
             }
-            edit::Mode::Read => self.apply_read_edit(splice.range, &splice.text, caret),
+            edit::Mode::Read => self.apply_read_edit(&step, caret),
         }
     }
 
     /// A read-mode undo or redo applied: the ledger replays the
-    /// splice, the rendered page rebuilds from the buffer, and the
+    /// edit, the rendered page rebuilds from the buffer, and the
     /// view stays put unless the restored edit is off screen, where
     /// its block seats through the pending target.
-    fn apply_read_edit(&mut self, range: std::ops::Range<usize>, text: &str, caret: usize) {
+    fn apply_read_edit(&mut self, step: &Replay, caret: usize) {
         let Some(path) = self.path.clone() else {
             return;
         };
         let Some(ledger) = self.ledger.as_mut() else {
             return;
         };
-        ledger.edit(range, text);
+        ledger.replay(step);
         let current = ledger.current();
         let visible = self
             .layout
@@ -2916,16 +3104,16 @@ impl App {
     /// Steps the history one unit forward and reapplies its splice.
     /// Inert outside edit mode.
     fn redo_edit(&mut self) {
-        let Some((splice, caret)) = self.undo.as_mut().and_then(Undo::redo) else {
+        let Some((step, caret)) = self.undo.as_mut().and_then(Undo::redo) else {
             return;
         };
         match self.mode {
             edit::Mode::Edit => {
-                if self.apply_edit(splice.range, &splice.text) {
+                if self.apply_edit(&step) {
                     self.seat_caret_after_edit(caret);
                 }
             }
-            edit::Mode::Read => self.apply_read_edit(splice.range, &splice.text, caret),
+            edit::Mode::Read => self.apply_read_edit(&step, caret),
         }
     }
 
@@ -2945,14 +3133,27 @@ impl App {
     }
 
     /// One edit applied: the ledger splices it, the document and the
-    /// layout splice in place on the fast path, and the edited block
-    /// re-highlights once typing rests. The full reparse and relayout
-    /// survive as the fallback: a pass still measuring, or a splice the
-    /// model declines. False when no ledger stands.
-    fn apply_edit(&mut self, range: std::ops::Range<usize>, text: &str) -> bool {
+    /// layout splice in place on the fast path, the touched lines take
+    /// their colors on the key (`color_on_key`), and the lines below
+    /// re-color by the worker when the key changed the state after
+    /// them. The full reparse and relayout survive as the fallback: a
+    /// pass still measuring, or a splice the model declines, where the
+    /// worker colors the touched lines too. An edit of several pieces
+    /// (Replace All) reaches the ledger as its pieces and the page as the
+    /// one range that covers them. False when no ledger stands.
+    fn apply_edit(&mut self, step: &Replay) -> bool {
+        let (range, text) = (step.range.clone(), step.text.as_str());
         let Some(path) = self.path.clone() else {
             return false;
         };
+        let exact0 = self.frontier(0);
+        let grammar = matches!(
+            self.document.blocks.first().map(|b| &b.kind),
+            Some(BlockKind::CodeBlock {
+                language: Some(_),
+                ..
+            })
+        );
         let Some(ledger) = self.ledger.as_mut() else {
             return false;
         };
@@ -2961,7 +3162,12 @@ impl App {
             .source
             .get(range.clone())
             .map_or(0, |cut| cut.matches('\n').count());
-        let touched = ledger.edit(range.clone(), text);
+        let touched = ledger.replay(step);
+        // The outline's offsets are the parked page's: the park's ledger
+        // follows the edit so they can be placed in the current text.
+        if let Some(parked) = self.edit_park.as_mut() {
+            parked.edits.splice(range.clone(), text);
+        }
         let old_touched = touched.start..touched.start + removed + 1;
         let current = ledger.current();
         let settled =
@@ -2971,13 +3177,10 @@ impl App {
                 edit::splice_document(&mut self.document, &current, range.clone(), touched.clone())
             })
             .flatten();
-        match spliced {
+        let owed = match spliced {
             Some((old_lines, new_lines)) => {
-                if let Some(table) = self.seams.get_mut(&0) {
-                    highlight::shift_seams(table, old_lines.clone(), new_lines.clone());
-                }
-                self.burst_end = highlight::shift_line(self.burst_end, &old_lines, &new_lines)
-                    .max(new_lines.end);
+                self.key_lines = new_lines.clone();
+                let owed = self.color_on_key(exact0, &old_lines, &new_lines);
                 // The model spliced; the layout follows in place, or a
                 // restart re-measures the already-correct model.
                 let lay = self.layout.as_mut().expect("settled layout");
@@ -3001,23 +3204,33 @@ impl App {
                 } else {
                     self.restart_layout();
                 }
+                owed
             }
             None => {
-                if let Some(table) = self.seams.get_mut(&0) {
-                    highlight::shift_seams(table, old_touched.clone(), touched.clone());
-                }
-                self.burst_end =
-                    highlight::shift_line(self.burst_end, &old_touched, &touched).max(touched.end);
+                let old_len = line_count(&self.document);
                 self.document = edit::reparse(
                     load::detect(&path),
                     &current,
                     &self.document,
-                    old_touched,
-                    touched,
+                    old_touched.clone(),
+                    touched.clone(),
                 );
+                // The ledger's ranges count the row after a final line
+                // break, which the line table does not have: the seam
+                // table shifts by the lines the tables count, as the
+                // splice arm does.
+                let (old_eff, new_eff) = edit::effective_lines(
+                    old_len,
+                    line_count(&self.document),
+                    &old_touched,
+                    &touched,
+                );
+                self.seams.entry(0).or_default().shift(&old_eff, &new_eff);
+                self.key_lines = new_eff;
                 self.restart_layout();
+                grammar
             }
-        }
+        };
         // The outline belongs to the rendered page. While a park
         // stands, the document on screen is the source view, whose
         // build would empty the panel; the held outline refreshes on
@@ -3026,12 +3239,13 @@ impl App {
             self.outline = OutlineTree::build(&self.document);
         }
         // The keystroke kills in-flight highlight work, so stale spans
-        // never fold against shifted lines; the resumed re-run waits
-        // for the typing to rest and needs the shifted seam table, so
-        // only the worker cancels. Prose has no colors to correct.
+        // never fold against shifted lines; the worker's resume needs
+        // the shifted seam table, so only the worker cancels. The lines
+        // below are owed a re-coloring unless the walk found the state
+        // after the touched lines unchanged. A block with no grammar
+        // owes nothing.
         self.cancel_highlight();
-        self.rehighlight_at =
-            (!self.document.plain_file).then(|| Instant::now() + REHIGHLIGHT_REST);
+        self.rehighlight_at = owed.then(|| Instant::now() + REHIGHLIGHT_REST);
         self.selection = None;
         self.sel_anchor = None;
         self.count_after_edit();
@@ -3235,14 +3449,28 @@ impl App {
             return false;
         };
         // A file deleted on disk while read: its own bytes go back whole,
-        // through the ledger the checkbox click arms the same way.
-        if self.ledger.is_none() && self.file_deleted && self.writable() {
+        // through the ledger the checkbox click arms the same way. A file
+        // not yet on disk, `oryx notes.md` on a name that did not exist,
+        // is created by its first save, with nothing typed too.
+        // A file that appeared at the path of a new file meanwhile: with
+        // nothing typed the page takes it, and nothing is written. Over
+        // typed text Ctrl+S is the reader's word, as over any file that
+        // changed on disk.
+        if self.new_file && matches!(disk_state(&path), Ok(Some(_))) {
+            if !self.edits_unsaved() {
+                self.new_file_arrived(&path);
+                return false;
+            }
+            self.new_file = false;
+        }
+        let on_disk = !self.new_file;
+        if self.ledger.is_none() && (self.file_deleted || !on_disk) && self.writable() {
             self.ensure_ledger();
         }
         let Some(ledger) = self.ledger.as_ref() else {
             return false;
         };
-        if !self.edits_unsaved() {
+        if !self.edits_unsaved() && on_disk {
             self.show_notice("No unsaved changes");
             return true;
         }
@@ -3252,6 +3480,8 @@ impl App {
             Ok(()) => {
                 let receipt = if back {
                     "Saved, the file is back".to_string()
+                } else if !on_disk {
+                    "Saved, the file is created".to_string()
                 } else if lines == 1 {
                     "Saved, 1 line changed".to_string()
                 } else {
@@ -3320,6 +3550,7 @@ impl App {
             note: self.unnamed(),
             deleted: self.file_deleted,
             conflict: self.disk_conflict,
+            new: self.new_file,
             seen: self.disk_seen,
             now,
         };
@@ -3329,6 +3560,7 @@ impl App {
                 // A deleted file has its own notice and its own question
                 // at the quit; a change found here first is told once.
                 if !self.disk_conflict && !self.file_deleted && now.is_some() {
+                    self.new_file = false;
                     self.disk_seen = now;
                     self.tell_disk_conflict();
                 }
@@ -3375,36 +3607,57 @@ impl App {
         if self.ledger.is_none() && self.writable() {
             self.ensure_ledger();
         }
-        let Some(ledger) = self.ledger.as_ref() else {
+        if self.ledger.is_none() {
             if self.document.book_id.is_some() {
                 self.show_notice("A book cannot be saved as a text file");
             } else if self.path.is_some() {
                 self.show_notice("This file did not read cleanly, so Oryx will not write it back");
             }
             return false;
-        };
-        let bytes = ledger.emit();
-        let mut dialog = rfd::FileDialog::new();
+        }
         let home = config::home_dir();
-        if let Some(dir) = save_dialog_dir(
+        let folder = save_dialog_dir(
             self.unnamed(),
             self.note_from.as_deref(),
             self.path.as_deref(),
             home.as_deref(),
-        ) {
-            dialog = dialog.set_directory(dialog_start(dir));
-        }
-        if let Some(name) = self
+        )
+        .map(dialog_start);
+        let name = self
             .path
             .as_deref()
             .and_then(Path::file_name)
             .and_then(|n| n.to_str())
-        {
+            .map(str::to_string);
+        let mut dialog = rfd::FileDialog::new();
+        if let Some(dir) = folder.clone() {
+            dialog = dialog.set_directory(dir);
+        }
+        if let Some(name) = name.as_deref() {
             dialog = dialog.set_file_name(name);
         }
-        let Some(target) = dialog.save_file() else {
+        let target = match dialog::save_file(dialog) {
+            Answer::Path(target) => target,
+            Answer::Cancel => return false,
+            Answer::NoDialog(why) => {
+                self.open_path_ask(Ask::SaveAs, folder, name.as_deref(), &why);
+                return false;
+            }
+        };
+        self.save_as_to(target)
+    }
+
+    /// The current text written to `target`, which becomes the open
+    /// file, as `save_as` says; the ledger is read here, at the moment
+    /// of the write, since the path field answers later than the key.
+    fn save_as_to(&mut self, target: PathBuf) -> bool {
+        if self.ledger.is_none() && self.writable() {
+            self.ensure_ledger();
+        }
+        let Some(ledger) = self.ledger.as_ref() else {
             return false;
         };
+        let bytes = ledger.emit();
         match save::write_atomic(&target, &bytes) {
             Ok(()) => {
                 let editing = self.mode == edit::Mode::Edit;
@@ -3455,19 +3708,31 @@ impl App {
     /// type, then the empty file created, opened with the sidebar moved
     /// to its folder, and edit mode entered on the blank page.
     fn new_file(&mut self) {
-        let mut dialog = rfd::FileDialog::new().set_file_name("untitled.txt");
         // The document's folder, which for the note and piped text is
         // the one they came from, never Oryx's own folder that goes at
         // quit with anything saved into it.
-        if let Some(dir) = self.document_dir() {
-            dialog = dialog.set_directory(dialog_start(dir));
+        let folder = self.document_dir().map(dialog_start);
+        let mut dialog = rfd::FileDialog::new().set_file_name("untitled.txt");
+        if let Some(dir) = folder.clone() {
+            dialog = dialog.set_directory(dir);
         }
-        let Some(target) = dialog.save_file() else {
-            return;
+        let target = match dialog::save_file(dialog) {
+            Answer::Path(target) => target,
+            Answer::Cancel => return,
+            Answer::NoDialog(why) => {
+                self.open_path_ask(Ask::New, folder, Some("untitled.txt"), &why);
+                return;
+            }
         };
+        self.create_new_file(target);
+    }
+
+    /// The empty file created at `target` and opened in the editor, the
+    /// sidebar on its folder. False when the file could not be written.
+    fn create_new_file(&mut self, target: PathBuf) -> bool {
         if let Err(err) = save::write_atomic(&target, b"") {
             self.show_notice(&format!("Could not create the file: {err}"));
-            return;
+            return false;
         }
         self.open_file(&target, true);
         self.workspace.refresh();
@@ -3476,6 +3741,7 @@ impl App {
         if self.mode != edit::Mode::Edit {
             self.toggle_edit();
         }
+        true
     }
 
     /// True while the open file is the untitled note.
@@ -3553,6 +3819,7 @@ impl App {
     /// under an ending that skips the save question. The save dialog
     /// remembers the folder of the file open before.
     fn open_note(&mut self) {
+        self.close_path_ask();
         let Some(root) = notes_root() else {
             self.show_notice("No folder for a note");
             return;
@@ -3753,6 +4020,32 @@ impl App {
             let meta = std::fs::metadata(path).ok()?;
             Some((meta.modified().ok()?, meta.len()))
         });
+        // Not there, said by the disk itself: a disk that cannot tell
+        // is no news, and such a file is not a new one.
+        self.new_file = self.writable()
+            && self
+                .path
+                .as_deref()
+                .is_some_and(|path| matches!(disk_state(path), Ok(None)));
+    }
+
+    /// A file stands at the path of a new file before its first save:
+    /// someone else put it there. With nothing typed the page takes it,
+    /// as a file changed on disk is reloaded; over typed text the reader
+    /// is told, and Ctrl+S is their word. True when one was found.
+    fn new_file_arrived(&mut self, path: &Path) -> bool {
+        let Ok(Some(state)) = disk_state(path) else {
+            return false;
+        };
+        self.new_file = false;
+        self.disk_misses = 0;
+        self.disk_seen = Some(state);
+        if self.edits_unsaved() {
+            self.tell_disk_conflict();
+        } else {
+            self.reload_now();
+        }
+        true
     }
 
     /// The external-change check, run on focus and rate-limited on
@@ -3774,10 +4067,14 @@ impl App {
             self.workspace.refresh();
             self.request_redraw();
         }
-        let Some(seen) = self.disk_seen else {
+        let Some(path) = self.path.clone() else {
             return;
         };
-        let Some(path) = self.path.clone() else {
+        if self.new_file {
+            self.new_file_arrived(&path);
+            return;
+        }
+        let Some(seen) = self.disk_seen else {
             return;
         };
         let Ok(state) = disk_state(&path) else {
@@ -3951,12 +4248,26 @@ impl App {
                     self.ask_next_leftover();
                 }
             }
+            // The edits leave before the step the question held, so that
+            // nothing between the decision and the step's end saves them
+            // (the pause save runs in the same pass once the question is
+            // gone). A step that opened a file has a document of its own
+            // and a ledger of its own; a quit has no next frame. A step
+            // that came back without either, a cancelled dialog or a
+            // folder missing, left the document in place: the text then
+            // goes back to the file's.
             confirm::Decision::Discard => {
-                self.ledger = None;
+                let edits = self.ledger.take();
                 self.undo = None;
                 self.rehighlight_at = None;
                 self.refresh_title();
+                let shown = Arc::clone(&self.document.source);
                 self.resolve_confirm(event_loop);
+                if let Some(edits) = edits {
+                    if !event_loop.exiting() && Arc::ptr_eq(&shown, &self.document.source) {
+                        self.discard_edits(edits);
+                    }
+                }
             }
             confirm::Decision::Cancel => {
                 self.pending_step = None;
@@ -3967,29 +4278,74 @@ impl App {
         }
     }
 
-    /// Restarts the highlight worker over the edited block, the rest
-    /// timer's due action. The sweep resumes from the nearest stored
-    /// seam at or before the exact frontier, which every splice clamps
-    /// to the burst's first touched line, and it converges against the
-    /// shifted table past the burst's last touched line: typing
-    /// anywhere re-colors about one chunk, not the block, and a burst
-    /// of edits far apart re-colors the lines between them.
-    fn rehighlight_edited(&mut self) {
-        if self.document.plain_file {
-            return;
+    /// The exact frontier of a block: the lines verified for the current
+    /// text, zero for a block without colors.
+    fn frontier(&self, block: usize) -> usize {
+        match self.document.blocks.get(block).map(|b| &b.kind) {
+            Some(BlockKind::CodeBlock { exact, .. }) => *exact,
+            _ => 0,
         }
-        let pending = load::pending_from(&self.document, &self.seams, self.burst_end);
+    }
+
+    /// Colors the lines of a key on the window's thread (Task 327): the
+    /// table's walk from the nearest trusted seam, at or before the
+    /// frontier, toward the end of the touched lines, within
+    /// `KEY_COLOR_BUDGET` (`seams::Table::on_key`). Its spans go into
+    /// the block before the layout shapes the touched lines, so the
+    /// colors are in the frame of the key. Answers whether the lines
+    /// below are owed a re-coloring by the worker: not when the walk
+    /// reached the end of the touched lines and found the state there
+    /// unchanged, and never for a block with no grammar.
+    fn color_on_key(
+        &mut self,
+        exact0: usize,
+        old: &std::ops::Range<usize>,
+        new: &std::ops::Range<usize>,
+    ) -> bool {
+        let source = Arc::clone(&self.document.source);
+        let Some(BlockKind::CodeBlock {
+            language,
+            lines,
+            highlights,
+            exact,
+        }) = self.document.blocks.first_mut().map(|b| &mut b.kind)
+        else {
+            return false;
+        };
+        self.seams.entry(0).or_default().on_key(
+            &source,
+            lines,
+            language.as_deref(),
+            highlights,
+            exact,
+            exact0,
+            old,
+            new,
+            highlight::KEY_COLOR_BUDGET,
+            || true,
+        )
+    }
+
+    /// Restarts the highlight worker over the lines below a key, the
+    /// rest timer's due action. The sweep resumes from the nearest
+    /// stored seam at or before the exact frontier, the end of the key's
+    /// lines when its walk reached it, and converges against the seams
+    /// past the frontier, cutting a chunk at the key's lines so that
+    /// seams stand there for the next key: typing anywhere re-colors
+    /// about one chunk, not the block.
+    fn rehighlight_edited(&mut self) {
+        let cuts = [self.key_lines.start, self.key_lines.end];
+        let pending = load::pending_from(&self.document, &self.seams, &cuts);
         if pending.is_empty() {
             return;
         }
         // The resumed sweep converges against the stored table, which
         // therefore survives the start; its arrivals upsert their own
         // lines. A guess still in flight is dropped by the start, and
-        // none is asked until the sweep is done: a guess landing on
-        // lines a converged stop then vouches for would stand in place
-        // of the exact colors.
+        // none is asked while a seam stands past the frontier
+        // (`speculation_target`).
         self.spec_band = None;
-        self.resumed = true;
+        self.flush_first = true;
         let waker = self.waker.clone();
         self.highlighter.start(pending, move || waker());
     }
@@ -4103,8 +4459,8 @@ impl App {
     }
 
     /// The line burst behind press_tab: the lines the selection
-    /// touches, or the caret's line alone, re-indented as one splice
-    /// and one undo unit. In markdown an indent that would stop list
+    /// touches, or the caret's line alone, re-indented in one undo unit
+    /// (`rewrite_lines`). In markdown an indent that would stop list
     /// items being list items is refused with the reason.
     fn indent_lines(&mut self, outdent: bool) {
         if !outdent && self.markdown_source() {
@@ -4364,7 +4720,7 @@ impl App {
     }
 
     /// Rewrites the lines the selection touches, or the caret's line
-    /// alone, as one splice and one undo unit. `rewrite` answers the
+    /// alone, in one undo unit, each changed line an edit of its own. `rewrite` answers the
     /// new region and, per line, the byte column where the line
     /// changed and the delta. Caret and selection ride the per-line
     /// deltas rather than the splice's own seat, by `ride_rewrite`'s
@@ -4374,7 +4730,7 @@ impl App {
         let caret_before = self.caret.map_or(0, |c| c.offset);
         let anchor_before = self.selection_anchor_offset();
         let (start, end) = self.line_span();
-        let source = &self.document.source;
+        let source = self.document.source.clone();
         let (text, edits) = rewrite(&source[start..end]);
         if text == source[start..end] {
             return;
@@ -4385,17 +4741,28 @@ impl App {
         };
         let caret_after = map(caret_before);
         let anchor_after = anchor_before.map(map);
-        let replaced = source[start..end].to_string();
-        if !self.apply_edit(start..end, &text) {
+        // Each changed line is an edit of its own for the ledger and the
+        // history, so no edit holds a line break, and each line keeps
+        // the ending it has in the file.
+        let pieces = splice::line_pieces(&source[start..end], &text, start);
+        debug_assert!(pieces.is_some(), "a line command keeps the number of lines");
+        let pieces = pieces.unwrap_or_else(|| vec![(start..end, text.clone())]);
+        let Some((range, joined)) = splice::combine(&source, &pieces) else {
+            return;
+        };
+        let step = Replay {
+            range,
+            text: joined,
+            pieces,
+        };
+        if !self.apply_edit(&step) {
             return;
         }
         if let Some(hist) = self.undo.as_mut() {
-            hist.record(
-                start..end,
-                &text,
-                &replaced,
+            hist.record_each(
+                &source,
+                &step.pieces,
                 (caret_before, caret_after),
-                Kind::Structural,
                 Instant::now(),
             );
         }
@@ -4714,6 +5081,7 @@ impl App {
     /// typing replaces it; Ctrl+F on an open bar reselects the same way.
     fn open_search(&mut self) {
         self.close_goto();
+        self.close_path_ask();
         if let Some(state) = self.search.as_mut() {
             state.query.select_all();
             if let Some(row) = state.replace.as_mut() {
@@ -4807,8 +5175,188 @@ impl App {
             return;
         }
         self.close_search();
+        self.close_path_ask();
         self.goto = Some(GotoState::new(goto::line_count(&self.document.source)));
         self.request_redraw();
+    }
+
+    /// A file dialog could not appear: the path field opens in its
+    /// place, on the folder and the name the dialog would have offered,
+    /// and the library's reason goes to the terminal. The folder falls
+    /// back to the home folder, then to the working directory.
+    fn open_path_ask(&mut self, ask: Ask, folder: Option<PathBuf>, name: Option<&str>, why: &str) {
+        eprintln!("oryx: no file dialog ({why}); asking for the path in the window");
+        // The same chord again keeps what was typed.
+        if self.path_ask.as_ref().is_some_and(|state| state.ask == ask) {
+            self.wake_field_caret();
+            return;
+        }
+        let folder = folder
+            .or_else(config::home_dir)
+            .or_else(|| std::env::current_dir().ok())
+            .unwrap_or_default();
+        self.close_search();
+        self.close_goto();
+        self.path_ask = Some(PathState::new(ask, folder, name));
+        self.wake_field_caret();
+        self.request_redraw();
+    }
+
+    fn close_path_ask(&mut self) {
+        if self.path_ask.take().is_some() {
+            self.pending_export = None;
+            self.search_mouse = false;
+            self.request_redraw();
+        }
+    }
+
+    /// A press on the path field puts its caret under the pointer; the
+    /// press is the field's, so the page under it stays as it was.
+    fn path_bar_press(&mut self) -> bool {
+        let Some(width) = self.logical_width() else {
+            return false;
+        };
+        let (x, y) = self.ui_cursor();
+        let Some(state) = self
+            .path_ask
+            .as_mut()
+            .filter(|_| pathfield::bar_hit(width, x, y))
+        else {
+            return false;
+        };
+        let (left, offsets) = (state.view.left, state.view.offsets.clone());
+        state.field.click(x - left, &offsets, Instant::now());
+        self.search_mouse = true;
+        self.request_redraw();
+        true
+    }
+
+    /// Keys the open path field consumes: Enter answers, Escape closes,
+    /// a character types, and the field's own editing keys act on it.
+    /// Everything else falls through to the app-wide commands, never to
+    /// the document.
+    fn path_key(&mut self, key: &Key, ctrl: bool, shift: bool, alt: bool, repeat: bool) -> bool {
+        if self.path_ask.is_none() || alt {
+            return false;
+        }
+        match key {
+            Key::Named(NamedKey::Escape) => {
+                self.close_path_ask();
+                true
+            }
+            // A held Enter is one Enter: its repeats must not pass for
+            // the second Enter that replaces a file.
+            Key::Named(NamedKey::Enter) => {
+                if !repeat {
+                    self.path_enter();
+                }
+                true
+            }
+            Key::Named(NamedKey::Tab) => true,
+            Key::Character(s) if ctrl && s.eq_ignore_ascii_case("v") => {
+                if self.clipboard.is_none() {
+                    self.clipboard = arboard::Clipboard::new()
+                        .map_err(|err| eprintln!("oryx: no clipboard: {err}"))
+                        .ok();
+                }
+                let text = self.clipboard.as_mut().and_then(|c| c.get_text().ok());
+                let state = self.path_ask.as_mut().expect("path field open");
+                if let Some(text) = text
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|t| pathfield::accepts(t))
+                {
+                    state.field.insert(text);
+                    self.request_redraw();
+                }
+                true
+            }
+            Key::Character(s)
+                if ctrl
+                    && (s.eq_ignore_ascii_case("c") || s.eq_ignore_ascii_case("x"))
+                    && !shift =>
+            {
+                let state = self.path_ask.as_mut().expect("path field open");
+                let text = state.field.selected_text().to_string();
+                if !text.is_empty() {
+                    if s.eq_ignore_ascii_case("x") {
+                        state.field.delete_selection();
+                    }
+                    self.set_clipboard(text);
+                    self.request_redraw();
+                }
+                true
+            }
+            key => {
+                let state = self.path_ask.as_mut().expect("path field open");
+                match state.field.key(key, ctrl, shift) {
+                    Edit::Ignored => false,
+                    Edit::Handled | Edit::Changed => {
+                        self.request_redraw();
+                        true
+                    }
+                }
+            }
+        }
+    }
+
+    /// Enter on the path field: the flow that asked goes on with the
+    /// path. An existing file is named once and replaced on the next
+    /// Enter; a path that leads nowhere for an open, or a write that
+    /// fails, gets the flow's notice and the field stays open.
+    fn path_enter(&mut self) {
+        let Some(state) = self.path_ask.as_mut() else {
+            return;
+        };
+        let ask = state.ask;
+        // A folder at the path is no file to replace: the write fails
+        // with its own notice, and an open is refused below.
+        let exists = state.path().is_some_and(|path| path.is_file());
+        match state.enter(exists) {
+            pathfield::Verdict::Nothing => {}
+            pathfield::Verdict::Exists(path) => {
+                let name = path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                self.show_notice(&format!("{name} exists. Press Enter again to replace it"));
+            }
+            pathfield::Verdict::Go(path) => match ask {
+                Ask::Open => {
+                    if path.is_dir() {
+                        self.show_notice("This path is a folder: add the file's name");
+                        return;
+                    }
+                    if !path.exists() {
+                        self.show_notice("Nothing is at this path");
+                        return;
+                    }
+                    if load::not_a_file(&path) {
+                        self.show_notice("This path is not a file");
+                        return;
+                    }
+                    self.close_path_ask();
+                    self.open_chosen(path);
+                }
+                Ask::SaveAs => {
+                    if self.save_as_to(path) {
+                        self.close_path_ask();
+                    }
+                }
+                Ask::New => {
+                    if self.create_new_file(path) {
+                        self.close_path_ask();
+                    }
+                }
+                Ask::Export => {
+                    let settings = self.pending_export.take();
+                    self.close_path_ask();
+                    if let Some(settings) = settings {
+                        self.export_to(settings, path);
+                    }
+                }
+            },
+        }
     }
 
     /// A press on the go to line field puts its caret under the
@@ -5027,10 +5575,24 @@ impl App {
         edits: Vec<(std::ops::Range<usize>, String)>,
     ) -> Option<usize> {
         let count = edits.len();
-        let (region, text) = splice::combine(&self.document.source, &edits)?;
+        let source = self.document.source.clone();
+        let (range, text) = splice::combine(&source, &edits)?;
         self.selection = None;
-        let after = region.start + text.len();
-        self.type_edit(region, &text, Kind::Structural);
+        let after = range.start + text.len();
+        let caret_before = self.caret.map_or(range.start, |c| c.offset);
+        // Each match is an edit of its own for the ledger and the
+        // history, so the lines between the matches keep their bytes.
+        let step = Replay {
+            range,
+            text,
+            pieces: edits,
+        };
+        if self.apply_edit(&step) {
+            if let Some(hist) = self.undo.as_mut() {
+                hist.record_each(&source, &step.pieces, (caret_before, after), Instant::now());
+            }
+            self.seat_caret_after_edit(after);
+        }
         if let Some(state) = self.search.as_mut() {
             state.seek = Some(after);
             state.doc_intent = true;
@@ -5047,8 +5609,9 @@ impl App {
         }
     }
 
-    /// Replaces every match in one region splice, one undo unit and one
-    /// relayout, and reports the count in the corner notice.
+    /// Replaces every match, each an edit of its own for the ledger, in
+    /// one undo unit and one relayout, and reports the count in the
+    /// corner notice.
     fn replace_all(&mut self) {
         if let Some(edits) = self.replacement_edits(true) {
             if let Some(count) = self.apply_replacements(edits) {
@@ -5395,7 +5958,7 @@ impl App {
     /// it, and while the search bar is open, so two sets of matches
     /// never tint the same text. Its rectangles are rebuilt when the
     /// layout moved under them or the view scrolled past their window.
-    fn sync_occurrences(&mut self) {
+    fn sync_occurrences(&mut self, partial_window: bool) {
         let Some(found) = self.occurrences.as_ref() else {
             return;
         };
@@ -5406,8 +5969,8 @@ impl App {
         }
         let vh = self.viewport_h();
         let scroll = self.scroll_y;
-        let moved = found.stale;
-        if !moved && (scroll - found.rects_scroll).abs() <= vh {
+        let (due, moved) = found.rects_due(scroll, vh, partial_window);
+        if !due {
             return;
         }
         let (lo, hi) = (scroll - 2.0 * vh, scroll + 3.0 * vh);
@@ -5420,6 +5983,7 @@ impl App {
             .collect();
         found.rects_scroll = scroll;
         found.stale = false;
+        found.partial = partial_window;
         // A band painted before the layout moved holds the old places.
         // A scroll past the window needs no repaint of its own: the band
         // covers the same five views the rectangles did.
@@ -5594,13 +6158,15 @@ impl App {
         }
     }
 
-    /// Extends the selection from the anchor to the cursor during a drag.
+    /// Extends the selection from the anchor to the cursor during a
+    /// drag. The end stays within the view: a pointer held past an edge
+    /// places it on the edge row, where the edge scroll brings the text.
     fn extend_selection(&mut self) {
         let Some(start) = self.sel_anchor else {
             return;
         };
         let x = self.cursor.x as f32 - self.inset();
-        let y = self.cursor.y as f32 + self.scroll_y;
+        let y = scroll::edge_clamp(self.cursor.y as f32, self.viewport_h()) + self.scroll_y;
         let Some(lay) = self.layout.as_ref() else {
             return;
         };
@@ -5726,13 +6292,14 @@ impl App {
             );
             let result = overlay.click(x, y);
             self.overlay_result(result);
-        } else if self.search_bar_press() || self.goto_bar_press() {
+        } else if self.search_bar_press() || self.goto_bar_press() || self.path_bar_press() {
         } else {
             // A click anywhere off the bar closes it, the panels' own
             // outside-click manner; the click still acts on what it hit,
             // and the document owns every key again.
             self.close_search();
             self.close_goto();
+            self.close_path_ask();
             if self.sidebar_edge_press() || self.sidebar_search_field_press() {
             } else if (self.cursor.x as f32) < self.inset() && self.sidebar.is_some() {
                 let (x, y) = self.ui_cursor();
@@ -5768,6 +6335,7 @@ impl App {
                 }
             }
         }
+        self.wake_field_caret();
     }
 
     /// An IME event: the composition itself shows in the system's own
@@ -6003,14 +6571,34 @@ impl App {
         wake.by(now + FLING_TICK);
     }
 
+    /// Advances the edge scroll of a selection drag held at or past the
+    /// view's edge, and keeps the loop waking while it runs: at each tick
+    /// the view steps toward the edge and the selection's end follows
+    /// onto the edge row. A pass between two ticks, the frame's own,
+    /// arms the wake and steps nothing. The drag's end stops it.
+    fn step_edge_scroll(&mut self, wake: &mut Wake) {
+        if !self.selecting() {
+            self.edge_scroll.stop();
+            return;
+        }
+        let now = Instant::now();
+        if let Some(step) = self.edge_scroll.tick(now, self.row_h(), self.viewport_h()) {
+            self.scroll_by(step);
+            self.extend_selection();
+        }
+        if let Some(due) = self.edge_scroll.due() {
+            wake.by(due);
+        }
+    }
+
     /// Hands pending highlight work to the worker. An empty list still
     /// bumps the generation, so arrivals from the previous document are
     /// dropped at the next drain. Every start here sweeps blocks from
     /// their first line, so the seam table rebuilds from its arrivals.
     fn start_highlight(&mut self, pending: Vec<PendingBlock>) {
         self.seams.clear();
-        self.burst_end = 0;
-        self.resumed = false;
+        self.key_lines = 0..0;
+        self.caret_seam_for = None;
         self.spec_band = None;
         self.guessed.clear();
         let waker = self.waker.clone();
@@ -6023,11 +6611,64 @@ impl App {
     /// generation recorded. Stale arrivals drop at the drain, so the
     /// table only ever learns from the live generation.
     fn cancel_highlight(&mut self) {
-        self.resumed = false;
         self.spec_band = None;
+        self.caret_seam_for = None;
         self.guessed.clear();
         let waker = self.waker.clone();
         self.highlighter.start(Vec::new(), move || waker());
+    }
+
+    /// Asks the worker for the state before the caret's line when no
+    /// trusted seam stands within the walk's reach above it, so that
+    /// the first key on a line far from a seam is colored in its frame
+    /// as any other (Task 327, rule 6). One ask is in flight; the next
+    /// is made when it lands, for the caret's line of that moment, so a
+    /// held arrow key starts one walk at a time and not one per line.
+    /// The job carries the window of lines it reads, not the block's
+    /// whole table. On the one block of a code file or of the source
+    /// view, in the editor.
+    fn ask_caret_seam(&mut self) {
+        if self.mode != edit::Mode::Edit || self.caret_seam_for.is_some() {
+            return;
+        }
+        let Some(caret) = self.caret else {
+            return;
+        };
+        let [block] = &self.document.blocks[..] else {
+            return;
+        };
+        let BlockKind::CodeBlock {
+            language,
+            lines,
+            exact,
+            ..
+        } = &block.kind
+        else {
+            return;
+        };
+        let Some(line) = lines.line_at(caret.offset) else {
+            return;
+        };
+        if language.is_none() {
+            return;
+        }
+        let empty = Table::default();
+        let table = self.seams.get(&0).unwrap_or(&empty);
+        let Some((start_line, seam)) = table.caret_ask(*exact, line, CARET_SEAM_REACH) else {
+            return;
+        };
+        self.caret_seam_for = Some(line);
+        let job = highlight::SeamJob {
+            block: 0,
+            language: language.clone(),
+            source: Arc::clone(&self.document.source),
+            lines: lines.window(start_line..line),
+            start_line,
+            seam,
+            line,
+        };
+        let waker = self.waker.clone();
+        self.highlighter.seam_at(job, move || waker());
     }
 
     /// Colors the visible band ahead of the exact sweep when the view
@@ -6049,17 +6690,13 @@ impl App {
             &self.document,
             self.scroll_y - view_h..self.scroll_y + 2.0 * view_h,
         );
-        // A resumed sweep whose last fold still saw the worker running
-        // leaves the flag set: it is read here, so it is cleared here.
-        if self.resumed && !self.highlighter.is_running() {
-            self.resumed = false;
-        }
         let Some((block, band)) = speculation_target(
             &self.document,
             &visible,
             self.spec_band.is_some(),
             &self.guessed,
-            self.rehighlight_at.is_some() || self.resumed,
+            self.rehighlight_at.is_some(),
+            &self.seams,
         ) else {
             return;
         };
@@ -6234,26 +6871,28 @@ impl App {
             return;
         }
         for arrival in &arrivals {
-            load::fold(&mut self.document, arrival);
-            let line = arrival.start_line + arrival.spans.len();
-            // The exact sweep's seams feed the table a later sweep
-            // resumes from; speculative arrivals never do. A landed
-            // guess is remembered instead, so it is not asked again.
-            match (&arrival.seam, arrival.speculative) {
-                (Some(seam), false) => {
-                    let table = self.seams.entry(arrival.block).or_default();
-                    highlight::record_seam(table, line, seam);
-                }
-                (_, true) => {
-                    // The guess in flight landed: the next cold block
-                    // may be asked.
-                    self.spec_band = None;
-                    note_guess(
-                        self.guessed.entry(arrival.block).or_default(),
-                        arrival.start_line..line,
-                    );
-                }
-                (None, false) => {}
+            // The table folds the arrival: a chunk's rows and seams, a
+            // caret seam (a state and no spans), or a guess's rows. The
+            // caret ask that landed is done, whatever the table made of
+            // it, and the next may be made.
+            if arrival.spans.is_empty()
+                && !arrival.speculative
+                && self.caret_seam_for == Some(arrival.start_line)
+            {
+                self.caret_seam_for = None;
+            }
+            self.seams
+                .entry(arrival.block)
+                .or_default()
+                .fold(&mut self.document, arrival);
+            if arrival.speculative {
+                // The guess in flight landed: the next cold block may be
+                // asked, and this band is not asked again.
+                self.spec_band = None;
+                note_guess(
+                    self.guessed.entry(arrival.block).or_default(),
+                    arrival.start_line..arrival.start_line + arrival.spans.len(),
+                );
             }
         }
         if let Some((anchor, ends)) = carried {
@@ -6267,23 +6906,19 @@ impl App {
                 .iter()
                 .map(|a| (a.block, a.start_line..a.start_line + a.spans.len())),
         );
-        // The burst's end is behind the frontier once the exact sweep
-        // has colored the lines up to it; a resumed sweep that ended
-        // lets the guesses in again.
-        let frontier = self.document.blocks.first().map_or(0, |b| match &b.kind {
-            BlockKind::CodeBlock { exact, .. } => *exact,
-            _ => 0,
-        });
-        if frontier >= self.burst_end {
-            self.burst_end = 0;
-        }
-        if !self.highlighter.is_running() {
-            self.resumed = false;
-        }
         // Recolors land in waves: the model folds immediately, but the
         // run vector rebuilds at most once per wave, so a trickling
-        // wash-in pays a handful of ranged rebuilds, not hundreds.
-        if self.last_recolor.elapsed() >= RECOLOR_WAVE || !self.highlighter.is_running() {
+        // wash-in pays a handful of ranged rebuilds, not hundreds. The
+        // first chunk of a resumed sweep lands at once, when it reaches
+        // the end of the key's lines: the lines below a key wait one
+        // chunk, not a wave, and a caret seam landing first does not
+        // spend the flush.
+        let due = self.flush_first && first_flush_due(&arrivals, &self.key_lines);
+        let running = self.highlighter.is_running();
+        if due || !running || self.last_recolor.elapsed() >= RECOLOR_WAVE {
+            if due || !running {
+                self.flush_first = false;
+            }
             self.flush_recolor();
         }
     }
@@ -6339,6 +6974,7 @@ impl App {
             self.pre_browse = Some(self.theme.clone());
             self.overlay = Some(Box::new(ThemeBrowser::new(
                 theme_dirs(),
+                theme::user_dir(),
                 &self.config.theme,
             )));
             self.request_redraw();
@@ -6700,14 +7336,37 @@ impl App {
     /// or unplaced one reveals and lands through the pending target.
     fn jump_to_heading(&mut self, block: usize) {
         // While the source is on screen the outline still describes the
-        // page parked behind it, so the entry resolves against that
-        // model and the caret lands on the heading's own line.
-        if self.edit_park.is_some() {
-            let offset = self
-                .edit_park
-                .as_ref()
-                .and_then(|parked| entry_offset(&parked.document, block));
-            if let Some(offset) = offset {
+        // page parked behind it: the entry resolves against that model,
+        // and the edits since the park place its offset in the current
+        // text. A heading whose own region was replaced is not placed by
+        // them: the page is rebuilt from the current text, as a save
+        // does, and the heading found again on it by its anchor, else
+        // the region's start. The clamp holds the caret inside the text
+        // and on a character. The help page keeps the park behind its
+        // stash and has an outline of its own: its entries resolve
+        // against the page on screen, below.
+        if self.edit_park.is_some() && self.help_stash.is_none() {
+            let placed = self.edit_park.as_ref().and_then(|parked| {
+                entry_offset(&parked.document, block).map(|offset| parked.edits.place_of(offset))
+            });
+            let offset = match placed {
+                Some(Placed::Exact(at)) => Some(at),
+                Some(Placed::Replaced(start)) => {
+                    let anchor = self
+                        .edit_park
+                        .as_ref()
+                        .and_then(|parked| heading_anchor(&parked.document, block));
+                    self.refresh_parked_page();
+                    let found = anchor.and_then(|anchor| {
+                        self.edit_park
+                            .as_ref()
+                            .and_then(|parked| heading_by_anchor(&parked.document, &anchor))
+                    });
+                    Some(found.unwrap_or(start))
+                }
+                None => None,
+            };
+            if let Some(offset) = offset.map(|at| caret::clamp(&self.document, at)) {
                 self.push_jump();
                 self.caret = Some(Caret::at(offset));
                 self.seat_editor_on(Place::top(offset));
@@ -7394,6 +8053,9 @@ impl App {
     /// message instead and the app stays up. Dialog opens re-root the
     /// sidebar; sidebar clicks keep the tree in place.
     fn open_file(&mut self, path: &Path, reroot: bool) {
+        // A path asked for the outgoing document would name the incoming
+        // one: the field goes with the swap, as the export does.
+        self.close_path_ask();
         // An in-flight export steps against the document it was built
         // for; it cannot survive the swap. Its progress overlay dies
         // with it, since nothing would ever advance it again.
@@ -7424,49 +8086,42 @@ impl App {
         self.undo = None;
         self.rehighlight_at = None;
         self.notice = None;
-        let path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+        let path = load::canonical(path);
         let landing = self.history_at_open(step, here, &path);
         // The note left for another file is done with; reopened, it is
         // the fresh note `open_note` just wrote.
         if self.on_note() && self.note_file.as_deref() != Some(path.as_path()) {
             self.remove_note();
         }
-        let loaded = load::open(&path, Some(Instant::now() + load::OPEN_BUDGET));
+        // A missing name is a new file at the launch and at the reload
+        // of the new file already open; anywhere else the file is gone.
+        let budget = Some(Instant::now() + load::OPEN_BUDGET);
+        let still_new = self.new_file && self.path.as_deref() == Some(path.as_path());
+        let loaded = if still_new {
+            load::open(&path, budget)
+        } else {
+            load::open_existing(&path, budget)
+        };
         let opened = loaded.is_ok();
         self.open_failed = !opened;
-        let mut book_job = None;
-        self.book_toc = Vec::new();
-        match loaded {
-            Ok(o) => {
-                self.document = o.document;
-                self.lossy = o.lossy;
-                self.crlf = o.crlf;
-                self.cr = o.cr;
-                self.bom = o.bom;
-                book_job = o.book;
-                self.book_toc = o.toc;
-                self.start_highlight(o.pending);
-                if o.streamed && book_job.is_none() {
-                    self.start_parse();
-                } else {
-                    // A book's worker starts through `start_book` below,
-                    // once the fresh media cache exists for its sink.
-                    self.parser.cancel();
-                    self.parse_pending = false;
-                }
-            }
-            Err(err) => {
-                self.document = load::message(&err.to_string());
-                // The message document is not the file's bytes; branding
-                // it lossy keeps the editing door shut on it.
-                self.lossy = true;
-                self.crlf = Vec::new();
-                self.cr = false;
-                self.bom = false;
-                self.start_highlight(Vec::new());
-                self.parser.cancel();
-                self.parse_pending = false;
-            }
+        // A refused file is a page that says why, in the file's place.
+        let o = loaded.unwrap_or_else(|err| load::refused(&err));
+        self.document = o.document;
+        self.lossy = o.lossy;
+        self.crlf = o.crlf;
+        self.cr = o.cr;
+        self.bom = o.bom;
+        let book_job = o.book;
+        self.book_toc = o.toc;
+        self.start_highlight(o.pending);
+        if o.streamed && book_job.is_none() {
+            self.start_parse();
+        } else {
+            // A book's worker starts through `start_book` below, once
+            // the fresh media cache exists for its sink; a refused file
+            // has nothing to parse.
+            self.parser.cancel();
+            self.parse_pending = false;
         }
         self.outline = if self.book_toc.is_empty() {
             OutlineTree::build(&self.document)
@@ -7698,10 +8353,6 @@ impl App {
 
     /// Asks where the file goes, then starts the pass that writes it.
     fn start_export(&mut self, settings: ExportSettings) {
-        // The export steps against the document it is built for; a
-        // prefix would write a truncated file.
-        self.finish_parse();
-        let (theme, fell_back) = export::resolve_theme(&theme_dirs(), &settings.theme, &self.theme);
         let stem = self
             .path
             .as_ref()
@@ -7714,14 +8365,30 @@ impl App {
             self.remembered_dir(),
             config::home_dir(),
         ]);
-        let target = rfd::FileDialog::new()
-            .set_file_name(format!("{stem}.pdf"))
-            .set_directory(dialog_start(start))
-            .add_filter("PDF", &["pdf"])
-            .save_file();
-        let Some(target) = target else {
-            return;
+        let folder = dialog_start(start);
+        let name = format!("{stem}.pdf");
+        let dialog = rfd::FileDialog::new()
+            .set_file_name(&name)
+            .set_directory(&folder)
+            .add_filter("PDF", &["pdf"]);
+        let target = match dialog::save_file(dialog) {
+            Answer::Path(target) => target,
+            Answer::Cancel => return,
+            Answer::NoDialog(why) => {
+                self.pending_export = Some(settings);
+                self.open_path_ask(Ask::Export, Some(folder), Some(&name), &why);
+                return;
+            }
         };
+        self.export_to(settings, target);
+    }
+
+    /// The pass that writes the PDF at `target`, its progress shown.
+    fn export_to(&mut self, settings: ExportSettings, target: PathBuf) {
+        // The export steps against the document it is built for; a
+        // prefix would write a truncated file.
+        self.finish_parse();
+        let (theme, fell_back) = export::resolve_theme(&theme_dirs(), &settings.theme, &self.theme);
         let pass = ExportPass::new(&settings, theme, target)
             .with_toc(self.book_toc.clone())
             .with_direction(self.cfg.direction);
@@ -7795,11 +8462,24 @@ impl App {
             self.remembered_dir(),
             config::home_dir(),
         ]);
-        dialog = dialog.set_directory(dialog_start(start));
-        if let Some(path) = dialog.pick_file() {
-            if self.guard_unsaved(confirm::Pending::Open(path.clone(), true)) {
-                self.open_file(&path, true);
-            }
+        let folder = dialog_start(start);
+        dialog = dialog.set_directory(&folder);
+        match dialog::pick_file(dialog) {
+            Answer::Path(path) => self.open_chosen(path),
+            Answer::Cancel => {}
+            Answer::NoDialog(why) => self.open_path_ask(Ask::Open, Some(folder), None, &why),
+        }
+    }
+
+    /// The file the open dialog or the path field named, opened with
+    /// the sidebar on its folder once any unsaved edits are settled.
+    fn open_chosen(&mut self, path: PathBuf) {
+        if load::not_a_file(&path) {
+            self.show_notice("This path is not a file");
+            return;
+        }
+        if self.guard_unsaved(confirm::Pending::Open(path.clone(), true)) {
+            self.open_file(&path, true);
         }
     }
 
@@ -7824,6 +8504,9 @@ impl App {
     /// document is stashed whole, edits, undo and layout included, and
     /// nothing touches the disk in either direction.
     fn toggle_help(&mut self) {
+        // The help page is another document under the field, which would
+        // save or export it under the file's name.
+        self.close_path_ask();
         if self.help_stash.is_some() {
             self.help_return();
             return;
@@ -7836,11 +8519,10 @@ impl App {
             self.parser.cancel();
             self.parse_pending = false;
         }
-        // The document's seam table and the burst it still owes a
-        // re-coloring for go with it, so that the return resumes from
-        // them instead of sweeping the file again from line 0.
+        // The document's seam tables go with it, so that the return
+        // resumes from them instead of sweeping the file again from
+        // line 0.
         let seams = std::mem::take(&mut self.seams);
-        let burst_end = self.burst_end;
         self.start_highlight(Vec::new());
         self.rehighlight_at = None;
         self.close_search();
@@ -7869,23 +8551,28 @@ impl App {
             media: std::mem::replace(&mut self.media, MediaCache::new(PathBuf::from("."))),
             book_toc: std::mem::take(&mut self.book_toc),
             disk_seen: self.disk_seen.take(),
+            new_file: std::mem::take(&mut self.new_file),
             selection: self.selection.take(),
             cfg: self.cfg.clone(),
             theme: self.theme.clone(),
             reopen,
             seams,
-            burst_end,
         }));
-        self.document = markdown_help();
-        // The page's code blocks get the exact sweep a file gets at
-        // open. Left cold, they are colored by the guess of the band in
-        // view alone, and two of them near the view keep the guess
-        // running without end (issue #9).
+        self.show_help_document(markdown_help(), "Oryx quick reference");
+    }
+
+    /// A page of the help on the screen, the quick reference or the math
+    /// page, the document set aside kept in the stash. The page's code
+    /// blocks get the exact sweep a file gets at open. Left cold, they
+    /// are colored by the guess of the band in view alone, and two of
+    /// them near the view keep the guess running without end (issue #9).
+    fn show_help_document(&mut self, document: Document, title: &str) {
+        self.document = document;
         self.start_highlight(load::pending(&self.document));
         self.outline = OutlineTree::build(&self.document);
         self.cfg.justify = justify_pref(&self.config, &self.document);
-        // The help page opens in automatic direction. The direction of
-        // the document set aside is its own: the stash keeps it, and
+        // The help opens in automatic direction. The direction of the
+        // document set aside is its own: the stash keeps it, and
         // `help_return` gives it back.
         self.cfg.direction = DirectionMode::Auto;
         self.scroll_y = 0.0;
@@ -7897,9 +8584,30 @@ impl App {
         self.pending_recolor.clear();
         self.bottom_hold.clear();
         if let Some(gfx) = self.gfx.as_ref() {
-            gfx.window.set_title("Oryx quick reference");
+            gfx.window.set_title(title);
         }
         self.request_redraw();
+    }
+
+    /// From one page of the help to the other, on a `help:` link: the
+    /// page shown goes with its layout, its seams, its selection, its
+    /// search and its places. The stash is not touched, so the return
+    /// is the same from either page. Outside the help the link does
+    /// nothing.
+    fn swap_help_page(&mut self, document: Document, title: &str) {
+        if self.help_stash.is_none() {
+            return;
+        }
+        self.start_highlight(Vec::new());
+        self.rehighlight_at = None;
+        self.seams.clear();
+        self.close_search();
+        self.sel_anchor = None;
+        self.selection = None;
+        std::mem::take(&mut self.history);
+        self.layout = None;
+        self.pass = None;
+        self.show_help_document(document, title);
     }
 
     /// Back from the help page: the stashed document returns as it
@@ -7937,6 +8645,7 @@ impl App {
         self.media = stash.media;
         self.book_toc = stash.book_toc;
         self.disk_seen = stash.disk_seen;
+        self.new_file = stash.new_file;
         // The document takes its direction and its justification back
         // before its kept layout is weighed against the settings of the
         // moment.
@@ -7975,20 +8684,17 @@ impl App {
         self.pending_band_for = None;
         self.close_search();
         // Recolors still owed name the help page's blocks, not this
-        // document's. Its seam table comes back with it, and the blocks
-        // still to color resume from it: a key after the help page
-        // re-colors from the edit, not the file from line 0.
+        // document's. Its seam tables come back with it, and the blocks
+        // still to color resume from them: a key after the help page
+        // re-colors from the edit, not the file from line 0. The band in
+        // view is guessed again while no seam stands past the frontier,
+        // as a first coloring leaves it; a table a sweep could converge
+        // on holds the guess (`speculation_target`).
         self.pending_recolor.clear();
         self.seams = stash.seams;
-        self.burst_end = stash.burst_end;
         self.spec_band = None;
         self.guessed.clear();
-        let pending = load::pending_from(&self.document, &self.seams, self.burst_end);
-        // A sweep resumed from the table converges against it, so no
-        // guess is asked while it runs, as after the timer's firing: a
-        // guess landing first would be vouched for by the converged
-        // stop.
-        self.resumed = !pending.is_empty();
+        let pending = load::pending_from(&self.document, &self.seams, &[]);
         let waker = self.waker.clone();
         self.highlighter.start(pending, move || waker());
         if self.mode == edit::Mode::Edit {
@@ -8280,8 +8986,9 @@ impl App {
                     config::save(&self.config);
                 }
             }
+            OverlayResult::Apply(Action::Notice(text)) => self.show_notice(&text),
             OverlayResult::Apply(Action::EditTheme(path)) => {
-                if let Some(editor) = ThemeEditor::new(&path) {
+                if let Some(editor) = ThemeEditor::new(&path, theme::user_dir()) {
                     // Opened from the browser, the revert point is the
                     // confirmed theme, not a preview the arrows left live.
                     self.pre_edit = Some(match self.pre_browse.take() {
@@ -8529,6 +9236,10 @@ impl App {
             self.scroll_to(anchor);
         } else if target == help::NEXT_TIP_LINK {
             self.next_tip();
+        } else if target == help::MATH_LINK {
+            self.swap_help_page(markdown_math(), "Oryx math reference");
+        } else if target == help::QUICK_LINK {
+            self.swap_help_page(markdown_help(), "Oryx quick reference");
         } else if let Some(rest) = target.strip_prefix("book:") {
             // An internal book link: the whole model first, so a forward
             // reference resolves, then the anchor map answers.
@@ -8964,6 +9675,11 @@ impl App {
         self.check_disk();
         self.sync_ime();
         self.watch_count();
+        let owner = self.key_owner();
+        let live = self.follow_caret(owner);
+        // A field paints its caret on the blink's lit half while it has
+        // the keys; the owner says which of the bars and the dialog it is.
+        let field_lit = live == Some(CaretAt::Field) && self.blink_visible;
         let inset = self.inset() as u32;
         let Some(size) = self.gfx.as_ref().map(|g| g.window.inner_size()) else {
             return;
@@ -8999,9 +9715,10 @@ impl App {
         // The materialized window slides to the scroll position before
         // anything reads geometry: the full band when settled, only the
         // viewport under a live gesture.
+        let mut slid = false;
         if let Some(lay) = self.layout.as_mut() {
             self.scroll_y = scroll::clamp(self.scroll_y, lay.height, size.height as f32);
-            window_to(
+            slid = window_to(
                 &self.document,
                 &self.theme,
                 &mut self.fonts,
@@ -9036,9 +9753,9 @@ impl App {
             self.caret_snap = !self.settle_caret(size.height as f32);
         }
         // A search step that scrolled re-slides the window so this
-        // frame paints the landing, not a cold viewport; the match
-        // rects recompute over what just materialized.
-        if self.scroll_y != before_search {
+        // frame paints the landing, not a cold viewport.
+        let stepped = self.scroll_y != before_search;
+        if stepped {
             if let Some(lay) = self.layout.as_mut() {
                 window_to(
                     &self.document,
@@ -9054,15 +9771,19 @@ impl App {
                 );
                 lay.index_more();
             }
-            self.refresh_search_rects();
         }
+        // The match rects exist only for the blocks the layout holds when
+        // they are built, so they are rebuilt when the window slid (with
+        // the search open only the viewport is filled, and each slide
+        // brings blocks that had none), after a search step, and when the
+        // view left the band they were built over.
         let drifted = self.search.as_ref().is_some_and(|state| {
             !state.stale && (self.scroll_y - state.rects_scroll).abs() > self.viewport_h()
         });
-        if drifted {
+        if slid || stepped || drifted {
             self.refresh_search_rects();
         }
-        self.sync_occurrences();
+        self.sync_occurrences(interactive);
         // The page paints at one whole pixel per frame, read once here
         // by the direct paint, the band, its slice and the caret: a
         // keystroke's direct frame and the band frame after it would
@@ -9239,11 +9960,7 @@ impl App {
                 }
             }
         }
-        if caret_shown(
-            self.mode == edit::Mode::Edit,
-            self.blink_visible,
-            self.focused,
-        ) {
+        if live == Some(CaretAt::Text) && self.blink_visible {
             if let Some(c) = self.caret {
                 if let Some(b) = c.geometry(lay, &self.document, &mut self.fonts) {
                     // The IME's composition window follows the caret,
@@ -9324,6 +10041,7 @@ impl App {
                     &self.theme,
                     state,
                     size.width as f32 / self.scale,
+                    field_lit && owner == KeyOwner::Search,
                 );
                 painter.composite(&mut buffer, size.width);
                 *stale = painter.dirty();
@@ -9347,6 +10065,30 @@ impl App {
                     &self.theme,
                     state,
                     size.width as f32 / self.scale,
+                    field_lit && owner == KeyOwner::GoTo,
+                );
+                painter.composite(&mut buffer, size.width);
+                *stale = painter.dirty();
+            }
+        }
+        // The path field borrows the same canvas, for the same reason.
+        if let Some(state) = self.path_ask.as_mut() {
+            let fits = self
+                .search_canvas
+                .as_ref()
+                .is_some_and(|(p, _)| p.width() == size.width && p.height() == size.height);
+            if !fits {
+                self.search_canvas =
+                    tiny_skia::Pixmap::new(size.width, size.height).map(|pixmap| (pixmap, None));
+            }
+            if let Some((canvas, stale)) = self.search_canvas.as_mut() {
+                let mut painter = Painter::new(canvas, &mut self.fonts, stale.take(), self.scale);
+                pathfield::draw_bar(
+                    &mut painter,
+                    &self.theme,
+                    state,
+                    size.width as f32 / self.scale,
+                    field_lit && owner == KeyOwner::Path,
                 );
                 painter.composite(&mut buffer, size.width);
                 *stale = painter.dirty();
@@ -9474,7 +10216,11 @@ impl App {
             }
             if let Some((canvas, stale)) = self.overlay_canvas.as_mut() {
                 let mut painter = Painter::new(canvas, &mut self.fonts, stale.take(), self.scale);
-                overlay.draw(&mut painter, &self.theme);
+                overlay.draw(
+                    &mut painter,
+                    &self.theme,
+                    field_lit && matches!(owner, KeyOwner::Dialog { .. }),
+                );
                 painter.composite(&mut buffer, size.width);
                 *stale = painter.dirty();
             }
@@ -9538,7 +10284,12 @@ impl ApplicationHandler for App {
                 wake.by(at);
             }
         }
-        if self.mode == edit::Mode::Edit && self.caret.is_some() && self.focused {
+        let blinking = match self.caret_now() {
+            Some(CaretAt::Text) => self.caret.is_some(),
+            Some(CaretAt::Field) => true,
+            None => false,
+        };
+        if blinking {
             let now = Instant::now();
             if now >= self.blink_flip {
                 self.blink_visible = !self.blink_visible;
@@ -9598,7 +10349,9 @@ impl ApplicationHandler for App {
             }
         }
         self.maybe_speculate();
+        self.ask_caret_seam();
         self.step_fling(&mut wake);
+        self.step_edge_scroll(&mut wake);
         event_loop.set_control_flow(wake.control_flow());
     }
 
@@ -9803,16 +10556,21 @@ impl ApplicationHandler for App {
                 let ctrl = chord_key(self.modifiers);
                 let shift = self.modifiers.shift_key();
                 let alt = self.modifiers.alt_key();
-                let resolved = keymap::command(keymap::Press {
-                    typed: &logical_key,
-                    keycap: &keycap,
-                    code: physical_key,
-                    ctrl,
-                    shift,
-                    alt,
-                });
+                let resolved = keymap::command(
+                    keymap::Press {
+                        typed: &logical_key,
+                        keycap: &keycap,
+                        code: physical_key,
+                        ctrl,
+                        shift,
+                        alt,
+                    },
+                    self.key_owner(),
+                );
                 // A character typed with Alt held (Option on a Mac) is
-                // typing when no chord of the keymap claims the key.
+                // typing when no chord of the keymap claims the key. A
+                // command with no receiver in what has the keys claims
+                // nothing (`Command::live`).
                 let claimed = resolved.is_some();
                 let alt = alt
                     && !keymap::alt_typing(
@@ -9854,12 +10612,21 @@ impl ApplicationHandler for App {
                         let result = overlay.key(panel_key, ctrl, shift);
                         self.overlay_result(result);
                     }
+                    _ if self.path_key(key, ctrl, shift, alt, repeat) => {}
+                    // The path field has the keyboard, under the go to
+                    // line field's rule below.
+                    _ if self.path_ask.is_some() => {
+                        if let Some(cmd) = resolved {
+                            self.run_command(cmd, event_loop);
+                        }
+                    }
                     _ if self.goto_key(key, ctrl, shift, alt) => {}
                     // The go to line field has the keyboard, under the
-                    // search fields' own rule: what it did not claim
-                    // acts only when it is app-wide.
+                    // search field's own rule: what it did not claim
+                    // acts only when it is app-wide, which `resolved`
+                    // already holds to (`Command::live`).
                     _ if self.goto.is_some() => {
-                        if let Some(cmd) = resolved.filter(|cmd| cmd.live_under_a_field()) {
+                        if let Some(cmd) = resolved {
                             self.run_command(cmd, event_loop);
                         }
                     }
@@ -9868,11 +10635,12 @@ impl ApplicationHandler for App {
                     // keyboard next, the way the find bar does.
                     _ if self.sidebar_search_key(key, ctrl, shift, alt) => {}
                     // A search field has the keyboard: what the bar did
-                    // not claim acts only when it is app-wide. Nothing
-                    // reaches the editor's own keys or the document's
-                    // editing chords while a field is open.
+                    // not claim acts only when it is app-wide, which
+                    // `resolved` already holds to. Nothing reaches the
+                    // editor's own keys or the document's editing chords
+                    // while a field is open.
                     _ if self.search.is_some() => {
-                        if let Some(cmd) = resolved.filter(|cmd| cmd.live_under_a_field()) {
+                        if let Some(cmd) = resolved {
                             self.run_command(cmd, event_loop);
                         }
                     }
@@ -9922,6 +10690,7 @@ impl ApplicationHandler for App {
                     Some(cmd) => self.run_command(cmd, event_loop),
                     None => {}
                 }
+                self.wake_field_caret();
             }
             WindowEvent::MouseWheel { delta, .. } => {
                 self.fling = None;
@@ -10034,6 +10803,8 @@ impl ApplicationHandler for App {
                 } else if self.drag.is_some() {
                     self.drag_to(position.y as f32);
                 } else if self.selecting() {
+                    self.edge_scroll
+                        .moved(position.y as f32, self.viewport_h(), Instant::now());
                     self.extend_selection();
                 } else {
                     self.update_hover();
@@ -10204,7 +10975,14 @@ mod tests {
         let doc = two_cold_blocks();
         let visible = [(0, 0..1), (1, 0..1)];
         assert_eq!(
-            super::speculation_target(&doc, &visible, false, &Guessed::new(), false),
+            super::speculation_target(
+                &doc,
+                &visible,
+                false,
+                &Guessed::new(),
+                false,
+                &std::collections::HashMap::new()
+            ),
             Some((0, 0..1))
         );
     }
@@ -10216,7 +10994,14 @@ mod tests {
         // The first block's guess is out: the second waits for it, or
         // the second would drop the first before it lands.
         assert_eq!(
-            super::speculation_target(&doc, &visible, true, &Guessed::new(), false),
+            super::speculation_target(
+                &doc,
+                &visible,
+                true,
+                &Guessed::new(),
+                false,
+                &std::collections::HashMap::new()
+            ),
             None
         );
     }
@@ -10230,8 +11015,111 @@ mod tests {
         let doc = one_cold_block();
         let visible = [(0, 0..10)];
         assert_eq!(
-            super::speculation_target(&doc, &visible, false, &Guessed::new(), true),
+            super::speculation_target(
+                &doc,
+                &visible,
+                false,
+                &Guessed::new(),
+                true,
+                &std::collections::HashMap::new()
+            ),
             None
+        );
+    }
+
+    /// A guess is asked while no seam stands past the frontier, as a
+    /// first coloring leaves the table, after F1 and back as at an
+    /// open; a seam past the frontier, which a resumed sweep could
+    /// converge on and vouch for the guess's lines, holds it (claim 32
+    /// of the hunt of Task 328).
+    #[test]
+    fn the_guess_waits_only_while_a_seam_stands_past_the_frontier() {
+        use oryx::style::seams::Table;
+        let mut doc = one_cold_block();
+        if let super::BlockKind::CodeBlock { exact, .. } = &mut doc.blocks[0].kind {
+            *exact = 5;
+        }
+        let visible = [(0, 0..10)];
+        let (lines, language) = match &doc.blocks[0].kind {
+            super::BlockKind::CodeBlock {
+                lines, language, ..
+            } => (lines.clone(), language.clone()),
+            _ => unreachable!(),
+        };
+        let table_cut_at = |at: usize| {
+            let mut table = Table::default();
+            oryx::style::highlight::spans_chunked(
+                &doc.source,
+                &lines,
+                language.as_deref(),
+                1,
+                std::time::Duration::MAX,
+                None,
+                || true,
+                |c| {
+                    let end = c.start_line + c.spans.len();
+                    table.fold_chunk(c.start_line, end, &c.seam, &c.slow);
+                    end < at
+                },
+            );
+            table
+        };
+        let seams = std::collections::HashMap::from([(0, table_cut_at(5))]);
+        assert_eq!(
+            super::speculation_target(&doc, &visible, false, &Guessed::new(), false, &seams),
+            Some((0, 5..10)),
+            "a first coloring's table, nothing past the frontier: asked"
+        );
+        let seams = std::collections::HashMap::from([(0, table_cut_at(8))]);
+        assert_eq!(
+            super::speculation_target(&doc, &visible, false, &Guessed::new(), false, &seams),
+            None,
+            "a seam past the frontier: the sweep could converge on it"
+        );
+    }
+
+    /// The first chunk of a resumed sweep is flushed at once when it
+    /// reaches the end of the key's lines; a caret seam, a chunk above
+    /// the key from a walk that fell short, and a guess do not spend
+    /// the flush (claim 25 of the hunt of Task 328).
+    #[test]
+    fn the_first_flush_waits_for_the_chunk_that_reaches_the_key_s_lines() {
+        use super::first_flush_due;
+        use oryx::style::highlight::Arrival;
+        let arrival = |start: usize, n: usize, speculative: bool| Arrival {
+            block: 0,
+            start_line: start,
+            spans: vec![Vec::new(); n],
+            seam: None,
+            converged: false,
+            reach: 0,
+            speculative,
+            slow: Vec::new(),
+        };
+        let key = 600..601;
+        assert!(
+            !first_flush_due(&[arrival(600, 0, false)], &key),
+            "a caret seam"
+        );
+        assert!(
+            !first_flush_due(&[arrival(100, 400, false)], &key),
+            "a chunk above the key"
+        );
+        assert!(
+            !first_flush_due(&[arrival(500, 200, true)], &key),
+            "a guess"
+        );
+        assert!(
+            first_flush_due(&[arrival(500, 101, false)], &key),
+            "a chunk ending at the key's end"
+        );
+        assert!(
+            first_flush_due(&[arrival(100, 400, false), arrival(500, 200, false)], &key),
+            "the chunk that reaches it, with the ones above"
+        );
+        assert!(
+            first_flush_due(&[arrival(601, 50, false)], &key),
+            "a chunk from the key's end"
         );
     }
 
@@ -10261,7 +11149,14 @@ mod tests {
         let visible = [(0, 0..1), (1, 0..1)];
         let landed = landed(&[(0, 0..1)]);
         assert_eq!(
-            super::speculation_target(&doc, &visible, false, &landed, false),
+            super::speculation_target(
+                &doc,
+                &visible,
+                false,
+                &landed,
+                false,
+                &std::collections::HashMap::new()
+            ),
             Some((1, 0..1))
         );
     }
@@ -10274,7 +11169,14 @@ mod tests {
         // Both landed: nothing to ask. Issue #9 asked for the first
         // again, without end.
         assert_eq!(
-            super::speculation_target(&doc, &visible, false, &landed, false),
+            super::speculation_target(
+                &doc,
+                &visible,
+                false,
+                &landed,
+                false,
+                &std::collections::HashMap::new()
+            ),
             None
         );
     }
@@ -10286,17 +11188,38 @@ mod tests {
         let landed = landed(&[(0, 6..10)]);
         // A scroll back up shows lines the guess never colored.
         assert_eq!(
-            super::speculation_target(&doc, &[(0, 0..4)], false, &landed, false),
+            super::speculation_target(
+                &doc,
+                &[(0, 0..4)],
+                false,
+                &landed,
+                false,
+                &std::collections::HashMap::new()
+            ),
             Some((0, 0..4))
         );
         // A band inside the landed guess asks for nothing.
         assert_eq!(
-            super::speculation_target(&doc, &[(0, 7..10)], false, &landed, false),
+            super::speculation_target(
+                &doc,
+                &[(0, 7..10)],
+                false,
+                &landed,
+                false,
+                &std::collections::HashMap::new()
+            ),
             None
         );
         // A band the guess covers in part is asked whole.
         assert_eq!(
-            super::speculation_target(&doc, &[(0, 3..8)], false, &landed, false),
+            super::speculation_target(
+                &doc,
+                &[(0, 3..8)],
+                false,
+                &landed,
+                false,
+                &std::collections::HashMap::new()
+            ),
             Some((0, 3..8))
         );
     }
@@ -10331,7 +11254,14 @@ mod tests {
         }
         let visible = [(0, 0..1), (1, 0..1)];
         assert_eq!(
-            super::speculation_target(&doc, &visible, false, &Guessed::new(), false),
+            super::speculation_target(
+                &doc,
+                &visible,
+                false,
+                &Guessed::new(),
+                false,
+                &std::collections::HashMap::new()
+            ),
             None
         );
     }
@@ -11516,14 +12446,47 @@ mod tests {
         }
     }
 
-    /// The caret shows on the lit half of its blink in the editor, and
-    /// never while the window is in the background.
+    /// The live caret is where the next key lands: in the text field
+    /// that has the keys, or in the editor's text, and nowhere while the
+    /// window is in the background or the keys go to a list or a
+    /// question.
     #[test]
-    fn the_caret_hides_while_the_window_is_in_the_background() {
-        assert!(super::caret_shown(true, true, true));
-        assert!(!super::caret_shown(true, true, false), "no focus");
-        assert!(!super::caret_shown(true, false, true), "the dark half");
-        assert!(!super::caret_shown(false, true, true), "reading");
+    fn the_live_caret_is_where_the_keys_go() {
+        use super::{live_caret, CaretAt, KeyOwner};
+        let owners = [
+            (KeyOwner::Question, None),
+            (KeyOwner::Dialog { field: false }, None),
+            (KeyOwner::Dialog { field: true }, Some(CaretAt::Field)),
+            (KeyOwner::Path, Some(CaretAt::Field)),
+            (KeyOwner::GoTo, Some(CaretAt::Field)),
+            (KeyOwner::Search, Some(CaretAt::Field)),
+        ];
+        for editing in [true, false] {
+            for (owner, at) in owners {
+                assert_eq!(
+                    live_caret(owner, editing, true),
+                    at,
+                    "{owner:?}, editing {editing}"
+                );
+                assert_eq!(
+                    live_caret(owner, editing, false),
+                    None,
+                    "{owner:?}, editing {editing}, the window in the background"
+                );
+            }
+        }
+        assert_eq!(live_caret(KeyOwner::Text, true, true), Some(CaretAt::Text));
+        assert_eq!(
+            live_caret(KeyOwner::Text, true, false),
+            None,
+            "the editor in the background"
+        );
+        assert_eq!(live_caret(KeyOwner::Text, false, true), None, "reading");
+        assert_eq!(
+            live_caret(KeyOwner::Text, false, false),
+            None,
+            "reading in the background"
+        );
     }
 
     /// The disk check's verdict on the open file: a file missing once

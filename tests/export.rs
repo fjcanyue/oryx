@@ -1016,6 +1016,53 @@ fn an_equation_exports_typeset_and_extracts_its_characters() {
 }
 
 #[test]
+fn a_colored_formula_exports_with_its_color() {
+    // Task 353: `\color` reaches the PDF through the glyph's color, which
+    // `draw_math` groups by; the red run sets its own fill.
+    let doc = markdown::parse("Plain $a {\\color{red} b}$ after.\n");
+    let bytes = export_to_bytes(&doc, PageSize::A4);
+    let pdf = Pdf::load_mem(&bytes).expect("a reader parses the file");
+    let content: String = pdf
+        .page_iter()
+        .map(|id| String::from_utf8_lossy(&pdf.get_page_content(id)).into_owned())
+        .collect();
+    assert!(
+        content.contains("1 0 0 rg"),
+        "a red fill in the page's content, got {content:?}"
+    );
+}
+
+/// A table with a formula in a cell exports the formula's glyphs on its
+/// page (Task 355).
+#[test]
+fn a_table_with_a_formula_exports_its_glyphs() {
+    let doc = markdown::parse("| a | b |\n|---|---|\n| $\\frac{x}{y}$ | t |\n");
+    let (geometry, cfg) = geometry_and_cfg();
+    let mut fonts = FontStore::new();
+    let mut media = MediaCache::offline(PathBuf::from("tests/fixtures"));
+    let lay = layout(
+        &doc,
+        &Theme::default_dark(),
+        &mut fonts,
+        &mut media,
+        &cfg,
+        geometry.width,
+    );
+    let pages = paginate(&doc, &lay, &geometry);
+    assert_eq!(pages.len(), 1);
+    assert!(
+        !pages[0].math.is_empty(),
+        "the cell's glyphs reach the page"
+    );
+    assert!(pages[0]
+        .math
+        .iter()
+        .all(|g| g.y >= pages[0].top && g.y <= pages[0].bottom));
+    let bytes = export_to_bytes(&doc, PageSize::A4);
+    assert!(Pdf::load_mem(&bytes).is_ok());
+}
+
+#[test]
 fn every_display_equation_lands_whole_on_one_page() {
     let mut source = String::new();
     for i in 0..60 {
@@ -1298,5 +1345,179 @@ fn arabic_text_exports_in_the_arabic_face_and_extracts() {
     let text = pdf.extract_text(&[1]).expect("text extracts");
     for ch in "اعلم".chars() {
         assert!(text.contains(ch), "{ch:?} extracts, got {text:?}");
+    }
+}
+
+/// The pages of a markdown source laid out beside two tall pictures,
+/// `tall.png` (200 by 3000) and `wide.png` (1500 by 3000), and the
+/// geometry they were cut for.
+fn pages_with_tall_images(source: &str) -> (Vec<oryx::export::paginate::Page>, PageGeometry) {
+    let dir = std::env::temp_dir().join(format!("oryx-export-tall-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    for (name, width) in [("tall.png", 200), ("wide.png", 1500)] {
+        let path = dir.join(name);
+        if !path.exists() {
+            image::RgbaImage::from_pixel(width, 3000, image::Rgba([10, 20, 30, 255]))
+                .save(&path)
+                .unwrap();
+        }
+    }
+    let doc = markdown::parse(source);
+    let (geometry, cfg) = geometry_and_cfg();
+    let mut fonts = FontStore::new();
+    let mut media = MediaCache::offline(dir);
+    let lay = layout(
+        &doc,
+        &Theme::default_dark(),
+        &mut fonts,
+        &mut media,
+        &cfg,
+        geometry.width,
+    );
+    (paginate(&doc, &lay, &geometry), geometry)
+}
+
+/// Finding 4 of the read of Task 358: an image taller than the page is
+/// scaled to the page's height, and it stays where its paragraph places
+/// it: in the middle, at the right margin, or at the left.
+#[test]
+fn a_scaled_tall_image_stays_where_its_paragraph_places_it() {
+    let image_of = |source: &str| {
+        let (pages, geometry) = pages_with_tall_images(source);
+        let image = pages
+            .iter()
+            .flat_map(|p| p.images.iter())
+            .next()
+            .expect("the image on a page")
+            .clone();
+        assert!(
+            image.height <= geometry.content_height() + 0.5,
+            "{source}: scaled to the page"
+        );
+        (image, geometry)
+    };
+    for source in [
+        "Before.\n\n![t](tall.png)\n\nAfter.",
+        "Before.\n\n![w](wide.png)\n\nAfter.",
+        "Before.\n\n<p align=\"center\"><img src=\"tall.png\"></p>\n\nAfter.",
+    ] {
+        let (image, geometry) = image_of(source);
+        let middle = image.x + image.width / 2.0;
+        assert!(
+            (middle - geometry.width / 2.0).abs() < 1.0,
+            "{source}: the image's middle at {middle} on a page {} wide",
+            geometry.width
+        );
+    }
+    let (image, geometry) = image_of("Before.\n\n<img src=\"tall.png\" align=\"right\">\n\nAfter.");
+    assert!(
+        (image.x + image.width - (geometry.width - geometry.margin_x)).abs() < 1.0,
+        "placed right: the image ends at {} against the margin {}",
+        image.x + image.width,
+        geometry.width - geometry.margin_x
+    );
+    let (image, geometry) = image_of("Before.\n\n<img src=\"tall.png\" align=\"left\">\n\nAfter.");
+    assert!(
+        (image.x - geometry.margin_x).abs() < 1.0,
+        "placed left: the image starts at {}",
+        image.x
+    );
+    let (image, geometry) = image_of("Before.\n\n- ![t](tall.png)\n- second\n\nAfter.");
+    assert!(
+        image.x < geometry.width / 4.0,
+        "in a list item: the image starts at {}",
+        image.x
+    );
+}
+
+/// Found by the proof of Task 361: the export of a page with an image
+/// taller than the PDF page crashed, the streamed pagination reading an
+/// item past the last one. The pages of the streamed pass are the pages
+/// of the one-shot pass.
+#[test]
+fn a_tall_image_paginates_in_slices_as_in_one_shot() {
+    let source = "A line before the image.\n\n![tall](tall.png)\n\nA line after the image.";
+    let (whole, geometry) = pages_with_tall_images(source);
+    let dir = std::env::temp_dir().join(format!("oryx-export-tall-{}", std::process::id()));
+    let doc = markdown::parse(source);
+    let (_, cfg) = geometry_and_cfg();
+    for stride in [1, 2, 64] {
+        let mut fonts = FontStore::new();
+        let mut media = MediaCache::offline(dir.clone());
+        let theme = Theme::default_dark();
+        let (mut lay, mut pass) = layout_begin(&doc, &cfg, geometry.width);
+        let mut paginator = Paginator::new();
+        let mut pages = Vec::new();
+        let mut done = false;
+        while !done {
+            for _ in 0..stride {
+                done = layout_step(
+                    &doc, &theme, &mut fonts, &mut media, &cfg, &mut lay, &mut pass,
+                );
+                if done {
+                    break;
+                }
+            }
+            pages.extend(paginator.advance(&doc, &lay, &geometry, done));
+        }
+        assert_eq!(pages.len(), whole.len(), "stride {stride}: the page count");
+        for (a, b) in pages.iter().zip(&whole) {
+            assert_eq!(a.runs, b.runs, "stride {stride}: the runs of a page");
+            assert_eq!(
+                a.images.len(),
+                b.images.len(),
+                "stride {stride}: the images"
+            );
+        }
+    }
+}
+
+/// The export drains what it has paged from the front of the layout
+/// while the pass is still inside a long code block. The block's own
+/// marks into the layout move with the drain: a code block in a quote,
+/// after a page of text with marks, once ended the export in a panic.
+#[test]
+fn a_long_code_block_in_a_quote_exports() {
+    let mut source = String::new();
+    for i in 0..300 {
+        source.push_str(&format!(
+            "Paragraph {i} with `code {i}` and ==mark== here.\n\n"
+        ));
+    }
+    source.push_str("> A quote opens.\n>\n> ```rust\n");
+    for i in 0..6000 {
+        source.push_str(&format!("> let line_{i} = {i};\n"));
+    }
+    source.push_str("> ```\n>\n> The quote ends.\n\n<div align=\"center\">\n\n```\ncentered code\n```\n\n</div>\n\nAfter.\n");
+    let doc = markdown::parse(source.as_str());
+    let target = std::env::temp_dir().join(format!("oryx-export-quote-{}.pdf", std::process::id()));
+    let settings = ExportSettings {
+        body_size: 11.0,
+        code_size: 9.0,
+        page: PageSize::A4,
+        ..ExportSettings::default()
+    };
+    // Short slices, alone and with the app's pool of shaping workers,
+    // which places a code block's lines step by step: the drain then
+    // falls inside the block.
+    for workers in [0, 4] {
+        let mut fonts = FontStore::new();
+        let mut media = MediaCache::offline(PathBuf::from("tests/fixtures"));
+        let pool = (workers > 0)
+            .then(|| std::sync::Arc::new(oryx::layout::ShapePool::new(workers, &fonts.seed())));
+        let mut pass = ExportPass::new(&settings, Theme::default_dark(), target.clone());
+        while !pass.is_done() {
+            pass.step(
+                Instant::now() + Duration::from_millis(2),
+                &doc,
+                &mut fonts,
+                &mut media,
+                false,
+                pool.as_ref(),
+            );
+        }
+        let pages = pass.finish(&doc, &fonts).expect("the export lands");
+        std::fs::remove_file(&target).ok();
+        assert!(pages > 50, "{pages} pages");
     }
 }
